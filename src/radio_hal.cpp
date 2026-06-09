@@ -1,6 +1,7 @@
 #include "radio_hal.h"
 #include "board_config.h"
 #include <SPI.h>
+#include <math.h>   // lroundf
 
 // SX1262 max single-frame size. Stack buffer in poll() is sized to this.
 static const uint16_t RADIO_MAX_FRAME = 255;
@@ -10,6 +11,19 @@ static const uint16_t RADIO_MAX_FRAME = 255;
 // instance, which hangs on nRF52).
 static Module* make_lora_module() {
     return new Module(LORA_SPI_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
+}
+
+// The compile-time network defaults (board_config.h §"Network-wide PHY").
+RadioCfg radio_default_config() {
+    RadioCfg c;
+    c.freq_hz    = (uint32_t)lroundf(PHY_FREQ_MHZ * 1.0e6f);
+    c.bw_hz      = (uint32_t)lroundf(PHY_BW_KHZ * 1000.0f);
+    c.sf         = PHY_SF;
+    c.cr         = PHY_CODING_RATE;
+    c.power_dbm  = PHY_TX_POWER_DBM;
+    c.sync       = PHY_SYNC_WORD;
+    c.preamble   = PHY_PREAMBLE_SYMS;
+    return c;
 }
 
 // Static members.
@@ -34,9 +48,10 @@ void AGN_ISR_ATTR RadioHal::isr() {
     dio1_flag_ = true;
 }
 
-int16_t RadioHal::begin(RadioRxCallback on_rx) {
+int16_t RadioHal::begin(RadioRxCallback on_rx, const RadioCfg& cfg) {
     instance_ = this;
     on_rx_    = on_rx;
+    cfg_      = cfg;
 
 #if defined(LORA_POWER_EN)
     // Some modules (Pro Micro) gate the radio's supply on a GPIO — power it up and
@@ -53,27 +68,30 @@ int16_t RadioHal::begin(RadioRxCallback on_rx) {
     SPI.begin();
 
     // Range-check the configured TX power against the hardware ceiling.
-    int8_t power = PHY_TX_POWER_DBM;
+    int8_t power = cfg_.power_dbm;
     if (power > LORA_MAX_TX_POWER_DBM) power = LORA_MAX_TX_POWER_DBM;
+
+    const float freq_mhz = (float)cfg_.freq_hz / 1.0e6f;
+    const float bw_khz   = (float)cfg_.bw_hz / 1000.0f;
 
     // Apply the full network-wide PHY in one shot (Agent.md §3). All nodes share
     // these exact values or they can't hear each other.
     int16_t st = radio_.begin(
-        PHY_FREQ_MHZ,          // 904.375 MHz
-        PHY_BW_KHZ,            // 250 kHz
-        PHY_SF,                // SF11
-        PHY_CODING_RATE,       // 4/5
-        PHY_SYNC_WORD,         // 0x4D
+        freq_mhz,              // carrier (default 904.375 MHz)
+        bw_khz,                // bandwidth (default 250 kHz)
+        cfg_.sf,               // spreading factor (default SF11)
+        cfg_.cr,               // coding rate (default 4/5)
+        cfg_.sync,             // sync word (default 0x4D)
         power,                 // dBm
-        PHY_PREAMBLE_SYMS,     // 16 symbols
+        cfg_.preamble,         // preamble symbols (default 16)
         LORA_TCXO_VOLTAGE);    // board TCXO voltage on DIO3
 
     // Some modules drive the XOSC from a crystal, not a TCXO; if the configured
     // TCXO voltage makes the SPI command fail, retry in crystal mode (tcxo = 0).
     // (MeshCore does exactly this fallback.)
     if (st == RADIOLIB_ERR_SPI_CMD_FAILED || st == RADIOLIB_ERR_SPI_CMD_INVALID) {
-        st = radio_.begin(PHY_FREQ_MHZ, PHY_BW_KHZ, PHY_SF, PHY_CODING_RATE,
-                          PHY_SYNC_WORD, power, PHY_PREAMBLE_SYMS, 0.0f);
+        st = radio_.begin(freq_mhz, bw_khz, cfg_.sf, cfg_.cr,
+                          cfg_.sync, power, cfg_.preamble, 0.0f);
     }
     if (st != RADIOLIB_ERR_NONE) return st;
 
@@ -96,6 +114,30 @@ int16_t RadioHal::begin(RadioRxCallback on_rx) {
     // Wire DIO1 -> our ISR, then arm continuous receive.
     radio_.setDio1Action(RadioHal::isr);
     arm_rx();
+    return RADIOLIB_ERR_NONE;
+}
+
+// Re-apply PHY parameters to a running radio. Each setter is checked; on the first
+// failure we bail WITHOUT updating cfg_ (so config() still reflects what's actually
+// on the air) and the caller can report the error. On success the new values stick
+// and we drop back into RX. NOTE: changing freq/SF/BW takes the node off-air from
+// any peer still on the old PHY — a network-wide change must be coordinated (a
+// "retune"; see docs/remote-config.md).
+int16_t RadioHal::apply_config(const RadioCfg& c) {
+    int8_t power = c.power_dbm;
+    if (power > LORA_MAX_TX_POWER_DBM) power = LORA_MAX_TX_POWER_DBM;
+
+    int16_t st;
+    if ((st = radio_.setFrequency((float)c.freq_hz / 1.0e6f))      != RADIOLIB_ERR_NONE) return st;
+    if ((st = radio_.setBandwidth((float)c.bw_hz / 1000.0f))       != RADIOLIB_ERR_NONE) return st;
+    if ((st = radio_.setSpreadingFactor(c.sf))                     != RADIOLIB_ERR_NONE) return st;
+    if ((st = radio_.setCodingRate(c.cr))                          != RADIOLIB_ERR_NONE) return st;
+    if ((st = radio_.setSyncWord(c.sync))                          != RADIOLIB_ERR_NONE) return st;
+    if ((st = radio_.setOutputPower(power))                        != RADIOLIB_ERR_NONE) return st;
+    if ((st = radio_.setPreambleLength(c.preamble))               != RADIOLIB_ERR_NONE) return st;
+
+    cfg_ = c;
+    arm_rx();   // re-enter RX with the new PHY in force
     return RADIOLIB_ERR_NONE;
 }
 
