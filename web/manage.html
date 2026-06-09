@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>agnostic-LoRa-Net · node manager (BLE pairing)</title>
+<title>agnostic-LoRa-Net · node manager</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:760px;margin:1.5rem auto;padding:0 1rem;}
-  h1{font-size:1.25rem;}
+  h1{font-size:1.25rem;} h2{font-size:1.05rem;margin:.2rem 0 .6rem;}
   button{font-size:1rem;padding:.5rem 1rem;margin:.2rem .3rem .2rem 0;cursor:pointer;}
   .pinbox{background:#0a2540;color:#fff;border-radius:10px;padding:1rem 1.2rem;margin:.8rem 0;text-align:center;}
   .pin{font-family:ui-monospace,monospace;font-size:2.6rem;letter-spacing:.4rem;font-weight:bold;}
@@ -13,43 +13,137 @@
   .stat{display:inline-block;min-width:11rem;}
   #log{background:#111;color:#0f0;font-family:ui-monospace,monospace;font-size:.8rem;height:13rem;
        overflow:auto;padding:.5rem;white-space:pre-wrap;border-radius:6px;}
-  input{font-size:1rem;padding:.4rem;width:7rem;}
+  input,select{font-size:1rem;padding:.4rem;}
+  input{width:7rem;}
   .muted{color:#666;font-size:.9rem;}
+  .card{border:1px solid #d0d4da;border-radius:10px;padding:1rem 1.2rem;margin:1rem 0;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.7rem 1.2rem;margin:.4rem 0;}
+  .grid label{display:flex;flex-direction:column;font-size:.85rem;color:#333;gap:.25rem;}
+  .powerbox{background:#13233b;color:#fff;border-radius:10px;padding:.8rem 1.1rem;margin:.8rem 0;
+            display:flex;align-items:center;gap:1rem;flex-wrap:wrap;}
+  .powerbox input[type=range]{flex:1;min-width:12rem;}
+  .pwrval{font-family:ui-monospace,monospace;font-size:1.8rem;font-weight:bold;min-width:5.5rem;text-align:right;}
+  .warn{color:#a14400;background:#fff4e5;border-radius:6px;padding:.4rem .6rem;}
+  .applyrf{background:#0a2540;color:#fff;}
+  fieldset[disabled]{opacity:.5;}
 </style>
 </head>
 <body>
 <h1>agnostic-LoRa-Net — node manager</h1>
 <p class="muted">Connect to a node over <b>USB serial</b> (the node must be a COM port —
-if it's attached to WSL via usbipd, detach it first). Enable BLE on the nodes that need
-it, then pair your phone using the PIN shown below.</p>
+if it's attached to WSL via usbipd, detach it first).</p>
 
 <div>
   <button id="connect">Connect (USB)</button>
+  <button id="connectble">Connect (BLE)</button>
   <span id="status" class="bad">disconnected</span>
   <span class="stat" style="margin-left:1rem;">node: <b id="node">—</b></span>
 </div>
+<p class="muted">USB (Web Serial) configures any node, including BLE security. <b>BLE</b>
+(Web Bluetooth) works on an already-paired node with BLE enabled — the field / retune-rescue
+path. BLE can't change its own security, so enable/PIN changes still need USB.</p>
 
-<div class="pinbox">
-  <div>BLE pairing PIN</div>
-  <div class="pin" id="pin">— — — — — —</div>
-  <div class="muted" id="advstate" style="color:#bcd;">BLE: off</div>
+<!-- ───────────────────── BLE pairing ───────────────────── -->
+<div class="card">
+  <h2>BLE pairing</h2>
+  <p class="muted">Enable BLE on the nodes that need it, then pair your phone using the PIN.</p>
+  <div class="pinbox">
+    <div>BLE pairing PIN</div>
+    <div class="pin" id="pin">— — — — — —</div>
+    <div class="muted" id="advstate" style="color:#bcd;">BLE: off</div>
+  </div>
+  <fieldset id="blefs" disabled style="border:none;padding:0;margin:0;">
+    <button id="enable">① Enable BLE</button>
+    <button id="disable">Disable BLE</button>
+    <button id="newpin">② New random PIN</button>
+    <input id="setpin" placeholder="6 digits" maxlength="6" inputmode="numeric">
+    <button id="setbtn">Set PIN</button>
+  </fieldset>
+  <p class="muted">③ On your phone: pair with <b>AgnLoRa-…</b> and enter the PIN above.</p>
 </div>
 
-<div>
-  <button id="enable" disabled>① Enable BLE</button>
-  <button id="disable" disabled>Disable BLE</button>
-  <button id="newpin" disabled>② New random PIN</button>
-  <input id="setpin" placeholder="6 digits" maxlength="6" inputmode="numeric">
-  <button id="setbtn" disabled>Set PIN</button>
+<!-- ───────────────────── Radio (PHY) ───────────────────── -->
+<div class="card">
+  <h2>Radio (PHY)</h2>
+  <p class="muted">Defaults below are the node's <b>current</b> settings (read on connect).
+  All nodes must share frequency / bandwidth / SF / coding-rate / sync to hear each other.</p>
+  <p class="warn">⚠ Changing <b>frequency, bandwidth or SF</b> retunes this node — it drops
+  off-air from any node still on the old settings. Do a network-wide change deliberately.
+  <b>TX power</b> is safe to change on its own.</p>
+
+  <div class="powerbox">
+    <div>TX&nbsp;Power</div>
+    <input id="rf_pwr" type="range" min="-9" max="22" step="1" value="14" disabled>
+    <span class="pwrval"><span id="rf_pwr_val">14</span> dBm</span>
+  </div>
+
+  <fieldset id="rffs" disabled style="border:none;padding:0;margin:0;">
+    <div class="grid">
+      <label>Frequency (MHz)
+        <input id="rf_freq" type="number" step="0.001" min="137" max="1020"></label>
+      <label>Bandwidth (kHz)
+        <select id="rf_bw">
+          <option>7.81</option><option>10.42</option><option>15.63</option>
+          <option>20.83</option><option>31.25</option><option>41.67</option>
+          <option>62.5</option><option>125</option><option>250</option><option>500</option>
+        </select></label>
+      <label>Spreading factor
+        <select id="rf_sf">
+          <option>5</option><option>6</option><option>7</option><option>8</option>
+          <option>9</option><option>10</option><option>11</option><option>12</option>
+        </select></label>
+      <label>Coding rate
+        <select id="rf_cr">
+          <option value="5">4/5</option><option value="6">4/6</option>
+          <option value="7">4/7</option><option value="8">4/8</option>
+        </select></label>
+      <label>Sync word (hex)
+        <input id="rf_sync" maxlength="2" placeholder="4D" style="width:5rem;"></label>
+      <label>Preamble (symbols)
+        <input id="rf_pre" type="number" min="6" max="255"></label>
+    </div>
+    <button id="rf_apply" class="applyrf">Apply radio settings</button>
+    <button id="rf_reload">Reload from node</button>
+  </fieldset>
 </div>
-<p class="muted">③ On your phone: pair with <b>AgnLoRa-…</b> and enter the PIN above.</p>
 
 <div id="log"></div>
 
 <script>
 const $=id=>document.getElementById(id);
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight;};
-let port,writer;
+let port,writer,bleDev;
+let sendRaw=null;    // transport writer: async (string)=>void  (set by connect USB/BLE)
+let loadedRf=null;   // {freq_hz,bw_hz,sf,cr,power_dbm,sync,preamble} last read from node
+
+// Nordic UART Service (the node's BLE console/tunnel characteristic).
+const NUS    = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // client writes here
+const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // node notifies here
+
+// Shared line assembler for both transports.
+let rxbuf='';
+function feed(text){ rxbuf+=text; let i;
+  while((i=rxbuf.indexOf('\n'))>=0){ onLine(rxbuf.slice(0,i).replace(/\r$/,'')); rxbuf=rxbuf.slice(i+1); } }
+
+function markConnected(kind){
+  $('status').textContent='connected ('+kind+')'; $('status').className='ok';
+  $('blefs').disabled=false; $('rffs').disabled=false; $('rf_pwr').disabled=false;
+  log('connected over '+kind+' — reading…');
+  setTimeout(()=>send('ble'),500);       // current BLE state + PIN
+  setTimeout(()=>send('rf show'),900);    // current radio PHY -> prefill the form
+}
+
+function fillRf(r){
+  $('rf_freq').value = (r.freq_hz/1e6).toFixed(3).replace(/\.?0+$/,'');
+  // pick the bandwidth option whose kHz rounds to the node's bw_hz
+  for(const o of $('rf_bw').options){ if(Math.round(parseFloat(o.value)*1000)===r.bw_hz){ $('rf_bw').value=o.value; break; } }
+  $('rf_sf').value  = String(r.sf);
+  $('rf_cr').value  = String(r.cr);
+  $('rf_sync').value= r.sync.toString(16).toUpperCase().padStart(2,'0');
+  $('rf_pre').value = String(r.preamble);
+  $('rf_pwr').value = String(r.power_dbm); $('rf_pwr_val').textContent = r.power_dbm;
+}
 
 function onLine(line){
   log(line);
@@ -59,39 +153,100 @@ function onLine(line){
   if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
   if((m=line.match(/adv(?:ertising)?=([01])/))){ const on=m[1]==='1';
     $('advstate').textContent='BLE: '+(on?'ON — advertising as AgnLoRa-'+$('node').textContent:'off'); }
+  // Radio config line:
+  //   [rf] freq_hz=904375000 bw_hz=250000 sf=11 cr=5 power_dbm=14 sync=0x4D preamble=16 (active)
+  if(line.startsWith('[rf]') && line.includes('(active)')){
+    const g=k=>{ const mm=line.match(new RegExp(k+'=(-?(?:0x)?[0-9A-Fa-f]+)')); return mm?mm[1]:null; };
+    const r={ freq_hz:+g('freq_hz'), bw_hz:+g('bw_hz'), sf:+g('sf'), cr:+g('cr'),
+              power_dbm:+g('power_dbm'), sync:parseInt(g('sync'),16), preamble:+g('preamble') };
+    if(!isNaN(r.freq_hz)){ loadedRf=r; fillRf(r); }
+  }
 }
 
-async function send(s){ if(writer) await writer.write(new TextEncoder().encode(s+'\n')); }
+async function send(s){ if(sendRaw) await sendRaw(s+'\n'); else log('not connected'); }
 
 async function readLoop(){
-  const reader=port.readable.getReader(); let buf='';
+  const reader=port.readable.getReader();
   try{
     while(true){
       const {value,done}=await reader.read(); if(done) break;
-      buf+=new TextDecoder().decode(value);
-      let i; while((i=buf.indexOf('\n'))>=0){ onLine(buf.slice(0,i).replace(/\r$/,'')); buf=buf.slice(i+1); }
+      feed(new TextDecoder().decode(value));
     }
   }catch(e){ log('read end: '+e); } finally{ reader.releaseLock(); }
 }
 
-async function connect(){
+async function connectUsb(){
   try{
     port=await navigator.serial.requestPort();
     await port.open({baudRate:115200});
     writer=port.writable.getWriter();
-    $('status').textContent='connected'; $('status').className='ok';
-    ['enable','disable','newpin','setbtn'].forEach(id=>$(id).disabled=false);
+    sendRaw=async s=>writer.write(new TextEncoder().encode(s));
     readLoop();
-    log('connected — reading… (it picks up the PIN from the heartbeat)');
-    setTimeout(()=>send('ble'),600);   // ask for current BLE state + PIN
-  }catch(e){ log('connect error: '+e); }
+    markConnected('USB');
+  }catch(e){ log('USB connect error: '+e); }
 }
 
-$('connect').onclick=connect;
+async function connectBle(){
+  if(!navigator.bluetooth){ log('Web Bluetooth unavailable — use Chrome/Edge.'); return; }
+  try{
+    bleDev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'AgnLoRa-'}],optionalServices:[NUS]});
+    bleDev.addEventListener('gattserverdisconnected',()=>{
+      $('status').textContent='disconnected'; $('status').className='bad'; sendRaw=null; log('BLE disconnected'); });
+    const srv=await (await bleDev.gatt.connect()).getPrimaryService(NUS);
+    const rx=await srv.getCharacteristic(NUS_RX);
+    const tx=await srv.getCharacteristic(NUS_TX);
+    await tx.startNotifications();
+    tx.addEventListener('characteristicvaluechanged',e=>feed(new TextDecoder().decode(e.target.value)));
+    // NUS writes are capped at the ATT MTU (~20 B) — chunk the line.
+    sendRaw=async s=>{ const d=new TextEncoder().encode(s);
+      for(let i=0;i<d.length;i+=20) await rx.writeValueWithoutResponse(d.slice(i,i+20)); };
+    markConnected('BLE');
+  }catch(e){ log('BLE connect error: '+e+' (is the node paired in your OS + BLE enabled?)'); }
+}
+
+// Collect the form into the node's units.
+function formRf(){
+  return {
+    freq_hz: Math.round(parseFloat($('rf_freq').value)*1e6),
+    bw_hz:   Math.round(parseFloat($('rf_bw').value)*1000),
+    sf:+$('rf_sf').value, cr:+$('rf_cr').value,
+    power_dbm:+$('rf_pwr').value,
+    sync: parseInt($('rf_sync').value||'0',16),
+    preamble:+$('rf_pre').value,
+  };
+}
+
+async function applyRf(){
+  const r=formRf();
+  if(isNaN(r.freq_hz)||isNaN(r.sync)){ log('radio: bad freq/sync value'); return; }
+  // Warn loudly only if a *critical* (network-wide) parameter changed.
+  const crit = !loadedRf || r.freq_hz!==loadedRf.freq_hz || r.bw_hz!==loadedRf.bw_hz || r.sf!==loadedRf.sf;
+  if(crit && !confirm(
+      'This changes a network-wide PHY parameter (frequency/bandwidth/SF).\n\n'+
+      'This node will RETUNE and stop hearing any node still on the old settings.\n'+
+      'Only proceed if every node will be moved to these settings.\n\nApply anyway?')) return;
+  const hex=r.sync.toString(16).toUpperCase().padStart(2,'0');
+  await send('rf freq '+r.freq_hz);
+  await send('rf bw '+($('rf_bw').value));
+  await send('rf sf '+r.sf);
+  await send('rf cr '+r.cr);
+  await send('rf power '+r.power_dbm);
+  await send('rf sync 0x'+hex);
+  await send('rf preamble '+r.preamble);
+  await send('rf apply');
+  setTimeout(()=>send('rf show'),400);   // confirm what actually took
+  log('radio: staged + apply sent'+(crit?' (RETUNE)':' (power/minor)'));
+}
+
+$('connect').onclick=connectUsb;
+$('connectble').onclick=connectBle;
 $('enable').onclick=()=>send('ble on');
 $('disable').onclick=()=>send('ble off');
 $('newpin').onclick=()=>send('blepin random');
 $('setbtn').onclick=()=>{ const p=$('setpin').value; if(/^\d{6}$/.test(p)) send('blepin '+p); else log('PIN must be 6 digits'); };
+$('rf_pwr').oninput=()=>$('rf_pwr_val').textContent=$('rf_pwr').value;
+$('rf_apply').onclick=applyRf;
+$('rf_reload').onclick=()=>send('rf show');
 if(!navigator.serial) log('Web Serial unavailable — use Chrome/Edge over http://localhost or https.');
 </script>
 </body>

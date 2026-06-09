@@ -54,7 +54,8 @@ docs/meshcore-integration.md   Phase-1 fork seam design (now optional — BLE wo
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
 web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
-web/manage.html           Web Serial node manager: enable BLE + show/set the pairing PIN
+web/manage.html           Web Serial node manager: BLE enable/PIN + live radio config (freq/BW/SF/power)
+docs/remote-config.md     remote node config + the network-wide retune safety protocol (Tier-1)
 ```
 
 ## Build & test
@@ -63,8 +64,7 @@ PlatformIO (`nordicnrf52` + Adafruit nRF52 core + RadioLib 7.x; host `g++` for t
 
 ```bash
 pio test -e native               # 32 host unit tests for lib/mesh (no hardware)
-pio run  -e wiscore_rak4631      # RAK4631 mesh firmware
-pio run  -e wiscore_rak4631_ble  # RAK4631 + BLE (Nordic UART Service)
+pio run  -e wiscore_rak4631      # RAK4631 mesh firmware (BLE compiled in, off by default)
 pio run  -e xiao_nrf52           # Seeed XIAO nRF52840 + Wio-SX1262 (SoftDevice s140 v7)
 pio run  -e promicro             # Pro Micro nRF52840 + SX1262
 pio run  -e compile_check        # host compile-verify on a stock Feather nRF52840
@@ -89,9 +89,10 @@ IDs auto-derive from each chip's FICR, so boards differ without configuration.
 - **App transport (SAR)** — payloads larger than one frame are fragmented, reassembled
   and CRC-verified; a missing-fragment NACK recovers end-to-end loss. Proven by
   transferring a real image byte-perfect over 1 and 2 hops (`scripts/sar_*`).
-- **Runtime console** (USB serial): `send`/`block`/`unblock`/`info`/`sbegin`+`xfer`+
-  `dump`/`tunnel`. `block` is the local stand-in for the Tier-1 controller's signed
-  "block a bad link" command.
+- **Runtime console** (USB serial / BLE): `send`/`block`/`unblock`/`info`/`sbegin`+`xfer`+
+  `dump`/`tunnel`/`rf`/`ble`. `block` and `rf` (live radio retune: freq/BW/SF/CR/power/
+  sync, staged + `rf apply`, persisted) are the local stand-ins for the Tier-1
+  controller's signed control commands — see [`docs/remote-config.md`](docs/remote-config.md).
 
 ## Reticulum over the mesh
 
@@ -108,11 +109,13 @@ the tunnel wire protocol, for both Reticulum apps and custom apps in any languag
 
 ## BLE (Req 1)
 
-`pio run -e wiscore_rak4631_ble` adds a SoftDevice BLE Nordic UART Service alongside
-the mesh. BLE frames are tunnelled into the mesh and deliveries come back out over BLE,
-so the full path is **app → BLE → node → LoRa → node → BLE → app** — proven on hardware
-with two RAKs (`web/ble.html`, a Web Bluetooth chat). The BLE links stay up through LoRa
-traffic; that's Req 1.
+Every board build includes a SoftDevice BLE Nordic UART Service alongside the mesh
+(`-DAGN_BLE` is on for all envs). It's **off by default** and the SoftDevice is enabled
+*lazily* on the first `ble on`, so a node that never uses BLE pays no runtime/power cost.
+BLE frames are tunnelled into the mesh and deliveries come back out over BLE, so the full
+path is **app → BLE → node → LoRa → node → BLE → app** — proven on hardware with two RAKs
+(`web/ble.html`, a Web Bluetooth chat). The BLE links stay up through LoRa traffic; that's
+Req 1.
 
 **Pairing is PIN-secured.** The UART requires `SECMODE_ENC_WITH_MITM`, BLE is off by
 default, and a 6-digit pairing PIN is set per node. Management is **out-of-band over USB**
@@ -123,8 +126,11 @@ default, and a 6-digit pairing PIN is set per node. Management is **out-of-band 
 
 ## What's left
 
-- **Tier-1 controller** — an RPi driving `block`/power/route APIs via signed control
-  packets (the console is its stand-in today).
+- **Tier-1 controller** — an RPi driving `block`/`rf` (radio retune)/power/route APIs via
+  signed control packets (the console is its stand-in today). The remote-config design and
+  the **network-wide retune safety protocol** (open a fixed-PIN BLE rescue channel before a
+  critical freq/SF/BW change, field-fix stragglers, then disable BLE remotely) are specified
+  in [`docs/remote-config.md`](docs/remote-config.md).
 - **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
   an RNode-compatible BLE front-end backed by the mesh).
 - Polish: pub-key-derived node IDs + signed control plane (§3/§5), FCC handling for the

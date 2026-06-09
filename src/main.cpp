@@ -23,6 +23,11 @@
 #include "forwarder.h"
 #include "link_arq.h"
 #include "sar.h"
+// Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
+// compiled in (radio config is not BLE-specific).
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
+using namespace Adafruit_LittleFS_Namespace;
 #ifdef AGN_BLE
 #include <bluefruit.h>     // nRF52 SoftDevice BLE — Req 1 coexistence experiment
 #endif
@@ -65,6 +70,66 @@ static bool      tunnel_mode = false;
 static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen);  // fwd decl
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n);                       // fwd decl
+
+// The console (rf/ble/info/help/…) can be driven over USB serial OR, when a paired
+// client is connected, over the BLE NUS — so a node can be reconfigured in the field
+// over BLE (the retune-rescue path of docs/remote-config.md). Command *output* follows
+// the source: g_con points at whichever transport the current command arrived on.
+// handle_command()/print_info()/rf_print() locally shadow `Serial` with *g_con so all
+// their prints route there; console_exec() sets/restores it per line.
+static Print* g_con = &Serial;
+static void handle_command(char* line);            // fwd decl (console dispatcher)
+static void console_exec(char* line, Print* out);  // fwd decl (run one line, route output)
+
+// --- persistent radio PHY config (freq/BW/SF/CR/power/sync/preamble) ------------
+// Stored in LittleFS, separate from the BLE config. `rf_work` is the staging copy
+// the console edits; `rf apply` commits it to the radio + flash. Save-if-dirty
+// (read-back + byte-compare) honours Agent.md Req 4 (don't churn nRF52 flash).
+// These same fields are what the future authenticated remote-config control plane
+// will set over LoRa (see docs/remote-config.md).
+static const char     RF_PATH[]  = "/agn_rf.cfg";
+static const uint32_t RF_MAGIC   = 0x46524741;   // "AGRF"
+static RadioCfg       rf_work;                   // staged edits (committed by `rf apply`)
+struct __attribute__((packed)) RfStore { uint32_t magic; RadioCfg cfg; };
+
+static bool rf_read(RadioCfg& out) {
+    RfStore rec;
+    File f(InternalFS);
+    if (!f.open(RF_PATH, FILE_O_READ)) return false;
+    int n = f.read((void*)&rec, sizeof(rec));
+    f.close();
+    if (n != (int)sizeof(rec) || rec.magic != RF_MAGIC) return false;
+    out = rec.cfg;
+    return true;
+}
+
+static void rf_save(const RadioCfg& c) {
+    RadioCfg cur;
+    if (rf_read(cur) && memcmp(&cur, &c, sizeof(RadioCfg)) == 0) return;  // unchanged -> no write
+    RfStore want; want.magic = RF_MAGIC; want.cfg = c;
+    InternalFS.remove(RF_PATH);
+    File f(InternalFS);
+    if (f.open(RF_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+// Load the persisted PHY at boot, or fall back to the compile-time network defaults.
+static RadioCfg rf_load() {
+    InternalFS.begin();   // idempotent; BLE config shares the same FS
+    RadioCfg c;
+    if (rf_read(c)) return c;
+    return radio_default_config();
+}
+
+static void rf_print(const RadioCfg& c, const char* tag) {
+    Print& Serial = *g_con;   // route to the active console sink (USB or BLE)
+    char m[120];
+    snprintf(m, sizeof(m),
+        "[rf] freq_hz=%lu bw_hz=%lu sf=%u cr=%u power_dbm=%d sync=0x%02X preamble=%u (%s)",
+        (unsigned long)c.freq_hz, (unsigned long)c.bw_hz,
+        (unsigned)c.sf, (unsigned)c.cr, (int)c.power_dbm, (unsigned)c.sync,
+        (unsigned)c.preamble, tag);
+    Serial.println(m);
+}
 #ifdef AGN_BLE
 static volatile bool ble_connected = false;
 static uint32_t  ble_rxb = 0, ble_txb = 0;
@@ -87,6 +152,7 @@ static inline bool host_tunnel_active() {
 static BLEUart   bleuart;
 static char      ble_pin[7]      = "000000";   // 6-digit pairing PIN
 static bool      ble_advertising = false;
+static bool      ble_inited      = false;      // SoftDevice/BLE stack brought up yet?
 
 static void ble_connect_cb(uint16_t)            { ble_connected = true; }
 static void ble_disconnect_cb(uint16_t, uint8_t){ ble_connected = false; }
@@ -97,21 +163,68 @@ static void ble_gen_pin() {
     snprintf(ble_pin, sizeof(ble_pin), "%06lu", (unsigned long)random(0, 1000000));
 }
 
+// --- persistent config (PIN + BLE-enabled) in internal flash ----------------
+// Stored in LittleFS on the nRF52's internal flash. Following Agent.md Req 4
+// (nRF52 flash is ~10k erase cycles/page — a sloppy write loop can brick a solar
+// node), we only write on a real change: read-back + byte-equal compare first.
+static const char     CFG_PATH[]  = "/agn_ble.cfg";
+static const uint32_t CFG_MAGIC   = 0x314E4741;   // "AGN1"
+static bool           cfg_first_boot  = false;
+static bool           cfg_ble_enabled = false;
+struct __attribute__((packed)) AgnBleCfg { uint32_t magic; char pin[7]; uint8_t enabled; };
+
+static bool cfg_read(AgnBleCfg& out) {
+    File f(InternalFS);
+    if (!f.open(CFG_PATH, FILE_O_READ)) return false;
+    int n = f.read((void*)&out, sizeof(out));
+    f.close();
+    return n == (int)sizeof(out) && out.magic == CFG_MAGIC;
+}
+
+static void cfg_save() {
+    AgnBleCfg want = {};
+    want.magic = CFG_MAGIC;
+    strncpy(want.pin, ble_pin, 6); want.pin[6] = 0;
+    want.enabled = ble_advertising ? 1 : 0;
+    AgnBleCfg cur;
+    if (cfg_read(cur) && memcmp(&cur, &want, sizeof(want)) == 0) return;  // unchanged -> no write
+    InternalFS.remove(CFG_PATH);
+    File f(InternalFS);
+    if (f.open(CFG_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+// Load PIN + enabled state at boot. On the very first boot (no config yet) a stable
+// PIN is generated and persisted (below, once the SoftDevice is up), so it no longer
+// changes every reboot.
+static void cfg_load() {
+    InternalFS.begin();
+    AgnBleCfg c;
+    if (cfg_read(c)) { strncpy(ble_pin, c.pin, 6); ble_pin[6] = 0; cfg_ble_enabled = c.enabled; }
+    else { ble_gen_pin(); cfg_first_boot = true; }
+}
+
+static void ble_setup();   // fwd decl — start_adv brings the stack up on demand
+
 static void ble_start_adv() {
+    ble_setup();                          // lazily enable the SoftDevice on first use
     Bluefruit.Security.setPIN(ble_pin);   // (re)apply the current PIN before pairing
     Bluefruit.Advertising.start(0);       // 0 = advertise until connected
     ble_advertising = true;
 }
 static void ble_stop_adv() {
+    if (!ble_inited) { ble_advertising = false; return; }   // never enabled — nothing to stop
     Bluefruit.Advertising.stop();
     if (ble_connected) Bluefruit.disconnect(Bluefruit.connHandle());
     ble_advertising = false;
 }
 
 // Init the SoftDevice + a PIN-secured UART, but DON'T advertise yet — BLE is turned
-// on per node, on demand, from the management console (`ble on`).
+// on per node, on demand, from the management console (`ble on`). Lazy + idempotent:
+// the SoftDevice is only enabled the first time BLE is actually turned on, so a node
+// that never uses BLE pays no runtime/power cost (Req 4) — just the flash it occupies.
 static void ble_setup() {
-    ble_gen_pin();
+    if (ble_inited) return;
+    ble_inited = true;
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
     Bluefruit.begin();                              // start the SoftDevice (before radio.begin)
     Bluefruit.setTxPower(4);
@@ -132,20 +245,41 @@ static void ble_setup() {
     // advertising started later via `ble on`
 }
 
-// Decode HDLC frames arriving over BLE ([u32 dst][payload]) and push them into the
-// mesh — the inbound half of the BLE<->mesh tunnel.
+// Service the BLE NUS. The same characteristic carries two channels, told apart with
+// zero ambiguity because HDLC frames are 0x7E-delimited and ASCII console text never
+// contains 0x7E:
+//   * HDLC frames ([u32 dst][payload])  -> the mesh tunnel (web/ble.html, Reticulum).
+//   * plain text lines ending in '\n'   -> the management console (config-over-BLE),
+//     with responses sent back over BLE. This is the field-config / retune-rescue path.
 static void ble_poll() {
-    static uint8_t  bf[4 + MAX_PAYLOAD];
+    if (!ble_inited) return;   // stack not up (BLE never enabled) — nothing to service
+    static uint8_t  bf[4 + MAX_PAYLOAD];   // HDLC tunnel frame
     static uint16_t bl = 0;
     static bool     inf = false, esc = false;
+    static char     cl[160];               // text console-line accumulator
+    static uint16_t cn = 0;
     while (bleuart.available()) {
         uint8_t c = (uint8_t)bleuart.read();
         ble_rxb++;
-        if (inf && c == HDLC_FLAG) { inf = false; if (bl > 0) tunnel_rx_frame(bf, bl); }
-        else if (c == HDLC_FLAG)   { inf = true; bl = 0; esc = false; }
-        else if (inf && bl < sizeof(bf)) {
-            if (c == HDLC_ESC) esc = true;
-            else { bf[bl++] = esc ? (c ^ HDLC_ESC_MASK) : c; esc = false; }
+        if (c == HDLC_FLAG) {                       // frame boundary -> tunnel channel
+            if (inf) { inf = false; if (bl > 0) tunnel_rx_frame(bf, bl); }
+            else     { inf = true; bl = 0; esc = false; }
+            cn = 0;                                 // never part of a text line
+            continue;
+        }
+        if (inf) {                                  // inside an HDLC tunnel frame
+            if (bl < sizeof(bf)) {
+                if (c == HDLC_ESC) esc = true;
+                else { bf[bl++] = esc ? (c ^ HDLC_ESC_MASK) : c; esc = false; }
+            }
+            continue;
+        }
+        // Outside any frame: accumulate a text console line (config-over-BLE).
+        if (c == '\r') continue;
+        if (c == '\n') {
+            if (cn > 0) { cl[cn] = 0; cn = 0; console_exec(cl, &bleuart); }
+        } else if (cn < sizeof(cl) - 1) {
+            cl[cn++] = (char)c;
         }
     }
 }
@@ -495,6 +629,15 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                 break;
             }
             case mesh::Action::FORWARD: {
+                // Never relay a BROADCAST-addressed DATA frame. Broadcast is only the
+                // sender's brief fallback when it has no negotiated alias for the next
+                // hop yet — a 1-hop best-effort. Relaying it floods the mesh and the
+                // destination hears the message twice (direct + relayed). Multi-hop is
+                // carried by DIRECTED unicast once aliases negotiate (seconds).
+                if (lh.next_hop == LINK_ADDR_BROADCAST) {
+                    Serial.println("[FWD] skip (broadcast not relayed)");
+                    break;
+                }
                 forward_frame(buf, len, d.next_hop, d.out_ttl);
                 sar_quiet_until = millis() + 8000;   // relay stays quiet while data flows through it
                 char line[96];
@@ -672,6 +815,7 @@ static void sar_rx_tick() {
 
 static void print_info() {
     if (!router) return;
+    Print& Serial = *g_con;   // route to the active console sink (USB or BLE)
     char l[100];
     snprintf(l, sizeof(l), "node %08lX  neighbors=%u routes=%u blocked=%u",
              (unsigned long)my_id, (unsigned)router->neighbors().count(),
@@ -698,6 +842,7 @@ static void print_info() {
 }
 
 static void handle_command(char* line) {
+    Print& Serial = *g_con;   // route command output to the source transport (USB or BLE)
     char* cmd = strtok(line, " ");
     if (!cmd) return;
 
@@ -761,8 +906,8 @@ static void handle_command(char* line) {
 #ifdef AGN_BLE
     } else if (!strcmp(cmd, "ble")) {        // ble | ble on | ble off
         char* a = strtok(nullptr, " ");
-        if (a && !strcmp(a, "on"))  ble_start_adv();
-        else if (a && !strcmp(a, "off")) ble_stop_adv();
+        if (a && !strcmp(a, "on"))  { ble_start_adv(); cfg_save(); }
+        else if (a && !strcmp(a, "off")) { ble_stop_adv(); cfg_save(); }
         char m[80];
         snprintf(m, sizeof(m), "BLE name=AgnLoRa-%08lX advertising=%d connected=%d PIN=%s",
                  (unsigned long)my_id, (int)ble_advertising, (int)ble_connected, ble_pin);
@@ -772,16 +917,66 @@ static void handle_command(char* line) {
         if (a && !strcmp(a, "random")) ble_gen_pin();
         else if (a && strlen(a) == 6) { strncpy(ble_pin, a, 6); ble_pin[6] = 0; }
         if (ble_advertising) ble_start_adv();   // re-apply for the next pairing
-        char m[40]; snprintf(m, sizeof(m), "BLE PIN=%s", ble_pin); Serial.println(m);
+        cfg_save();                             // persist the new PIN across reboots
+        char m[40]; snprintf(m, sizeof(m), "BLE PIN=%s (saved)", ble_pin); Serial.println(m);
 #endif
+    } else if (!strcmp(cmd, "rf")) {           // rf [show] | rf <field> <val> | rf apply|revert|default
+        char* a = strtok(nullptr, " ");
+        char* v = a ? strtok(nullptr, " ") : nullptr;
+        if (!a || !strcmp(a, "show")) {
+            rf_print(radio.config(), "active");
+            if (memcmp(&rf_work, &radio.config(), sizeof(RadioCfg)) != 0)
+                rf_print(rf_work, "staged — rf apply to commit");
+        } else if (!strcmp(a, "apply")) {
+            // Commit staged PHY to the radio. WARNING: changing freq/SF/BW drops this
+            // node off-air from any peer still on the old PHY (a coordinated retune).
+            int16_t st = radio.apply_config(rf_work);
+            if (st == RADIOLIB_ERR_NONE) {
+                rf_save(radio.config());          // persist only on success (save-if-dirty)
+                Serial.println("[rf] applied + saved");
+                rf_print(radio.config(), "active");
+            } else {
+                char m[48]; snprintf(m, sizeof(m), "[rf] apply FAILED: %d (radio unchanged)", (int)st);
+                Serial.println(m);
+                rf_work = radio.config();         // resync staging to reality
+            }
+        } else if (!strcmp(a, "revert")) {
+            rf_work = radio.config();
+            rf_print(rf_work, "staged=active");
+        } else if (!strcmp(a, "default")) {
+            rf_work = radio_default_config();
+            rf_print(rf_work, "staged defaults — rf apply to commit");
+        } else if (v) {
+            bool ok = true;
+            if      (!strcmp(a, "freq"))     rf_work.freq_hz    = (uint32_t)strtoul(v, nullptr, 10);
+            else if (!strcmp(a, "bw"))       rf_work.bw_hz      = (uint32_t)lroundf(atof(v) * 1000.0f);
+            else if (!strcmp(a, "sf"))       rf_work.sf         = (uint8_t)atoi(v);
+            else if (!strcmp(a, "cr"))       rf_work.cr         = (uint8_t)atoi(v);
+            else if (!strcmp(a, "power") || !strcmp(a, "pwr")) rf_work.power_dbm = (int8_t)atoi(v);
+            else if (!strcmp(a, "sync"))     rf_work.sync       = (uint8_t)strtol(v, nullptr, 0);
+            else if (!strcmp(a, "preamble") || !strcmp(a, "pre")) rf_work.preamble = (uint16_t)atoi(v);
+            else { ok = false; Serial.println("[rf] unknown field (freq|bw|sf|cr|power|sync|preamble)"); }
+            if (ok) rf_print(rf_work, "staged — rf apply to commit");
+        } else {
+            Serial.println("[rf] usage: rf show | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
+        }
     } else if (!strcmp(cmd, "help")) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
+        Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
 #ifdef AGN_BLE
         Serial.println("ble [on|off] | blepin [random|<6 digits>]");
 #endif
     } else {
         Serial.print("unknown cmd: "); Serial.println(cmd);
     }
+}
+
+// Run one console line, routing its output to `out` (the transport it came in on),
+// then restore the default sink. Used by both the USB console and the BLE demux.
+static void console_exec(char* line, Print* out) {
+    g_con = out;
+    handle_command(line);
+    g_con = &Serial;
 }
 
 static void poll_console() {
@@ -799,7 +994,7 @@ static void poll_console() {
         if (!tunnel_mode) {
             if (c == '\r') continue;
             if (c == '\n') {
-                if (len > 0) { buf[len] = 0; Serial.print("> "); Serial.println((char*)buf); handle_command((char*)buf); len = 0; }
+                if (len > 0) { buf[len] = 0; Serial.print("> "); Serial.println((char*)buf); console_exec((char*)buf, &Serial); len = 0; }
             } else if (len < sizeof(buf) - 1) {
                 buf[len++] = (char)c;
             }
@@ -853,14 +1048,20 @@ void setup() {
     Serial.println(banner);
 
 #ifdef AGN_BLE
-    ble_setup();   // bring up the SoftDevice/BLE before configuring the radio interrupt
-    { char m[56]; snprintf(m, sizeof(m), "BLE ready (off). PIN=%s  use 'ble on' to advertise", ble_pin);
-      Serial.println(m); }
+    cfg_load();    // restore the persisted PIN + BLE-enabled state from flash (no SoftDevice needed)
+    if (cfg_first_boot) cfg_save();          // persist the freshly-generated PIN (SD-safe write)
+    if (cfg_ble_enabled) ble_start_adv();    // was on before reboot -> bring up the SoftDevice + advertise
+    // If BLE was off, the SoftDevice is left disabled: zero runtime/power cost until `ble on`.
+    { char m[72]; snprintf(m, sizeof(m), "BLE compiled in. PIN=%s advertising=%d stack=%s (persisted)",
+                           ble_pin, (int)ble_advertising, ble_inited ? "up" : "lazy"); Serial.println(m); }
 #endif
 
     Serial.println("initializing radio...");
     Serial.flush();
-    int16_t st = radio.begin(on_rx);
+    RadioCfg rfcfg = rf_load();   // persisted PHY, or compile-time defaults on first boot
+    rf_work = rfcfg;              // staging copy starts from what's actually applied
+    rf_print(rfcfg, "active");
+    int16_t st = radio.begin(on_rx, rfcfg);
     // LED semaphore (serial is unreliable over WSL/usbip):
     //   solid          -> radio.begin() HUNG (never returned)
     //   FAST blink ~5Hz -> radio.begin() returned an ERROR (code in serial if avail)
