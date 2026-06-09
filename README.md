@@ -49,6 +49,7 @@ lib/mesh/                 PORTABLE core (no Arduino — builds for nRF52 + host)
 src/main.cpp              firmware: prober + routing + forwarding + ARQ + SAR + console + tunnel + BLE
 test/test_*/              host unit tests (Unity): mesh · codec · forward · alias · arq · sar
 docs/hardware-bringup.md  flashing + bring-up runbook
+docs/tcp-bridge.md        app-integration guide: TCP bridge + tunnel protocol (distributable)
 docs/meshcore-integration.md   Phase-1 fork seam design (now optional — BLE works without it)
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
@@ -100,6 +101,10 @@ routing.) The node's `tunnel` mode turns USB serial into a binary HDLC pipe carr
 `[node-id][payload]`; `reticulum/interfaces/AgnosticLoraInterface.py` plugs that into
 RNS. `scripts/rns_demo.py` runs two isolated RNS instances (no LAN path) bound to two
 RAKs and round-trips a cryptographically-proven echo **over the mesh**.
+
+**Building your own app (phone or otherwise)?** See
+[`docs/tcp-bridge.md`](docs/tcp-bridge.md) — a distributable guide to the TCP bridge and
+the tunnel wire protocol, for both Reticulum apps and custom apps in any language.
 
 ## BLE (Req 1)
 
