@@ -56,19 +56,24 @@ function hdlcEncode(data){
   for(const b of data){ if(b===0x7E||b===0x7D){o.push(0x7D,b^0x20);} else o.push(b); }
   o.push(0x7E); return new Uint8Array(o);
 }
+// Typed, length-prefixed tunnel envelope (matches the node firmware):
+//   [u8 addr_type][u8 addr_len][addr bytes…][payload…]
+const ADDR_LOCATOR=0x01;   // addr = node-id locator (4 B today, 16 B once the id widens)
 let inf=false,esc=false,buf=[];
 function feed(bytes){
   for(const c of bytes){
-    if(inf&&c===0x7E){ inf=false; if(buf.length>=4) onFrame(buf); buf=[]; }
+    if(inf&&c===0x7E){ inf=false; if(buf.length>=2) onFrame(buf); buf=[]; }
     else if(c===0x7E){ inf=true; esc=false; buf=[]; }
     else if(inf){ if(c===0x7D){esc=true;} else { buf.push(esc?(c^0x20):c); esc=false; } }
   }
 }
 function onFrame(b){
-  const src=(b[0]|(b[1]<<8)|(b[2]<<16))+b[3]*0x1000000;
-  const msg=new TextDecoder().decode(new Uint8Array(b.slice(4)));
+  const addrType=b[0], addrLen=b[1];
+  if(addrType!==ADDR_LOCATOR || b.length<2+addrLen) return;   // unknown/truncated envelope
+  let src=0; for(let i=0;i<addrLen;i++) src+=b[2+i]*Math.pow(2,8*i);  // LE locator
+  const msg=new TextDecoder().decode(new Uint8Array(b.slice(2+addrLen)));
   recv++; $('recv').textContent=recv;
-  log('← from '+hex8(src)+': '+msg);
+  log('← from '+hex8(src>>>0)+': '+msg);
 }
 
 function setConn(on){
@@ -101,8 +106,10 @@ async function send(){
   const dst=parseInt($('dst').value,16);
   if(!(dst>0)){ log('enter a valid dest node id (hex)'); return; }
   const m=new TextEncoder().encode($('msg').value);
-  const p=new Uint8Array(4+m.length);
-  p[0]=dst&0xff; p[1]=(dst>>8)&0xff; p[2]=(dst>>16)&0xff; p[3]=(dst>>>24)&0xff; p.set(m,4);
+  // [ADDR_LOCATOR][len=4][u32 dst LE][payload]
+  const p=new Uint8Array(2+4+m.length);
+  p[0]=ADDR_LOCATOR; p[1]=4;
+  p[2]=dst&0xff; p[3]=(dst>>8)&0xff; p[4]=(dst>>16)&0xff; p[5]=(dst>>>24)&0xff; p.set(m,6);
   const framed=hdlcEncode(p);
   try{
     // Chunk to fit the BLE write limit; the node reassembles the HDLC frame.

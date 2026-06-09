@@ -56,6 +56,7 @@ scripts/                  host harnesses: sar_test · sar_multihop · tunnel_tes
 web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
 web/manage.html           Web Serial node manager: BLE enable/PIN + live radio config (freq/BW/SF/power)
 docs/remote-config.md     remote node config + the network-wide retune safety protocol (Tier-1)
+docs/identity-vs-locator.md  design boundary: mesh routes on node-id locators, apps address on identity hashes
 ```
 
 ## Build & test

@@ -68,6 +68,12 @@ static uint32_t  sar_quiet_until = 0;           // suppress our beacons during a
 // through the mesh. Enabled by the `tunnel` console command.
 static bool      tunnel_mode = false;
 static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
+// Host-tunnel frame envelope (host<->node), TYPED + LENGTH-PREFIXED so the address can
+// widen (4-byte locator today -> 16-byte node-pubkey hash later, identity-vs-locator §6)
+// with no flag day, and an identity-addressed mode can be added as a type, not a rewrite:
+//   frame body := [u8 addr_type][u8 addr_len][addr bytes…][payload…]
+static const uint8_t TUN_ADDR_LOCATOR  = 0x01;   // addr = node-id locator (the only live type)
+static const uint8_t TUN_ADDR_IDENTITY = 0x02;   // reserved: resolve-and-forward (deferred)
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen);  // fwd decl
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n);                       // fwd decl
 
@@ -703,7 +709,8 @@ static void host_write(const uint8_t* d, uint16_t n) {
 
 // Write one HDLC frame (FLAG, byte-stuffed payload, FLAG) to the host transport.
 static void hdlc_write(const uint8_t* d, uint16_t n) {
-    static uint8_t out[2 + 2 * (4 + MAX_PAYLOAD)];
+    // Sized for the worst case: a fully-escaped envelope ([type][len][locator]+payload).
+    static uint8_t out[2 + 2 * (2 + sizeof(node_id_t) + MAX_PAYLOAD)];
     uint16_t o = 0;
     out[o++] = HDLC_FLAG;
     for (uint16_t i = 0; i < n; i++) {
@@ -715,21 +722,30 @@ static void hdlc_write(const uint8_t* d, uint16_t n) {
     host_write(out, o);
 }
 
-// Emit a delivered app payload to the host as [u32 src][payload].
+// Emit a delivered app payload to the host as the typed envelope:
+// [LOCATOR][len=sizeof(node_id)][src node-id LE][payload].
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen) {
-    uint8_t f[4 + MAX_PAYLOAD];
+    const uint8_t alen = (uint8_t)sizeof(node_id_t);
+    uint8_t f[2 + sizeof(node_id_t) + MAX_PAYLOAD];
     if (plen > MAX_PAYLOAD) plen = MAX_PAYLOAD;
-    memcpy(f, &src, 4);
-    memcpy(f + 4, payload, plen);
-    hdlc_write(f, (uint16_t)(4 + plen));
+    f[0] = TUN_ADDR_LOCATOR;
+    f[1] = alen;
+    memcpy(f + 2, &src, alen);
+    memcpy(f + 2 + alen, payload, plen);
+    hdlc_write(f, (uint16_t)(2 + alen + plen));
 }
 
-// Handle a frame from the host: [u32 dst][payload] -> send into the mesh.
+// Handle a frame from the host: [addr_type][addr_len][addr][payload] -> send into the mesh.
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
-    if (n < 4) return;
-    node_id_t dst; memcpy(&dst, f, 4);
-    const uint8_t* payload = f + 4;
-    uint16_t plen = (uint16_t)(n - 4);
+    if (n < 2) return;
+    uint8_t addr_type = f[0];
+    uint8_t addr_len  = f[1];
+    if (n < (uint16_t)(2 + addr_len)) return;                    // truncated envelope
+    if (addr_type == TUN_ADDR_IDENTITY) return;                  // reserved (resolve-and-forward) — not yet
+    if (addr_type != TUN_ADDR_LOCATOR || addr_len != sizeof(node_id_t)) return;  // unknown/unsupported addr
+    node_id_t dst; memcpy(&dst, f + 2, sizeof(node_id_t));
+    const uint8_t* payload = f + 2 + addr_len;
+    uint16_t plen = (uint16_t)(n - 2 - addr_len);
     if (plen <= MAX_PAYLOAD - HEADER_BYTES) {
         send_data_bytes(dst, payload, plen, false);   // fits one frame
     } else if (!sar_tx_active && !sar_resend_active && plen <= mesh::SAR_MAX_FILE) {
