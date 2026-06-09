@@ -23,6 +23,7 @@
 #include "forwarder.h"
 #include "link_arq.h"
 #include "sar.h"
+#include "locator_dir.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
 // compiled in (radio config is not BLE-specific).
 #include <Adafruit_LittleFS.h>
@@ -521,6 +522,178 @@ static void forward_frame(const uint8_t* buf, uint16_t len, node_id_t next, uint
     tx_unicast(frame, len, next);            // each hop runs its own ARQ
 }
 
+// --- distributed locator directory (Phase 2) ------------------------------------
+// REGISTER/QUERY flood across the mesh, REPLY routes back by DV. The directory only
+// answers "which node hosts identity X"; the mesh still routes on locators (node ids).
+// See docs/distributed-lookup-plan.md / docs/identity-vs-locator.md.
+static mesh::LocatorDir      locdir;
+static mesh::LocatorResolver locres;
+static uint16_t loc_epoch   = 0;            // per-boot nonce of this node as an id-owner
+static uint16_t loc_seq     = 0;            // monotonic registration seq within this boot
+static uint16_t loc_pktid   = 0;           // pkt_id space for loc packets we originate
+static const uint16_t LOC_TTL_S      = 600;    // binding lifetime we advertise (s)
+static const uint8_t  LOC_FLOOD_TTL  = 4;      // hop budget for REGISTER/QUERY floods
+static const uint16_t LOC_RESOLVE_MS = 8000;   // give up on a QUERY after this
+static const uint32_t LOC_REREG_MS   = 240000; // re-register cadence (< TTL, refresh)
+static uint32_t next_rereg_ms = 0;
+
+// Ids this node serves locally (a handful), re-registered periodically so they don't lapse.
+struct LocReg { uint8_t id[mesh::LOC_ID_MAX]; uint8_t id_len; bool used; };
+static LocReg my_regs[4];
+
+// Dedup ring so a flooded REGISTER/QUERY isn't processed or re-flooded twice.
+struct LocSeen { node_id_t src; uint16_t pid; bool used; };
+static LocSeen loc_seen[16];
+static uint8_t loc_seen_i = 0;
+static bool loc_flood_seen(node_id_t src, uint16_t pid) {
+    for (auto& s : loc_seen) if (s.used && s.src == src && s.pid == pid) return true;
+    return false;
+}
+static void loc_flood_mark(node_id_t src, uint16_t pid) {
+    loc_seen[loc_seen_i] = { src, pid, true };
+    loc_seen_i = (uint8_t)((loc_seen_i + 1) % 16);
+}
+static void loc_id_hex(const uint8_t* id, uint8_t n, char* out) {
+    for (uint8_t i = 0; i < n; i++) snprintf(out + 2 * i, 3, "%02X", id[i]);
+    out[2 * n] = '\0';
+}
+
+// Broadcast a REGISTER/QUERY into the mesh (multi-hop flood, TTL-bounded).
+static void send_loc_flood(const uint8_t* msg, uint16_t mlen, uint8_t ttl) {
+    uint8_t frame[1 + MAX_PAYLOAD];
+    if ((uint16_t)(HEADER_BYTES + mlen) > sizeof(frame)) return;
+    LinkHeader link; link.prev_hop = LINK_ADDR_NONE; link.next_hop = LINK_ADDR_BROADCAST;
+    link.link_seq = (uint8_t)loc_pktid; link.flags = 0;
+    NetHeader net; net.ver_type = net_ver_type(PKT_LOC); net.flags = 0; net.ttl = ttl;
+    net.dst = NODE_ID_BROADCAST; net.src = my_id; net.pkt_id = loc_pktid;
+    memcpy(frame, &link, sizeof(link));
+    memcpy(frame + sizeof(link), &net, sizeof(net));
+    memcpy(frame + HEADER_BYTES, msg, mlen);
+    loc_flood_mark(my_id, loc_pktid);            // never re-process our own flood
+    txq_push(frame, (uint16_t)(HEADER_BYTES + mlen));
+    loc_pktid++;
+}
+
+// Re-broadcast a received flood with the hop budget decremented (multi-hop reach).
+static void loc_reflood(const uint8_t* buf, uint16_t len, uint8_t out_ttl) {
+    uint8_t frame[1 + MAX_PAYLOAD];
+    if (len > sizeof(frame)) return;
+    memcpy(frame, buf, len);
+    LinkHeader link; memcpy(&link, frame, sizeof(link));
+    link.prev_hop = LINK_ADDR_NONE; link.next_hop = LINK_ADDR_BROADCAST; link.flags = 0;
+    memcpy(frame, &link, sizeof(link));
+    NetHeader net; memcpy(&net, frame + sizeof(LinkHeader), sizeof(net));
+    net.ttl = out_ttl; memcpy(frame + sizeof(LinkHeader), &net, sizeof(net));
+    txq_push(frame, len);
+}
+
+// Send a REPLY back to the asker — DV-routed unicast, exactly like DATA.
+static void send_loc_unicast(node_id_t dst, const uint8_t* msg, uint16_t mlen) {
+    uint8_t frame[1 + MAX_PAYLOAD];
+    if (mlen > MAX_PAYLOAD - HEADER_BYTES) return;
+    node_id_t   nh = router ? router->next_hop(dst) : 0;
+    link_addr_t na = (router && nh) ? router->link_addr_for(nh) : LINK_ADDR_NONE;
+    LinkHeader link;
+    link.prev_hop = (router && nh) ? router->my_alias_for(nh) : LINK_ADDR_NONE;
+    link.next_hop = (na != LINK_ADDR_NONE) ? na : LINK_ADDR_BROADCAST;
+    link.link_seq = (uint8_t)loc_pktid; link.flags = 0;
+    NetHeader net; net.ver_type = net_ver_type(PKT_LOC); net.flags = 0; net.ttl = DEFAULT_TTL;
+    net.dst = dst; net.src = my_id; net.pkt_id = loc_pktid;
+    memcpy(frame, &link, sizeof(link));
+    memcpy(frame + sizeof(link), &net, sizeof(net));
+    memcpy(frame + HEADER_BYTES, msg, mlen);
+    if (forwarder) forwarder->mark_seen(my_id, loc_pktid);   // ignore our own rebroadcast
+    tx_unicast(frame, (uint16_t)(HEADER_BYTES + mlen), nh);
+    loc_pktid++;
+}
+
+// Register an opaque id as served by THIS node: cache locally + flood a REGISTER.
+static void loc_register(const uint8_t* id, uint8_t id_len) {
+    if (id_len == 0 || id_len > mesh::LOC_ID_MAX) return;
+    if (loc_epoch == 0) { loc_epoch = (uint16_t)((uint32_t)micros() ^ my_id); if (!loc_epoch) loc_epoch = 1; }
+    uint16_t seq = ++loc_seq;
+    int slot = -1;
+    for (int i = 0; i < 4; i++) {
+        if (my_regs[i].used && my_regs[i].id_len == id_len && memcmp(my_regs[i].id, id, id_len) == 0) { slot = i; break; }
+        if (slot < 0 && !my_regs[i].used) slot = i;
+    }
+    if (slot >= 0) { my_regs[slot].used = true; my_regs[slot].id_len = id_len; memcpy(my_regs[slot].id, id, id_len); }
+    locdir.upsert(id, id_len, my_id, loc_epoch, seq, LOC_TTL_S, millis());
+    uint8_t msg[8 + mesh::LOC_ID_MAX];
+    uint16_t mlen = mesh::loc_build_register(loc_epoch, seq, LOC_TTL_S, id, id_len, msg, sizeof(msg));
+    if (mlen) send_loc_flood(msg, mlen, LOC_FLOOD_TTL);
+}
+
+// Resolve an id to its serving node. Cache hit -> answer `sink` now; miss -> flood a
+// QUERY (the REPLY prints `loc <id> <node>` asynchronously via on_rx).
+static void loc_resolve(const uint8_t* id, uint8_t id_len, Print* sink) {
+    node_id_t loc = 0;
+    if (locdir.lookup(id, id_len, &loc, millis())) {
+        char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(id, id_len, hx);
+        char line[80]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)loc);
+        sink->println(line);
+        return;
+    }
+    uint16_t qid = locres.begin(id, id_len, millis(), LOC_RESOLVE_MS);
+    if (!qid) { sink->println("loc busy"); return; }
+    uint8_t msg[4 + mesh::LOC_ID_MAX];
+    uint16_t mlen = mesh::loc_build_query(qid, id, id_len, msg, sizeof(msg));
+    if (mlen) send_loc_flood(msg, mlen, LOC_FLOOD_TTL);   // answer arrives async (or times out)
+}
+
+static void loc_dirdump(Print* sink) {
+    mesh::LocatorDir::View v[mesh::LOC_DIR_CAP];
+    uint16_t n = locdir.snapshot(v, mesh::LOC_DIR_CAP, millis());
+    char line[96]; snprintf(line, sizeof(line), "[dir] %u binding(s):", (unsigned)n); sink->println(line);
+    for (uint16_t i = 0; i < n; i++) {
+        char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(v[i].id, v[i].id_len, hx);
+        snprintf(line, sizeof(line), "  %s -> %08lX  ttl=%us", hx, (unsigned long)v[i].loc, (unsigned)v[i].ttl_s);
+        sink->println(line);
+    }
+}
+
+// Handle a received PKT_LOC frame (REGISTER/QUERY flood, or REPLY unicast).
+static void on_loc_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, const LinkHeader& lh) {
+    const uint8_t* pay = buf + HEADER_BYTES;
+    uint16_t plen = (uint16_t)(len - HEADER_BYTES);
+    mesh::LocMsg m;
+    if (!mesh::loc_parse(pay, plen, &m)) return;
+
+    if (net.dst == NODE_ID_BROADCAST) {                  // REGISTER / QUERY flood
+        if (loc_flood_seen(net.src, net.pkt_id)) return; // already handled this flood
+        loc_flood_mark(net.src, net.pkt_id);
+        if (m.kind == mesh::LOC_REGISTER) {
+            locdir.upsert(m.id, m.id_len, net.src, m.epoch, m.seq, m.ttl_s, millis());
+        } else if (m.kind == mesh::LOC_QUERY) {
+            mesh::LocBinding b;
+            if (locdir.lookup_full(m.id, m.id_len, &b, millis())) {
+                uint8_t r[14 + mesh::LOC_ID_MAX];
+                uint16_t rlen = mesh::loc_build_reply(m.qid, b.epoch, b.seq, b.ttl_s, b.loc,
+                                                      m.id, m.id_len, r, sizeof(r));
+                if (rlen) send_loc_unicast(net.src, r, rlen);    // answer the asker
+            }
+        }
+        if (net.ttl > 1) loc_reflood(buf, len, (uint8_t)(net.ttl - 1));   // extend the flood
+        return;
+    }
+
+    // REPLY: DV-routed unicast — deliver to us, or forward onward.
+    if (!forwarder) return;
+    mesh::PacketRef p{ net.src, net.dst, net.pkt_id, net.ttl };
+    mesh::Decision d = forwarder->decide(p);
+    if (d.action == mesh::Action::DELIVER) {
+        if (m.kind == mesh::LOC_REPLY) {
+            locdir.upsert(m.id, m.id_len, m.loc, m.epoch, m.seq, m.ttl_s, millis());
+            locres.on_reply(m.qid);
+            char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(m.id, m.id_len, hx);
+            char line[80]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)m.loc);
+            Serial.println(line);                        // async resolve result
+        }
+    } else if (d.action == mesh::Action::FORWARD && lh.next_hop != LINK_ADDR_BROADCAST) {
+        forward_frame(buf, len, d.next_hop, d.out_ttl);
+    }
+}
+
 // Called from radio.poll() (task context, not an ISR) for every received frame.
 static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     if (len < HEADER_BYTES) {
@@ -572,6 +745,12 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     if ((lh.flags & LINK_FLAG_ACK_REQ) && lh.next_hop != LINK_ADDR_BROADCAST && router) {
         node_id_t prev = router->neighbors().neighbor_by_my_alias(lh.next_hop);
         if (prev) send_ack(prev, lh.link_seq);
+    }
+
+    // --- LOC: distributed locator directory (REGISTER/QUERY flood, REPLY unicast) ---
+    if (type == PKT_LOC) {
+        on_loc_rx(buf, len, net, lh);
+        return;
     }
 
     // --- DATA: deliver, forward, or drop using the relay engine ---
@@ -976,9 +1155,28 @@ static void handle_command(char* line) {
         } else {
             Serial.println("[rf] usage: rf show | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         }
+    } else if (!strcmp(cmd, "register")) {     // register <idhex> — assert this node serves id
+        char* a = strtok(nullptr, " ");
+        uint8_t id[mesh::LOC_ID_MAX];
+        uint16_t n = a ? hex_decode(a, id, mesh::LOC_ID_MAX) : 0;
+        if (n == 0) { Serial.println("usage: register <idhex> (1..16 bytes)"); }
+        else {
+            loc_register(id, (uint8_t)n);
+            char l[56]; snprintf(l, sizeof(l), "registered %u-byte id at %08lX",
+                                 (unsigned)n, (unsigned long)my_id); Serial.println(l);
+        }
+    } else if (!strcmp(cmd, "resolve")) {      // resolve <idhex> — find the serving node
+        char* a = strtok(nullptr, " ");
+        uint8_t id[mesh::LOC_ID_MAX];
+        uint16_t n = a ? hex_decode(a, id, mesh::LOC_ID_MAX) : 0;
+        if (n == 0) Serial.println("usage: resolve <idhex>");
+        else loc_resolve(id, (uint8_t)n, &Serial);   // Serial is *g_con (the source transport)
+    } else if (!strcmp(cmd, "dirdump")) {
+        loc_dirdump(&Serial);
     } else if (!strcmp(cmd, "help")) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump");
 #ifdef AGN_BLE
         Serial.println("ble [on|off] | blepin [random|<6 digits>]");
 #endif
@@ -1017,15 +1215,24 @@ static void poll_console() {
             continue;
         }
 
-        // --- tunnel: HDLC frame decode ---
-        if (in_frame && c == HDLC_FLAG) {            // end of frame
-            in_frame = false;
-            if (flen > 0) tunnel_rx_frame(frame, flen);
-        } else if (c == HDLC_FLAG) {                 // start of frame
-            in_frame = true; flen = 0; esc = false;
-        } else if (in_frame && flen < sizeof(frame)) {
-            if (c == HDLC_ESC) { esc = true; }
-            else { frame[flen++] = esc ? (c ^ HDLC_ESC_MASK) : c; esc = false; }
+        // --- tunnel: demux HDLC data frames vs. text console lines (like ble_poll) ---
+        // 0x7E-delimited bytes are tunnel frames; plain text lines are console commands
+        // (so `register`/`resolve`/`rf`/… work over the USB tunnel, not just BLE).
+        if (c == HDLC_FLAG) {
+            if (in_frame) { in_frame = false; if (flen > 0) tunnel_rx_frame(frame, flen); }
+            else          { in_frame = true; flen = 0; esc = false; }
+            len = 0;                                 // a frame boundary is never part of a line
+        } else if (in_frame) {
+            if (flen < sizeof(frame)) {
+                if (c == HDLC_ESC) esc = true;
+                else { frame[flen++] = esc ? (c ^ HDLC_ESC_MASK) : c; esc = false; }
+            }
+        } else if (c == '\r') {
+            // ignore
+        } else if (c == '\n') {
+            if (len > 0) { buf[len] = 0; console_exec((char*)buf, &Serial); len = 0; }
+        } else if (len < sizeof(buf) - 1) {
+            buf[len++] = (char)c;
         }
     }
 }
@@ -1164,6 +1371,14 @@ void loop() {
     // 6) Drive an in-progress SAR file transfer + the receiver's missing-frag requests.
     sar_tx_tick();
     sar_rx_tick();
+
+    // 6b) Locator directory: expire timed-out resolutions, and re-register our own ids
+    //     before their bindings lapse (keeps the distributed cache fresh).
+    locres.tick(millis());
+    if ((int32_t)(millis() - next_rereg_ms) >= 0) {
+        for (auto& r : my_regs) if (r.used) loc_register(r.id, r.id_len);
+        next_rereg_ms = millis() + LOC_REREG_MS;
+    }
 
 #ifdef AGN_BLE
     ble_poll();    // service the BLE UART (echo) — must stay non-blocking

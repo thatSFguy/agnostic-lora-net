@@ -41,6 +41,7 @@ enum PacketType : uint8_t {
     PKT_CONTROL = 1,  // signed controller command (power / block / route)
     PKT_ACK     = 2,  // end-to-end acknowledgement
     PKT_BEACON  = 3,  // neighbour discovery + piggybacked link metrics / DV updates
+    PKT_LOC     = 4,  // distributed locator directory (REGISTER flood / QUERY flood / REPLY unicast)
 };
 
 // NetHeader.flags bits.

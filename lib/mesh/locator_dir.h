@@ -59,6 +59,10 @@ bool loc_parse(const uint8_t* msg, uint16_t len, LocMsg* out);
 // Strictly-newer comparison for the 16-bit seq, wraparound-aware.
 inline bool loc_seq_newer(uint16_t a, uint16_t b) { return (int16_t)(a - b) > 0; }
 
+// A full cached binding — what a node needs to answer a QUERY with a REPLY (the REPLY
+// must carry the binding's epoch/seq so the asker can order it, plus the remaining TTL).
+struct LocBinding { node_id_t loc; uint16_t epoch; uint16_t seq; uint16_t ttl_s; };
+
 // The per-node binding cache: id → serving locator, bounded with TTL + LRU eviction.
 class LocatorDir {
 public:
@@ -74,11 +78,20 @@ public:
     // Resolve id → serving locator if cached and unexpired. Refreshes its LRU position.
     bool lookup(const uint8_t* id, uint8_t id_len, node_id_t* out_loc, uint32_t now_ms);
 
+    // Like lookup(), but returns the full binding (epoch/seq + remaining TTL seconds, ≥1)
+    // so a node can answer a QUERY with a well-ordered REPLY.
+    bool lookup_full(const uint8_t* id, uint8_t id_len, LocBinding* out, uint32_t now_ms);
+
     // Drop a binding — e.g. on a NO_CONSUMER delivery failure (review note E).
     bool remove(const uint8_t* id, uint8_t id_len);
 
     uint16_t size(uint32_t now_ms) const;          // count of live (unexpired) bindings
     static constexpr uint16_t capacity() { return LOC_DIR_CAP; }
+
+    // One live binding, for diagnostics (`dirdump`).
+    struct View { uint8_t id[LOC_ID_MAX]; uint8_t id_len; node_id_t loc; uint16_t ttl_s; };
+    // Copy up to `cap` live bindings into `out`; returns how many were written.
+    uint16_t snapshot(View* out, uint16_t cap, uint32_t now_ms) const;
 
 private:
     struct Entry {
