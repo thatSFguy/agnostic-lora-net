@@ -133,6 +133,21 @@ bool LocatorDir::lookup(const uint8_t* id, uint8_t id_len, node_id_t* out_loc, u
     return true;
 }
 
+bool LocatorDir::lookup_full(const uint8_t* id, uint8_t id_len, LocBinding* out, uint32_t now_ms) {
+    int idx = find(id, id_len);
+    if (idx < 0) return false;
+    Entry& e = e_[idx];
+    int32_t rem_ms = (int32_t)(e.expiry_ms - now_ms);
+    if (rem_ms <= 0) { e.used = false; return false; }
+    e.touched = ++clock_;
+    if (out) {
+        out->loc = e.loc; out->epoch = e.epoch; out->seq = e.seq;
+        uint32_t s = (uint32_t)rem_ms / 1000u;
+        out->ttl_s = (uint16_t)(s == 0 ? 1 : (s > 0xFFFF ? 0xFFFF : s));
+    }
+    return true;
+}
+
 bool LocatorDir::remove(const uint8_t* id, uint8_t id_len) {
     int idx = find(id, id_len);
     if (idx < 0) return false;
@@ -144,6 +159,21 @@ uint16_t LocatorDir::size(uint32_t now_ms) const {
     uint16_t n = 0;
     for (int i = 0; i < LOC_DIR_CAP; i++)
         if (e_[i].used && !expired(e_[i], now_ms)) n++;
+    return n;
+}
+
+uint16_t LocatorDir::snapshot(View* out, uint16_t cap, uint32_t now_ms) const {
+    uint16_t n = 0;
+    for (int i = 0; i < LOC_DIR_CAP && n < cap; i++) {
+        const Entry& e = e_[i];
+        if (!e.used || expired(e, now_ms)) continue;
+        memcpy(out[n].id, e.id, e.id_len);
+        out[n].id_len = e.id_len;
+        out[n].loc    = e.loc;
+        int32_t rem = (int32_t)(e.expiry_ms - now_ms);
+        out[n].ttl_s = (uint16_t)(rem <= 0 ? 0 : (uint32_t)rem / 1000u);
+        n++;
+    }
     return n;
 }
 

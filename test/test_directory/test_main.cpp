@@ -167,6 +167,20 @@ static void test_seq_wraparound() {
     TEST_ASSERT_FALSE(loc_seq_newer(1, 1));
 }
 
+// ---- lookup_full: binding for building a REPLY ----------------------------------
+static void test_lookup_full() {
+    LocatorDir d;
+    uint8_t id[LOC_ID_MAX]; make_id(id, 55);
+    TEST_ASSERT_TRUE(d.upsert(id, LOC_ID_MAX, 0xCAFE, 9, 4, 100, 1000));  // ttl 100s at t=1000
+    LocBinding b{};
+    TEST_ASSERT_TRUE(d.lookup_full(id, LOC_ID_MAX, &b, 1000 + 30000));    // 30s later
+    TEST_ASSERT_EQUAL_HEX32(0xCAFE, b.loc);
+    TEST_ASSERT_EQUAL_HEX16(9, b.epoch);
+    TEST_ASSERT_EQUAL_HEX16(4, b.seq);
+    TEST_ASSERT_EQUAL_UINT16(70, b.ttl_s);                               // ~70s remaining
+    TEST_ASSERT_FALSE(d.lookup_full(id, LOC_ID_MAX, &b, 1000 + 200000)); // expired
+}
+
 // ---- end-to-end: QUERY -> REPLY -> cache (the resolve path) ----------------------
 static void test_query_reply_resolves() {
     uint8_t id[LOC_ID_MAX]; make_id(id, 50);
@@ -236,6 +250,7 @@ int main(int, char**) {
     RUN_TEST(test_cache_reboot_reregister);
     RUN_TEST(test_cache_lru_eviction);
     RUN_TEST(test_seq_wraparound);
+    RUN_TEST(test_lookup_full);
     RUN_TEST(test_query_reply_resolves);
     RUN_TEST(test_resolver_lifecycle);
     return UNITY_END();
