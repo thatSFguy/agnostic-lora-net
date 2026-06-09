@@ -5,6 +5,16 @@
 import serial, glob, os, re, sys, time, struct
 
 FLAG=0x7E; ESC=0x7D; MASK=0x20
+ADDR_LOCATOR=0x01           # typed tunnel envelope: [type][len][addr][payload]
+def envelope(node_id, payload):
+    loc=struct.pack('<I', node_id)
+    return bytes([ADDR_LOCATOR, len(loc)]) + loc + payload
+def unwrap(frame):
+    """Return (src_node, payload) from a typed envelope, or (None, None)."""
+    if len(frame) < 2: return None, None
+    atype, alen = frame[0], frame[1]
+    if atype != ADDR_LOCATOR or len(frame) < 2+alen: return None, None
+    return int.from_bytes(frame[2:2+alen], 'little'), frame[2+alen:]
 def hdlc(data):
     out=bytearray([FLAG])
     for b in data:
@@ -57,12 +67,11 @@ def main():
 
     def trial(src, sid, dst, did, msg):
         print(f"\n=== {sid:08X} --tunnel--> {did:08X} : {msg} ===")
-        src.write(hdlc(struct.pack('<I',did)+msg)); src.flush()
+        src.write(hdlc(envelope(did, msg))); src.flush()
         for f in read_frames(dst, 10):
-            if len(f)>=4:
-                fsrc=struct.unpack('<I',f[:4])[0]; payload=f[4:]
-                if payload==msg:
-                    print(f"   [dst] got frame from {fsrc:08X}: {payload!r}  ✓"); return True
+            fsrc, payload = unwrap(f)
+            if fsrc is not None and payload==msg:
+                print(f"   [dst] got frame from {fsrc:08X}: {payload!r}  ✓"); return True
         print("   NOT received"); return False
 
     ab=trial(A,aid,B,bid,b"hello-tunnel-AB")

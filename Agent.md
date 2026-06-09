@@ -80,7 +80,7 @@ A central service improves the network but is never required for it to run.
 | RAK4631 BLE env  | `RAK_4631_companion_radio_ble` (MeshCore) |
 | Radio HAL        | **RadioLib** (covers SX1262 + SX1276 from one API) |
 | MCU platform     | `nordicnrf52` / Arduino (Adafruit nRF52 core), board `wiscore_rak4631` |
-| Addressing       | 4-byte node ID derived from node public key (self-certifying) |
+| Addressing       | Node ID = **16-byte** truncated hash of the node's own public key (self-certifying, collision-free; RNS-shaped format, *separate namespace* — a **locator**, not an app/RNS identity). 32-bit `FICR` fold is the Tier-0 placeholder. See [`docs/identity-vs-locator.md`](docs/identity-vs-locator.md). |
 | Routing          | Per-direction next-hop tables → forward/reverse are independent (asymmetry is free) |
 | Reliability      | Hop-by-hop ACK + small retry; optional end-to-end ACK per packet |
 | Mobility         | Mostly-fixed, occasional movers (HLR tuned for slow updates) |
@@ -133,14 +133,19 @@ and asymmetric paths just fall out:
 - `ver / type` — data | control | ack | beacon (1 byte)
 - `flags` — ack-request, etc.
 - `ttl` — hop limit
-- `dst` (4 B), `src` (4 B) — pubkey-derived IDs
+- `dst`, `src` — node-pubkey-hash IDs (**locators**). Target width **16 B** each
+  (self-certifying, collision-free); **4 B** in the Tier-0 placeholder today.
 - `pkt_id` (2 B) — dedup + end-to-end ACK
 
-**Payload** — opaque (app's problem). **Control packets** additionally carry a
-signature so a node only obeys legitimate power/block/route commands.
+**Payload** — opaque (app's problem). An app's *own* identity (e.g. an RNS destination
+hash) rides **inside** the payload and is never routed on by the mesh — the mesh routes
+on the locator only. This is the app-agnostic boundary; see
+[`docs/identity-vs-locator.md`](docs/identity-vs-locator.md). **Control packets**
+additionally carry a signature so a node only obeys legitimate power/block/route commands.
 
-> Goal: keep the combined header to a low-double-digit byte count so small messages
-> stay cheap at higher spreading factors.
+> Goal: keep the combined header small. Per-hop addressing uses **1-byte link-local
+> aliases**, so the 16-byte `src`/`dst` cost lands only on the end-to-end network header
+> and announces — accepted as the price of self-certifying, collision-free identity.
 
 ---
 

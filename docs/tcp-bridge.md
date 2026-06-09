@@ -69,16 +69,30 @@ Messages are delimited with HDLC (the same framing Reticulum's `PipeInterface` u
 
 ### 2.3 Frame contents
 
-Inside each HDLC frame is a 4-byte little-endian node id followed by the opaque payload:
+Inside each HDLC frame is a **typed, length-prefixed address** followed by the opaque
+payload:
 
 ```
-outbound (host → node):  [ u32 dst_node_id LE ][ payload bytes … ]   → mesh delivers to dst
-inbound  (node → host):  [ u32 src_node_id LE ][ payload bytes … ]   ← arrived from src
+frame body := [ u8 addr_type ][ u8 addr_len ][ addr bytes … ][ payload bytes … ]
+
+  addr_type 0x01 = LOCATOR   node id (the mesh address). addr_len = 4 today; it becomes
+                             16 when node ids widen to a pub-key hash (see
+                             docs/identity-vs-locator.md §6) — same frame, longer addr.
+  addr_type 0x02 = IDENTITY  reserved — send to an app identity and let the node resolve
+                             it to a locator. NOT live yet; do not emit.
+
+outbound (host → node):  addr = dst_node_id  → mesh delivers to that node
+inbound  (node → host):  addr = src_node_id  ← arrived from that node
 ```
 
-- **Node ids** are the 4-byte mesh addresses. Each node prints its own id in its serial
-  banner/heartbeat (`node=9828F51B`) and advertises BLE as `AgnLoRa-<id>`. You address a
-  peer by its id; discovering ids is your app's concern (announce, directory, config).
+> **Why typed + length-prefixed:** the address width can grow (4→16 B) without a
+> flag-day, and identity-addressed delivery can be added as a *type*, not a redesign.
+> Always read `addr_len` rather than assuming 4 bytes.
+
+- **Node ids** are the mesh addresses (4 bytes today). Each node prints its own id in its
+  serial banner/heartbeat (`node=9828F51B`) and advertises BLE as `AgnLoRa-<id>`. You
+  address a peer by its id; discovering ids is your app's concern (announce, directory,
+  config).
 - **Payload size:** keep it under ~178 bytes to ride one LoRa frame. The node will
   **automatically fragment & reassemble** larger payloads (up to 8 KB) using its internal
   SAR layer with a CRC + missing-fragment retransmit — transparent to you, just slower.
@@ -180,7 +194,7 @@ the TCP socket exactly as if it were wired to the node's serial port.
 
 ```python
 #!/usr/bin/env python3
-# Transparent TCP <-> node-tunnel relay. App speaks HDLC [dst][payload] over TCP.
+# Transparent TCP <-> node-tunnel relay. App speaks HDLC [type][len][dst][payload] over TCP (§2.3/§4.2).
 import socket, threading, serial
 
 NODE_PORT, NODE_BAUD = "/dev/ttyACM0", 115200
@@ -223,15 +237,20 @@ as `bleak`, writing to char `6e400002-…` and subscribing to `6e400003-…`.)
 Pseudocode your app implements on the TCP socket:
 
 ```
-SEND(dst_id, payload):
-    frame = u32_le(dst_id) + payload          # payload ≤ ~178 B for one hop; node SARs larger
+LOCATOR = 0x01
+
+SEND(dst_id, payload):                        # payload ≤ ~178 B for one hop; node SARs larger
+    loc   = u32_le(dst_id)
+    frame = byte(LOCATOR) + byte(len(loc)) + loc + payload
     socket.write( hdlc_encode(frame) )
 
 ON RECEIVE (run an HDLC decoder over the incoming TCP byte stream):
     for frame in hdlc_decode(stream):         # decoder ignores non-frame bytes (node logs)
-        if len(frame) < 4: continue
-        src_id  = u32_le(frame[0:4])
-        payload = frame[4:]
+        if len(frame) < 2: continue
+        addr_type, addr_len = frame[0], frame[1]
+        if addr_type != LOCATOR or len(frame) < 2 + addr_len: continue
+        src_id  = le_uint(frame[2 : 2+addr_len])     # read addr_len bytes — DON'T assume 4
+        payload = frame[2+addr_len :]
         deliver(src_id, payload)              # your app's message
 
 hdlc_encode(data):  FLAG + escape(data) + FLAG          # FLAG=0x7E, ESC=0x7D, mask 0x20
@@ -268,8 +287,9 @@ app on the destination node — bring your own encryption.
 ```
 Transport:   USB serial 115200 8N1 (send "tunnel\n" once) | BLE NUS 6e400001/2/3 (paired)
 Framing:     HDLC   FLAG=0x7E  ESC=0x7D  ESC_MASK=0x20
-Frame body:  out → [u32 dst_id LE][payload]      in ← [u32 src_id LE][payload]
-Node id:     4-byte mesh address (hex, e.g. 9828F51B); BLE name AgnLoRa-<id>
+Frame body:  [u8 addr_type][u8 addr_len][addr LE][payload]   (addr_type 0x01=LOCATOR; 0x02=IDENTITY reserved)
+             out → addr = dst node id      in ← addr = src node id   (read addr_len; 4 B now, 16 B later)
+Node id:     mesh address (4 B today, hex e.g. 9828F51B); BLE name AgnLoRa-<id>
 Payload:     ≤ ~178 B = 1 hop frame; up to 8 KB auto-fragmented (SAR + CRC + retransmit)
 Reliability: per-hop ARQ only — add end-to-end ACK yourself, or use Reticulum (Path A)
 TCP bridge:  Path A = RNS (TCPServerInterface + AgnosticLoraInterface) | Path B = byte relay

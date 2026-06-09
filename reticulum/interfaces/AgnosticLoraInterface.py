@@ -40,6 +40,11 @@ class HDLC:
 class AgnosticLoraInterface(Interface):
     DEFAULT_IFAC_SIZE = 8
 
+    # Typed, length-prefixed tunnel envelope (matches the node firmware):
+    #   [u8 addr_type][u8 addr_len][addr bytes…][payload…]
+    ADDR_LOCATOR  = 0x01      # addr = node-id locator (4 B today, 16 B once the id widens)
+    ADDR_IDENTITY = 0x02      # reserved (resolve-and-forward) — not used yet
+
     def __init__(self, owner, configuration):
         super().__init__()
         c = Interface.get_config_obj(configuration)
@@ -72,7 +77,8 @@ class AgnosticLoraInterface(Interface):
     def process_outgoing(self, data):
         if not self.online:
             return
-        payload = struct.pack("<I", self.peer) + data     # [u32 dst][rns packet]
+        loc = struct.pack("<I", self.peer)                          # locator (node id, LE)
+        payload = bytes([self.ADDR_LOCATOR, len(loc)]) + loc + data  # [type][len][locator][rns packet]
         self.serial.write(HDLC.frame(payload)); self.serial.flush()
         self.txb += len(data)
 
@@ -86,11 +92,15 @@ class AgnosticLoraInterface(Interface):
                 byte = b[0]
                 if in_frame and byte == HDLC.FLAG:
                     in_frame = False
-                    if len(buf) >= 4:
-                        # strip the 4-byte src node id; hand the RNS packet up
-                        data = bytes(buf[4:])
-                        self.rxb += len(data)
-                        self.owner.inbound(data, self)
+                    # [addr_type][addr_len][addr][payload]; strip the envelope, hand the
+                    # RNS packet up. (We don't need the src locator for RNS, but caching
+                    # it here is the free reverse-path binding — see distributed-lookup-plan.)
+                    if len(buf) >= 2:
+                        addr_type, addr_len = buf[0], buf[1]
+                        if addr_type == self.ADDR_LOCATOR and len(buf) >= 2 + addr_len:
+                            data = bytes(buf[2 + addr_len:])
+                            self.rxb += len(data)
+                            self.owner.inbound(data, self)
                 elif byte == HDLC.FLAG:
                     in_frame = True; esc = False; buf = bytearray()
                 elif in_frame and len(buf) < self.HW_MTU + 8:
