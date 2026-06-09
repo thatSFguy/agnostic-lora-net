@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agnostic-LoRa-Net · node manager (BLE pairing)</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:760px;margin:1.5rem auto;padding:0 1rem;}
+  h1{font-size:1.25rem;}
+  button{font-size:1rem;padding:.5rem 1rem;margin:.2rem .3rem .2rem 0;cursor:pointer;}
+  .pinbox{background:#0a2540;color:#fff;border-radius:10px;padding:1rem 1.2rem;margin:.8rem 0;text-align:center;}
+  .pin{font-family:ui-monospace,monospace;font-size:2.6rem;letter-spacing:.4rem;font-weight:bold;}
+  #status{font-weight:bold;} .ok{color:#0a0;} .bad{color:#c00;}
+  .stat{display:inline-block;min-width:11rem;}
+  #log{background:#111;color:#0f0;font-family:ui-monospace,monospace;font-size:.8rem;height:13rem;
+       overflow:auto;padding:.5rem;white-space:pre-wrap;border-radius:6px;}
+  input{font-size:1rem;padding:.4rem;width:7rem;}
+  .muted{color:#666;font-size:.9rem;}
+</style>
+</head>
+<body>
+<h1>agnostic-LoRa-Net — node manager</h1>
+<p class="muted">Connect to a node over <b>USB serial</b> (the node must be a COM port —
+if it's attached to WSL via usbipd, detach it first). Enable BLE on the nodes that need
+it, then pair your phone using the PIN shown below.</p>
+
+<div>
+  <button id="connect">Connect (USB)</button>
+  <span id="status" class="bad">disconnected</span>
+  <span class="stat" style="margin-left:1rem;">node: <b id="node">—</b></span>
+</div>
+
+<div class="pinbox">
+  <div>BLE pairing PIN</div>
+  <div class="pin" id="pin">— — — — — —</div>
+  <div class="muted" id="advstate" style="color:#bcd;">BLE: off</div>
+</div>
+
+<div>
+  <button id="enable" disabled>① Enable BLE</button>
+  <button id="disable" disabled>Disable BLE</button>
+  <button id="newpin" disabled>② New random PIN</button>
+  <input id="setpin" placeholder="6 digits" maxlength="6" inputmode="numeric">
+  <button id="setbtn" disabled>Set PIN</button>
+</div>
+<p class="muted">③ On your phone: pair with <b>AgnLoRa-…</b> and enter the PIN above.</p>
+
+<div id="log"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight;};
+let port,writer;
+
+function onLine(line){
+  log(line);
+  let m;
+  if((m=line.match(/PIN=(\d{6})/))) $('pin').textContent=m[1].split('').join(' ');
+  if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
+  if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
+  if((m=line.match(/adv(?:ertising)?=([01])/))){ const on=m[1]==='1';
+    $('advstate').textContent='BLE: '+(on?'ON — advertising as AgnLoRa-'+$('node').textContent:'off'); }
+}
+
+async function send(s){ if(writer) await writer.write(new TextEncoder().encode(s+'\n')); }
+
+async function readLoop(){
+  const reader=port.readable.getReader(); let buf='';
+  try{
+    while(true){
+      const {value,done}=await reader.read(); if(done) break;
+      buf+=new TextDecoder().decode(value);
+      let i; while((i=buf.indexOf('\n'))>=0){ onLine(buf.slice(0,i).replace(/\r$/,'')); buf=buf.slice(i+1); }
+    }
+  }catch(e){ log('read end: '+e); } finally{ reader.releaseLock(); }
+}
+
+async function connect(){
+  try{
+    port=await navigator.serial.requestPort();
+    await port.open({baudRate:115200});
+    writer=port.writable.getWriter();
+    $('status').textContent='connected'; $('status').className='ok';
+    ['enable','disable','newpin','setbtn'].forEach(id=>$(id).disabled=false);
+    readLoop();
+    log('connected — reading… (it picks up the PIN from the heartbeat)');
+    setTimeout(()=>send('ble'),600);   // ask for current BLE state + PIN
+  }catch(e){ log('connect error: '+e); }
+}
+
+$('connect').onclick=connect;
+$('enable').onclick=()=>send('ble on');
+$('disable').onclick=()=>send('ble off');
+$('newpin').onclick=()=>send('blepin random');
+$('setbtn').onclick=()=>{ const p=$('setpin').value; if(/^\d{6}$/.test(p)) send('blepin '+p); else log('PIN must be 6 digits'); };
+if(!navigator.serial) log('Web Serial unavailable — use Chrome/Edge over http://localhost or https.');
+</script>
+</body>
+</html>

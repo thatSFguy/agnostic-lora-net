@@ -1,19 +1,17 @@
-// main.cpp — link prober + routing + multi-hop forwarding (Agent.md §6/§7).
+// main.cpp — agnostic-LoRa-Net node firmware (Agent.md §6/§7).
 //
 // Each node beacons periodically; every beacon carries the node's announce
 // (neighbour reports + distance-vector table), and every received frame's RSSI/SNR
-// feeds the portable routing core (lib/mesh). So nodes build a live per-direction
-// neighbour/route table over the air, and DATA packets are delivered, forwarded
-// toward next_hop(), or dropped (dedup / TTL / no-route) by the relay engine.
+// feeds the portable routing core (lib/mesh). Nodes build a live per-direction
+// neighbour/route table over the air; DATA packets are delivered, forwarded toward
+// next_hop(), or dropped (dedup / TTL / no-route) by the relay engine, with
+// hop-by-hop ARQ and application-layer SAR on top.
 //
-// All the routing/codec/forwarding *logic* is unit-tested host-side
-// (test/test_mesh, test_codec, test_forward); here it is wired onto the
-// non-blocking SX1262 transport and cross-compiled for the nRF52. Build with
-// -DAGN_DATA_DEST=0x...  on one node to watch a 3-node line forward end to end.
-//
-// What this is NOT (yet): no BLE (that layer is borrowed wholesale from the forked
-// MeshCore later — never hand-rolled, §9), no crypto, no link-layer unicast
-// (forwarding rebroadcasts with TTL+dedup until link aliases land in Phase 2/3).
+// Northbound, a host can drive the mesh as an opaque transport: a USB serial console
+// + a binary HDLC `tunnel` (used by the Reticulum interface), and — with -DAGN_BLE —
+// a PIN-paired BLE Nordic UART Service that tunnels app frames in/out (Req 1: BLE +
+// LoRa coexist because the radio core never blocks). The routing/codec/relay/ARQ/SAR
+// logic is unit-tested host-side (test/*).
 
 #include <Arduino.h>
 #include "board_config.h"
@@ -87,17 +85,42 @@ static inline bool host_tunnel_active() {
 // webapp -> BLE -> LoRa mesh -> BLE -> webapp, with the node also proving Req 1
 // (BLE link stays up while the LoRa radio is busy).
 static BLEUart   bleuart;
+static char      ble_pin[7]      = "000000";   // 6-digit pairing PIN
+static bool      ble_advertising = false;
 
 static void ble_connect_cb(uint16_t)            { ble_connected = true; }
 static void ble_disconnect_cb(uint16_t, uint8_t){ ble_connected = false; }
 
+// Generate a fresh 6-digit pairing PIN.
+static void ble_gen_pin() {
+    randomSeed((uint32_t)micros() ^ my_id ^ (uint32_t)(millis() << 3));
+    snprintf(ble_pin, sizeof(ble_pin), "%06lu", (unsigned long)random(0, 1000000));
+}
+
+static void ble_start_adv() {
+    Bluefruit.Security.setPIN(ble_pin);   // (re)apply the current PIN before pairing
+    Bluefruit.Advertising.start(0);       // 0 = advertise until connected
+    ble_advertising = true;
+}
+static void ble_stop_adv() {
+    Bluefruit.Advertising.stop();
+    if (ble_connected) Bluefruit.disconnect(Bluefruit.connHandle());
+    ble_advertising = false;
+}
+
+// Init the SoftDevice + a PIN-secured UART, but DON'T advertise yet — BLE is turned
+// on per node, on demand, from the management console (`ble on`).
 static void ble_setup() {
-    Bluefruit.begin();                    // start the SoftDevice (before radio.begin)
+    ble_gen_pin();
+    Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
+    Bluefruit.begin();                              // start the SoftDevice (before radio.begin)
     Bluefruit.setTxPower(4);
     char nm[24]; snprintf(nm, sizeof(nm), "AgnLoRa-%08lX", (unsigned long)my_id);
     Bluefruit.setName(nm);
+    Bluefruit.Security.setPIN(ble_pin);             // static passkey -> phone must enter it
     Bluefruit.Periph.setConnectCallback(ble_connect_cb);
     Bluefruit.Periph.setDisconnectCallback(ble_disconnect_cb);
+    bleuart.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);  // require pairing
     bleuart.begin();
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
     Bluefruit.Advertising.addTxPower();
@@ -106,7 +129,7 @@ static void ble_setup() {
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 244);
     Bluefruit.Advertising.setFastTimeout(30);
-    Bluefruit.Advertising.start(0);
+    // advertising started later via `ble on`
 }
 
 // Decode HDLC frames arriving over BLE ([u32 dst][payload]) and push them into the
@@ -735,8 +758,27 @@ static void handle_command(char* line) {
     } else if (!strcmp(cmd, "tunnel")) {
         tunnel_mode = true;     // serial becomes a binary HDLC pipe for a host bridge
         Serial.println("tunnel on");
+#ifdef AGN_BLE
+    } else if (!strcmp(cmd, "ble")) {        // ble | ble on | ble off
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "on"))  ble_start_adv();
+        else if (a && !strcmp(a, "off")) ble_stop_adv();
+        char m[80];
+        snprintf(m, sizeof(m), "BLE name=AgnLoRa-%08lX advertising=%d connected=%d PIN=%s",
+                 (unsigned long)my_id, (int)ble_advertising, (int)ble_connected, ble_pin);
+        Serial.println(m);
+    } else if (!strcmp(cmd, "blepin")) {     // blepin | blepin random | blepin <6 digits>
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "random")) ble_gen_pin();
+        else if (a && strlen(a) == 6) { strncpy(ble_pin, a, 6); ble_pin[6] = 0; }
+        if (ble_advertising) ble_start_adv();   // re-apply for the next pairing
+        char m[40]; snprintf(m, sizeof(m), "BLE PIN=%s", ble_pin); Serial.println(m);
+#endif
     } else if (!strcmp(cmd, "help")) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
+#ifdef AGN_BLE
+        Serial.println("ble [on|off] | blepin [random|<6 digits>]");
+#endif
     } else {
         Serial.print("unknown cmd: "); Serial.println(cmd);
     }
@@ -812,7 +854,8 @@ void setup() {
 
 #ifdef AGN_BLE
     ble_setup();   // bring up the SoftDevice/BLE before configuring the radio interrupt
-    Serial.println("BLE up: advertising (Nordic UART Service)");
+    { char m[56]; snprintf(m, sizeof(m), "BLE ready (off). PIN=%s  use 'ble on' to advertise", ble_pin);
+      Serial.println(m); }
 #endif
 
     Serial.println("initializing radio...");
@@ -858,9 +901,10 @@ void loop() {
                  (unsigned)txq_count);
         Serial.println(hb);
 #ifdef AGN_BLE
-        char bl[48];
-        snprintf(bl, sizeof(bl), "[ble] connected=%d rx=%lu tx=%lu",
-                 (int)ble_connected, (unsigned long)ble_rxb, (unsigned long)ble_txb);
+        char bl[72];
+        snprintf(bl, sizeof(bl), "[ble] adv=%d connected=%d rx=%lu tx=%lu PIN=%s",
+                 (int)ble_advertising, (int)ble_connected,
+                 (unsigned long)ble_rxb, (unsigned long)ble_txb, ble_pin);
         Serial.println(bl);   // watch this stay connected=1 through the LoRa beacons above
 #endif
 #ifdef LED_BUILTIN

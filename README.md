@@ -53,6 +53,7 @@ docs/meshcore-integration.md   Phase-1 fork seam design (now optional — BLE wo
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
 web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
+web/manage.html           Web Serial node manager: enable BLE + show/set the pairing PIN
 ```
 
 ## Build & test
@@ -104,10 +105,16 @@ RAKs and round-trips a cryptographically-proven echo **over the mesh**.
 
 `pio run -e wiscore_rak4631_ble` adds a SoftDevice BLE Nordic UART Service alongside
 the mesh. BLE frames are tunnelled into the mesh and deliveries come back out over BLE,
-so the full path is **webapp → BLE → node → LoRa → node → BLE → webapp**. Open
-`web/ble.html` (served over `http://localhost` for Web Bluetooth) in two tabs, connect
-each to an `AgnLoRa-<id>` node, and chat across the backbone — the BLE links stay up
-through LoRa traffic.
+so the full path is **app → BLE → node → LoRa → node → BLE → app** — proven on hardware
+with two RAKs (`web/ble.html`, a Web Bluetooth chat). The BLE links stay up through LoRa
+traffic; that's Req 1.
+
+**Pairing is PIN-secured.** The UART requires `SECMODE_ENC_WITH_MITM`, BLE is off by
+default, and a 6-digit pairing PIN is set per node. Management is **out-of-band over USB**
+(you can't configure BLE security over BLE itself) via `web/manage.html` (Web Serial):
+**Connect → Enable BLE → read the PIN → pair your phone with it.** Console equivalents:
+`ble on|off`, `blepin [random|<6 digits>]`; the PIN also appears in the heartbeat
+(`[ble] … PIN=482917`).
 
 ## What's left
 
