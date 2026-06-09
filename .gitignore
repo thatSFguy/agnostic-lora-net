@@ -1,0 +1,15 @@
+# Build output
+.pio/
+.vscode/
+*.bin
+*.hex
+*.uf2
+
+# Python venv for the Reticulum tooling
+.venv-rns/
+
+# Generated Reticulum instances (contain RNS identity private keys — never commit)
+reticulum/inst_*/
+
+# Test artifacts (received transfers); test_orig.png is kept as the input fixture
+test_recv*.png

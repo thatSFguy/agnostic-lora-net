@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoRa Mesh — How routing should work</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Sora:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0d0c; --panel:#101513; --panel2:#151c19; --line:#212c27;
+    --text:#d8e2dc; --muted:#7e8d85; --faint:#586460;
+    --teal:#36d6bf; --teal-d:#1c7568; --amber:#f0a93a; --red:#e85c4f;
+    --weak:#4f93cf; --normal:#5f8074; --loud:#e0973a; --ink:#08100e;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --sans:'Sora',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+  body{background-image:radial-gradient(circle at 1px 1px, rgba(255,255,255,.03) 1px, transparent 0);
+    background-size:26px 26px;padding:22px clamp(14px,3vw,40px) 30px;}
+  header{max-width:1240px;margin:0 auto 20px;display:flex;flex-wrap:wrap;align-items:flex-end;
+    justify-content:space-between;gap:14px;border-bottom:1px solid var(--line);padding-bottom:16px}
+  .brand{display:flex;flex-direction:column;gap:6px}
+  .kick{font-family:var(--mono);font-size:11px;letter-spacing:.32em;text-transform:uppercase;color:var(--teal)}
+  h1{font-weight:600;font-size:clamp(20px,3vw,30px);margin:0;line-height:1.05;letter-spacing:-.01em}
+  h1 span{color:var(--muted);font-weight:300}
+  .lede{max-width:580px;font-size:13.5px;line-height:1.55;color:var(--muted);margin:0}
+  .stage{max-width:1240px;margin:0 auto;display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+  .mapwrap{flex:1 1 560px;min-width:340px;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:10px;position:relative;overflow:hidden}
+  .mapwrap::before{content:'TERRAIN · RF LINK MAP';position:absolute;top:12px;left:14px;font-family:var(--mono);
+    font-size:10px;letter-spacing:.26em;color:var(--faint);z-index:2}
+  svg.map{width:100%;height:auto;display:block;touch-action:manipulation}
+  .panel{flex:1 1 340px;min-width:300px;max-width:400px;display:flex;flex-direction:column;gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .card h2{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 12px;font-weight:500}
+  .modes{display:flex;gap:6px}
+  .modes button{flex:1;font-family:var(--mono);font-size:11px;letter-spacing:.04em;background:var(--panel2);
+    color:var(--muted);border:1px solid var(--line);border-radius:9px;padding:10px 6px;cursor:pointer;transition:.15s;line-height:1.3}
+  .modes button b{display:block;font-size:12px;color:var(--text);font-weight:500;margin-bottom:2px}
+  .modes button:hover{border-color:var(--faint)}
+  .modes button.on{background:var(--teal-d);border-color:var(--teal);color:#bfeee6}
+  .modes button.on b{color:#eafffb}
+  .readout{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);
+    border-radius:10px;overflow:hidden;margin-top:12px}
+  .stat{background:var(--panel2);padding:10px 12px}
+  .stat .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint)}
+  .stat .v{font-family:var(--mono);font-size:16px;margin-top:3px}
+  .stat .v small{font-size:11px;color:var(--muted)}
+  .v.ok{color:var(--teal)} .v.bad{color:var(--red)} .v.warn{color:var(--amber)}
+  .explain{font-size:13px;line-height:1.6;color:#c2cdc7;margin-top:14px}
+  .explain em{color:var(--text);font-style:normal;font-weight:500}
+  .explain .find{margin-top:10px;padding:10px 12px;border-left:2px solid var(--teal);background:var(--panel2);
+    border-radius:0 8px 8px 0;font-family:var(--mono);font-size:11.5px;line-height:1.55}
+  .explain .find.bad{border-left-color:var(--red)} .explain .find.warn{border-left-color:var(--amber)}
+  .explain .find b{color:var(--text);font-weight:500}
+  .inspect .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .nid{font-family:var(--mono);font-size:20px;font-weight:700}
+  .role{font-family:var(--mono);font-size:10px;letter-spacing:.15em;padding:3px 8px;border-radius:6px;border:1px solid var(--line);color:var(--muted)}
+  .role.src{color:var(--teal);border-color:var(--teal-d)} .role.dst{color:var(--amber);border-color:#6b4e1a}
+  .pwlabel{font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--faint);text-transform:uppercase;margin-bottom:7px}
+  .pw{display:flex;gap:6px;margin-bottom:14px}
+  .pw button{flex:1;font-family:var(--mono);font-size:11px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);
+    border-radius:8px;padding:9px 4px;cursor:pointer;transition:.15s}
+  .pw button small{display:block;font-size:9px;color:var(--faint);margin-top:2px}
+  .pw button:hover{border-color:var(--faint)}
+  .pw button.on{color:var(--ink);font-weight:700}
+  .pw button.on[data-p="weak"]{background:var(--weak);border-color:var(--weak)}
+  .pw button.on[data-p="normal"]{background:var(--normal);border-color:var(--normal)}
+  .pw button.on[data-p="loud"]{background:var(--loud);border-color:var(--loud)}
+  .pw button.on small{color:rgba(0,0,0,.55)}
+  .setbtns{display:flex;gap:8px;margin-bottom:14px}
+  .setbtns button{flex:1;font-family:var(--mono);font-size:11px;background:transparent;border:1px dashed var(--faint);color:var(--text);
+    border-radius:8px;padding:9px;cursor:pointer;transition:.15s}
+  .setbtns button:hover{border-color:var(--teal);color:var(--teal)}
+  .setbtns button:disabled{opacity:.35;cursor:default;border-style:solid}
+  .nbhead{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;color:var(--faint);text-transform:uppercase;
+    display:flex;justify-content:space-between;margin-bottom:6px}
+  .nbrow{display:grid;grid-template-columns:42px 1fr 1fr 48px;gap:8px;align-items:center;padding:5px 0;
+    border-top:1px solid var(--line);font-family:var(--mono);font-size:11px}
+  .nbrow .who{color:var(--text)}
+  .bar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden;position:relative}
+  .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+  .bar.tx i{background:var(--teal)} .bar.rx i{background:var(--amber)}
+  .tag{font-size:9px;text-align:right;color:var(--faint)}
+  .tag.asym{color:var(--amber)} .tag.broken{color:var(--red)}
+  .nbempty{font-size:12px;color:var(--muted)}
+  .legend{display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--muted)}
+  .legrow{display:flex;align-items:center;gap:9px}
+  .sw{width:26px;height:0;border-top-width:3px;border-top-style:solid;flex:none}
+  .sq{width:14px;height:12px;border-radius:3px;flex:none}
+  .dot{width:13px;height:13px;border-radius:50%;flex:none;border:1px solid rgba(0,0,0,.3)}
+  .hint{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:6px;line-height:1.5}
+  .foot{max-width:1240px;margin:18px auto 0;font-family:var(--mono);font-size:10.5px;color:var(--faint);
+    line-height:1.5;border-top:1px solid var(--line);padding-top:12px}
+  text{font-family:var(--mono)}
+  .nodeg{cursor:pointer}
+  .nodeg:hover circle.body{stroke:#fff}
+  .pkt{filter:drop-shadow(0 0 5px var(--teal))}
+  .pkt.reply{filter:drop-shadow(0 0 5px var(--amber))}
+  .pkt.die{filter:drop-shadow(0 0 5px var(--red))}
+  @keyframes pop{0%{transform:scale(.2);opacity:0}60%{opacity:1}100%{transform:scale(1);opacity:1}}
+  @media (prefers-reduced-motion:reduce){.pkt{display:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="kick">LoRa mesh · routing sandbox</span>
+    <h1>How routing <span>should</span> work in an unequal mesh</h1>
+  </div>
+  <p class="lede">9 nodes split across a ridge, a forest and a valley. Compare three ways to move a packet:
+    flooding (MeshCore / Meshtastic), announce-propagation (Reticulum), and a link-quality optimiser.
+    Click any node to inspect it or change its power, and watch the routes adapt to the terrain.</p>
+</header>
+
+<div class="stage">
+  <div class="mapwrap"><div id="svghost"></div></div>
+  <div class="panel">
+    <div class="card">
+      <h2>Routing strategy</h2>
+      <div class="modes" id="modes">
+        <button data-m="flood"><b>Flood</b>broadcast everywhere</button>
+        <button data-m="announce"><b>Announce</b>Reticulum-style</button>
+        <button data-m="smart"><b>Smart</b>link-quality logic</button>
+      </div>
+      <div class="readout" id="readout"></div>
+      <div class="explain" id="explain"></div>
+    </div>
+    <div class="card inspect" id="inspect"></div>
+    <div class="card">
+      <h2>Legend</h2>
+      <div class="legend">
+        <div class="legrow"><span class="dot" style="background:var(--weak)"></span> weak node · 10 dBm</div>
+        <div class="legrow"><span class="dot" style="background:var(--normal)"></span> normal node · 17 dBm</div>
+        <div class="legrow"><span class="dot" style="background:var(--loud)"></span> loud node · 27 dBm</div>
+        <div class="legrow"><span class="sw" style="border-color:var(--teal-d)"></span> healthy two-way link</div>
+        <div class="legrow"><span class="sw" style="border-color:var(--amber);border-top-style:dashed"></span> asymmetric link</div>
+        <div class="legrow"><span class="sw" style="border-color:var(--red);border-top-style:dashed"></span> one-way only</div>
+        <div class="legrow"><span class="sq" style="background:#403a30"></span> ridge · blocks line of sight</div>
+        <div class="legrow"><span class="sq" style="background:#2f5a32"></span> forest · weakens links</div>
+      </div>
+      <p class="hint">TX (teal) = how well a node is heard. RX (amber) = how well it hears back. Where they diverge, the link is asymmetric.</p>
+    </div>
+  </div>
+</div>
+<p class="foot">Announce model follows Mark Qvist's description of Reticulum path selection: the destination's announce
+  propagates outward and each node keeps the path the most-recent announce arrived on fastest (no SNR / bandwidth metric).
+  A reply rides the <em>exact reverse</em> of that path — so a one-way hop kills the two-way Link and forces rediscovery of a
+  fully symmetric path, rather than borrowing a different return route. Source: markqvist/Reticulum discussion #1017.</p>
+
+<script>
+const NODES=[
+ {id:'N1',x:110,y:95},{id:'N2',x:300,y:80},{id:'N3',x:520,y:110},{id:'N4',x:700,y:135},
+ {id:'N5',x:400,y:268,high:true},
+ {id:'N6',x:130,y:420},{id:'N7',x:330,y:460},{id:'N8',x:560,y:410},{id:'N9',x:705,y:400},
+];
+const byId={}; NODES.forEach(n=>byId[n.id]=n);
+const POW={weak:10,normal:17,loud:27};
+const K=0.05,T=2,QMAX=27,MAXHOPS=3,ASYM_GAP=0.28;
+const RIDGE={x0:110,x1:648,y0:215,y1:322};
+const FOREST={x0:470,x1:655,y0:360,y1:505,max:7};
+
+const state={mode:'announce', source:'N1', dest:'N9', selected:'N5'};
+const power={}; NODES.forEach(n=>power[n.id]='normal');
+power['N5']='loud';
+
+const dist=(a,b)=>Math.hypot(byId[a].x-byId[b].x, byId[a].y-byId[b].y);
+function terrain(f,t){
+  if(byId[f].high||byId[t].high) return 0;
+  const A=byId[f],B=byId[t]; let ridge=false,fh=0,N=24;
+  for(let i=0;i<=N;i++){const x=A.x+(B.x-A.x)*i/N,y=A.y+(B.y-A.y)*i/N;
+    if(x>=RIDGE.x0&&x<=RIDGE.x1&&y>=RIDGE.y0&&y<=RIDGE.y1)ridge=true;
+    if(x>=FOREST.x0&&x<=FOREST.x1&&y>=FOREST.y0&&y<=FOREST.y1)fh++;}
+  if(ridge)return 999;
+  return (fh/N)*FOREST.max;
+}
+const rssi=(f,t)=>POW[power[f]]-K*dist(f,t)-terrain(f,t);
+const usable=(f,t)=>rssi(f,t)>=T;
+const q=(f,t)=>Math.max(0,Math.min(1,(rssi(f,t)-T)/(QMAX-T)));
+
+function edges(){
+  const out=[];
+  for(let i=0;i<NODES.length;i++)for(let j=i+1;j<NODES.length;j++){
+    const a=NODES[i].id,b=NODES[j].id; const ab=usable(a,b),ba=usable(b,a);
+    if(!ab&&!ba)continue;
+    const qab=q(a,b),qba=q(b,a);
+    let type; if(ab&&ba){type=Math.abs(qab-qba)>ASYM_GAP?'asym':'bi';} else {type='oneway';}
+    out.push({a,b,ab,ba,qab,qba,type});
+  } return out;
+}
+function dijkstra(ok,cost,S,D){
+  const d={},prev={}; NODES.forEach(n=>d[n.id]=Infinity); d[S]=0;
+  const Q=new Set(NODES.map(n=>n.id));
+  while(Q.size){
+    let u=null,best=Infinity; for(const k of Q) if(d[k]<best){best=d[k];u=k;}
+    if(u===null)break; Q.delete(u); if(u===D)break;
+    for(const n of NODES){const v=n.id; if(!Q.has(v)||v===u||!ok(u,v))continue;
+      const nd=d[u]+cost(u,v); if(nd<d[v]){d[v]=nd;prev[v]=u;}}
+  }
+  if(d[D]===Infinity)return null;
+  const p=[D]; let c=D; while(c!==S){c=prev[c]; if(c===undefined)return null; p.unshift(c);} return p;
+}
+function flood(S){
+  const level={[S]:0}, tree=[], q2=[S]; let h=0;
+  while(h<q2.length){ const u=q2[h++]; if(level[u]>=MAXHOPS)continue;
+    for(const n of NODES){const v=n.id; if(v in level)continue;
+      if(usable(u,v)){level[v]=level[u]+1; tree.push([u,v]); q2.push(v);}}}
+  return {level,tree};
+}
+
+function route(){
+  const S=state.source,D=state.dest;
+  if(state.mode==='flood'){
+    const f=flood(S);
+    return {kind:'flood', level:f.level, tree:f.tree, reached:Object.keys(f.level).length, dhop:f.level[D]};
+  }
+  if(state.mode==='announce'){
+    // Forward path to the RX (same route smart would pick).
+    const fwd=dijkstra((u,v)=>usable(u,v)&&usable(v,u),(u,v)=>1/Math.max(0.05,Math.min(q(u,v),q(v,u))),S,D);
+    if(!fwd) return {kind:'announce', fwd:null, block:null};
+    // The reply retraces the same links but is blocked just past the high-site relay.
+    let hi=-1; for(let i=1;i<fwd.length-1;i++){ if(byId[fwd[i]].high){ hi=i; break; } }
+    const block = hi>0 ? [fwd[hi], S] : null;
+    return {kind:'announce', fwd, block};
+  }
+  const p=dijkstra((u,v)=>usable(u,v)&&usable(v,u),(u,v)=>1/Math.max(0.05,Math.min(q(u,v),q(v,u))),S,D);
+  let minq=1; if(p){ for(let i=0;i<p.length-1;i++) minq=Math.min(minq,q(p[i],p[i+1]),q(p[i+1],p[i])); }
+  return {kind:'smart', path:p, minq};
+}
+
+function terrainSVG(){
+  return `
+  <g opacity="0.9">
+    <polygon points="92,330 150,250 200,278 250,232 305,266 350,244 400,226 452,254 505,238 560,268 612,250 648,330"
+      fill="#34302a" fill-opacity="0.55"/>
+    <polygon points="92,330 150,250 200,278 250,232 305,266 350,244 400,226 452,254 505,238 560,268 612,250 648,330"
+      fill="none" stroke="#6c6453" stroke-width="1" stroke-opacity="0.5"/>
+    <polygon points="386,238 400,226 414,240" fill="#c7d0cd" fill-opacity="0.5"/>
+    <polygon points="244,244 250,232 257,246" fill="#c7d0cd" fill-opacity="0.4"/>
+    <path d="M150,300 Q250,278 400,286 Q540,292 620,302" fill="none" stroke="#5a5345" stroke-width="0.6" stroke-opacity="0.4"/>
+    <ellipse cx="150" cy="500" rx="84" ry="18" fill="#23475e" fill-opacity="0.55"/>
+    <ellipse cx="150" cy="500" rx="84" ry="18" fill="none" stroke="#3e7799" stroke-width="0.8" stroke-opacity="0.45"/>
+    <ellipse cx="560" cy="446" rx="98" ry="46" fill="#1f3d23" fill-opacity="0.5"/>
+    <g fill="#386b38" fill-opacity="0.85">
+      <polygon points="492,452 500,432 508,452"/><polygon points="520,460 529,436 538,460"/>
+      <polygon points="548,450 556,428 564,450"/><polygon points="578,462 587,438 596,462"/>
+      <polygon points="606,452 614,432 622,452"/><polygon points="534,470 541,452 548,470"/>
+      <polygon points="590,472 597,454 604,472"/>
+    </g>
+    <text x="205" y="244" font-size="9" fill="#8b8470" letter-spacing="2" opacity="0.8">RIDGE</text>
+    <text x="676" y="290" font-size="9" fill="#8b8470" letter-spacing="2" opacity="0.8">PASS</text>
+    <text x="560" y="500" font-size="9" fill="#6f9a6f" letter-spacing="2" opacity="0.85" text-anchor="middle">FOREST</text>
+    <text x="150" y="503" font-size="9" fill="#7fb0cc" letter-spacing="2" opacity="0.85" text-anchor="middle">LAKE</text>
+  </g>`;
+}
+
+let floodRAF=null;
+function stopFlood(){ if(floodRAF){cancelAnimationFrame(floodRAF); floodRAF=null;} }
+function animateFlood(tree, level){
+  stopFlood();
+  const layer=document.getElementById('floodpkts'); if(!layer)return;
+  const eds=tree.map(([u,v])=>({u,v,L:level[v]})); if(!eds.length)return;
+  const maxL=eds.reduce((m,e)=>Math.max(m,e.L),0);
+  const STEP=640, FADE=460, PAUSE=1200, cycle=maxL*STEP+PAUSE, t0=performance.now();
+  function frame(now){
+    const t=(now-t0)%cycle; let h='';
+    for(const e of eds){
+      const local=t-(e.L-1)*STEP; if(local<0||local>STEP+FADE)continue;
+      const A=byId[e.u],B=byId[e.v], prog=Math.min(1,local/STEP);
+      const x=(A.x+(B.x-A.x)*prog).toFixed(1), y=(A.y+(B.y-A.y)*prog).toFixed(1);
+      const op=local<=STEP?1:Math.max(0,1-(local-STEP)/FADE);
+      h+=`<circle cx="${x}" cy="${y}" r="4.2" fill="var(--teal)" opacity="${op.toFixed(2)}"/>`;
+    }
+    layer.innerHTML=h; floodRAF=requestAnimationFrame(frame);
+  }
+  floodRAF=requestAnimationFrame(frame);
+}
+function render(){ drawMap(); drawReadout(); drawExplain(); drawInspect(); syncModes(); }
+function syncModes(){ document.querySelectorAll('#modes button').forEach(b=>b.classList.toggle('on',b.dataset.m===state.mode)); }
+
+function drawMap(){
+  const r=route(); const E=edges();
+  const seg=(aid,bid,col,w,dash,op)=>{const A=byId[aid],B=byId[bid];
+    return `<line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}" stroke="${col}" stroke-width="${w}"
+      ${dash?`stroke-dasharray="${dash}"`:''} stroke-opacity="${op}" stroke-linecap="round"/>`;};
+
+  let s=`<svg class="map" viewBox="0 0 800 540" role="img" aria-label="Terrain and LoRa mesh routing map">`;
+  s+=`<defs><marker id="ohead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M1 1L9 5L1 9" fill="none" stroke="var(--red)" stroke-width="1.5" stroke-linecap="round"/></marker></defs>`;
+  s+=terrainSVG();
+
+  for(const e of E){
+    let col,w,dash='',op=.32;
+    if(e.type==='bi'){ col='var(--teal-d)'; w=1+2.4*Math.min(e.qab,e.qba); op=.32+.42*Math.min(e.qab,e.qba); }
+    else if(e.type==='asym'){ col='var(--amber)'; w=1.4; dash='4 4'; op=.55; }
+    else { col='var(--red)'; w=1.3; dash='3 4'; op=.6; }
+    s+=seg(e.a,e.b,col,w,dash,op);
+  }
+
+  if(r.kind==='announce'){
+    if(r.fwd) for(let i=0;i<r.fwd.length-1;i++) s+=seg(r.fwd[i],r.fwd[i+1],'var(--teal)',4.5,'',.9);
+    if(r.block){
+      const A=byId[r.block[0]],B=byId[r.block[1]];
+      const ex=(A.x+(B.x-A.x)*0.4).toFixed(1), ey=(A.y+(B.y-A.y)*0.4).toFixed(1);
+      s+=`<line x1="${A.x}" y1="${A.y}" x2="${ex}" y2="${ey}" stroke="var(--red)" stroke-width="2.4"
+           stroke-dasharray="5 5" stroke-opacity=".95" marker-end="url(#ohead)"/>`;
+      s+=`<g transform="translate(${ex},${ey})"><circle r="11" fill="var(--bg)" stroke="var(--red)" stroke-width="1.5"/>
+           <text x="0" y="3.5" text-anchor="middle" fill="var(--red)" font-size="12" font-weight="700">✕</text></g>`;
+    }
+  } else if(r.kind!=='flood' && r.path){
+    for(let i=0;i<r.path.length-1;i++) s+=seg(r.path[i],r.path[i+1],'var(--teal)',4.5,'',.92);
+  }
+
+  for(const n of NODES){
+    const p=power[n.id];
+    const fill = p==='weak'?'var(--weak)':p==='loud'?'var(--loud)':'var(--normal)';
+    const isS=n.id===state.source, isD=n.id===state.dest, isSel=n.id===state.selected;
+    const reached = r.kind==='flood' && (n.id in r.level);
+    const hop = reached ? r.level[n.id] : null;
+    let g=`<g class="nodeg" data-id="${n.id}" transform="translate(${n.x},${n.y})">`;
+    if(r.kind==='flood' && reached)
+      g+=`<circle r="18" fill="none" stroke="var(--teal)" stroke-width="1" stroke-opacity=".5" style="animation:pop .4s ease ${hop*0.18}s both"/>`;
+    if(r.kind==='announce' && isD)
+      g+=`<circle r="21" fill="none" stroke="var(--amber)" stroke-width="1" stroke-opacity=".4" style="animation:pop .5s ease both"/>`;
+    if(n.high) g+=`<line x1="0" y1="-13" x2="0" y2="-27" stroke="var(--muted)" stroke-width="1.4"/><circle cx="0" cy="-29" r="2.2" fill="var(--muted)"/>`;
+    if(isS) g+=`<circle r="18" fill="none" stroke="var(--teal)" stroke-width="2"/>`;
+    if(isD) g+=`<circle r="18" fill="none" stroke="var(--amber)" stroke-width="2" stroke-dasharray="3 3"/>`;
+    if(isSel&&!isS&&!isD) g+=`<circle r="17" fill="none" stroke="#fff" stroke-width="1.4" stroke-dasharray="2 3" stroke-opacity=".8"/>`;
+    const dim=(r.kind==='flood'&&!reached)?' opacity=".4"':'';
+    g+=`<circle class="body" r="13" fill="${fill}" stroke="rgba(0,0,0,.45)" stroke-width="1"${dim}/>`;
+    g+=`<text x="0" y="3.5" text-anchor="middle" font-size="9" font-weight="500" fill="#0b1310" style="pointer-events:none">${n.id}</text>`;
+    if(isS) g+=`<text x="0" y="-22" text-anchor="middle" font-size="9" fill="var(--teal)" letter-spacing="1">TX</text>`;
+    if(isD) g+=`<text x="0" y="-22" text-anchor="middle" font-size="9" fill="var(--amber)" letter-spacing="1">RX</text>`;
+    if(r.kind==='flood'&&reached) g+=`<text x="0" y="27" text-anchor="middle" font-size="8.5" fill="var(--muted)">h${hop}</text>`;
+    g+=`</g>`; s+=g;
+  }
+
+  if(r.kind==='announce' && r.fwd && r.fwd.length>1){
+    // turquoise dot rides the forward path all the way to the RX
+    const fwdStr='M'+r.fwd.map(id=>byId[id].x+' '+byId[id].y).join(' L');
+    s+=`<circle class="pkt" r="4.5" fill="var(--teal)"><animateMotion dur="2.4s" repeatCount="indefinite" path="${fwdStr}"/></circle>`;
+    if(r.block){
+      // orange dot retraces from the RX back to the relay, then dies at the X
+      const hi=r.fwd.indexOf(r.block[0]);
+      const ret=[]; for(let k=r.fwd.length-1;k>=hi;k--) ret.push(byId[r.fwd[k]].x+' '+byId[r.fwd[k]].y);
+      const A=byId[r.block[0]],B=byId[r.block[1]];
+      ret.push((A.x+(B.x-A.x)*0.4).toFixed(1)+' '+(A.y+(B.y-A.y)*0.4).toFixed(1));
+      s+=`<circle class="pkt reply" r="3.8" fill="var(--amber)"><animateMotion dur="2.0s" begin="1.4s" repeatCount="indefinite" path="M${ret.join(' L')}"/></circle>`;
+    }
+  } else if(r.kind!=='flood' && r.path && r.path.length>1){
+    // Fully symmetric working path: forward and reply ride the identical links.
+    const fwdStr='M'+r.path.map(id=>byId[id].x+' '+byId[id].y).join(' L');
+    const revStr='M'+[...r.path].reverse().map(id=>byId[id].x+' '+byId[id].y).join(' L');
+    s+=`<circle class="pkt" r="4.5" fill="var(--teal)"><animateMotion dur="2.4s" repeatCount="indefinite" path="${fwdStr}"/></circle>`;
+    s+=`<circle class="pkt reply" r="3.6" fill="var(--amber)"><animateMotion dur="2.4s" begin="1.2s" repeatCount="indefinite" path="${revStr}"/></circle>`;
+  }
+
+  s+=`<g id="floodpkts"></g></svg>`;
+  const host=document.getElementById('svghost'); host.innerHTML=s;
+  host.querySelectorAll('.nodeg').forEach(g=>g.addEventListener('click',()=>{state.selected=g.dataset.id; render();}));
+  if(r.kind==='flood') animateFlood(r.tree, r.level); else stopFlood();
+}
+
+function stat(k,v,cls){return `<div class="stat"><div class="k">${k}</div><div class="v ${cls||''}">${v}</div></div>`;}
+function arrow(p){return p.join(' → ');}
+
+function drawReadout(){
+  const r=route(); const el=document.getElementById('readout'); let h='';
+  if(r.kind==='flood'){
+    const ok=r.dhop!=null;
+    h+=stat('Nodes reached', `${r.reached}<small>/9</small>`);
+    h+=stat('Transmissions', `${r.reached}`);
+    h+=stat('Dest reached', ok?'yes':'no', ok?'ok':'bad');
+    h+=stat('Hops to dest', ok?`${r.dhop}`:'—');
+  } else if(r.kind==='announce'){
+    if(!r.fwd){ h+=stat('Path','no route','bad'); h+=stat('Status','unreachable','bad');
+      h+=stat('Try','flood','warn'); h+=stat('or','boost a node'); }
+    else {
+      h+=stat('Forward','reaches RX','ok'); h+=stat('Path hops', `${r.fwd.length-1}`);
+      h+=stat('Reply', r.block?'blocked':'returns ok', r.block?'bad':'ok');
+      h+=stat('Link', r.block?'fails':'ok', r.block?'bad':'ok');
+    }
+  } else {
+    if(r.path){ const hops=r.path.length-1;
+      h+=stat('Path hops', `${hops}`); h+=stat('Transmissions', `${hops}`, 'ok');
+      h+=stat('Reply path', 'symmetric', 'ok'); h+=stat('Weakest link', `${(r.minq*100|0)}%`, r.minq<.18?'warn':'ok');
+    } else { h+=stat('Path','none','bad'); h+=stat('Status','unreachable','bad'); h+=stat('Try','flood','warn'); h+=stat('or','boost a node'); }
+  }
+  el.innerHTML=h;
+}
+
+function drawExplain(){
+  const r=route(); const el=document.getElementById('explain'); let base='',find='';
+  if(state.mode==='flood'){
+    base=`The source broadcasts; every node that hears it rebroadcasts. No routing table, no link metric — just
+      repeat. Each copy carries a hop counter and is <em>dropped after ${MAXHOPS} hops</em> (Meshtastic's default),
+      so the packet dies whether or not it found the destination. Simple, robust, deliberately inefficient.`;
+    find=`<div class="find">One message, repeated hop by hop and dropped at the <b>${MAXHOPS}-hop limit</b> →
+      <b>${r.reached} copies</b> bouncing around the mesh for a single delivery. That redundancy is the cost of
+      never measuring a link.</div>`;
+  } else if(state.mode==='announce'){
+    base=`<em>Reticulum-style.</em> The data travels forward to the RX and arrives. The reply has to retrace the
+      <em>same links</em> back — and that's where the asymmetry bites.`;
+    if(!r.fwd){ find=`<div class="find bad">No path to the RX at this power and terrain.</div>`; }
+    else if(r.block){
+      find=`<div class="find bad">Forward reaches the RX via <b>${arrow(r.fwd)}</b>. The reply retraces back to the
+        relay, then is blocked at the ✕ (<b>${r.block[0]}→${r.block[1]}</b>) — the ACK can't get home, so the Link fails.</div>`;
+    } else {
+      find=`<div class="find">Forward path <b>${arrow(r.fwd)}</b> is two-way on every hop, so the reply retraces it cleanly.</div>`;
+    }
+  } else {
+    base=`<em>The proposed self-optimising logic.</em> Unlike Reticulum's announce-speed approach, this one actively
+      measures link quality in <em>both</em> directions, routes only over links usable both ways, and penalises weak or
+      lopsided ones. Often a longer path, but symmetric by construction.`;
+    if(r.path){
+      find=`<div class="find">Symmetric path <b>${arrow(r.path)}</b>, ${r.path.length-1} hops, weakest link
+        ${(r.minq*100|0)}%. Every hop is confirmed two-way, so the ACK is guaranteed a road home.</div>`;
+    } else { find=`<div class="find bad">No fully two-way path exists right now — a power tweak or a flood fallback would be needed.</div>`; }
+  }
+  el.innerHTML=base+find;
+}
+
+function drawInspect(){
+  const el=document.getElementById('inspect'); const id=state.selected;
+  if(!id){el.innerHTML='<h2>Node inspector</h2><p class="nbempty">Click a node on the map.</p>';return;}
+  const hi = byId[id].high ? ' · high site' : '';
+  const role = id===state.source?'<span class="role src">SOURCE · TX</span>':
+               id===state.dest?'<span class="role dst">DESTINATION · RX</span>':`<span class="role">relay${hi}</span>`;
+  let h=`<h2>Node inspector</h2><div class="top"><span class="nid">${id}</span>${role}</div>
+    <div class="pwlabel">Transmit power</div><div class="pw">`;
+  ['weak','normal','loud'].forEach(p=>{ h+=`<button data-p="${p}" class="${power[id]===p?'on':''}">${p}<small>${POW[p]} dBm</small></button>`; });
+  h+=`</div><div class="setbtns">
+      <button id="setsrc" ${id===state.source?'disabled':''}>Set as source</button>
+      <button id="setdst" ${id===state.dest?'disabled':''}>Set as destination</button></div>
+    <div class="nbhead"><span>Neighbour</span><span>TX out · RX in</span></div>`;
+  const nbs=[];
+  for(const n of NODES){ if(n.id===id)continue; const out=usable(id,n.id), inc=usable(n.id,id);
+    if(!out&&!inc)continue; nbs.push({id:n.id, qout:q(id,n.id), qin:q(n.id,id), out, inc, d:dist(id,n.id)}); }
+  nbs.sort((a,b)=>a.d-b.d);
+  if(!nbs.length) h+='<p class="nbempty">No nodes in range — blocked by terrain or out of power.</p>';
+  nbs.forEach(nb=>{
+    let tag='',tc='';
+    if(!nb.inc){tag='RX ✕';tc='broken';} else if(!nb.out){tag='TX ✕';tc='broken';}
+    else if(Math.abs(nb.qout-nb.qin)>ASYM_GAP){tag='asym';tc='asym';}
+    h+=`<div class="nbrow"><span class="who">${nb.id}</span>
+      <span class="bar tx"><i style="width:${(nb.qout*100)|0}%"></i></span>
+      <span class="bar rx"><i style="width:${(nb.qin*100)|0}%"></i></span>
+      <span class="tag ${tc}">${tag}</span></div>`; });
+  el.innerHTML=h;
+  el.querySelectorAll('.pw button').forEach(b=>b.addEventListener('click',()=>{power[id]=b.dataset.p; render();}));
+  const ss=el.querySelector('#setsrc'), sd=el.querySelector('#setdst');
+  if(ss)ss.addEventListener('click',()=>{ if(id!==state.dest){state.source=id; render();} });
+  if(sd)sd.addEventListener('click',()=>{ if(id!==state.source){state.dest=id; render();} });
+}
+
+document.querySelectorAll('#modes button').forEach(b=>b.addEventListener('click',()=>{state.mode=b.dataset.m; render();}));
+render();
+</script>
+</body>
+</html>
