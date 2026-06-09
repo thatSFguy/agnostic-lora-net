@@ -25,6 +25,9 @@
 #include "forwarder.h"
 #include "link_arq.h"
 #include "sar.h"
+#ifdef AGN_BLE
+#include <bluefruit.h>     // nRF52 SoftDevice BLE — Req 1 coexistence experiment
+#endif
 
 #ifndef AGN_FW_VERSION
 #  define AGN_FW_VERSION "dev"
@@ -61,7 +64,69 @@ static uint32_t  sar_quiet_until = 0;           // suppress our beacons during a
 // so a host bridge (e.g. a Reticulum interface) can push/pull opaque app packets
 // through the mesh. Enabled by the `tunnel` console command.
 static bool      tunnel_mode = false;
+static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen);  // fwd decl
+static void tunnel_rx_frame(const uint8_t* f, uint16_t n);                       // fwd decl
+#ifdef AGN_BLE
+static volatile bool ble_connected = false;
+static uint32_t  ble_rxb = 0, ble_txb = 0;
+#endif
+
+// A host transport (USB tunnel or BLE) is attached and wants opaque app frames.
+static inline bool host_tunnel_active() {
+#ifdef AGN_BLE
+    if (ble_connected) return true;
+#endif
+    return tunnel_mode;
+}
+
+#ifdef AGN_BLE
+// --- BLE peripheral (Nordic UART Service) -----------------------------------
+// A phone/Web-Bluetooth client connects over BLE; we tunnel its app frames into
+// the LoRa mesh and deliver mesh packets back out over BLE. So the full path is
+// webapp -> BLE -> LoRa mesh -> BLE -> webapp, with the node also proving Req 1
+// (BLE link stays up while the LoRa radio is busy).
+static BLEUart   bleuart;
+
+static void ble_connect_cb(uint16_t)            { ble_connected = true; }
+static void ble_disconnect_cb(uint16_t, uint8_t){ ble_connected = false; }
+
+static void ble_setup() {
+    Bluefruit.begin();                    // start the SoftDevice (before radio.begin)
+    Bluefruit.setTxPower(4);
+    char nm[24]; snprintf(nm, sizeof(nm), "AgnLoRa-%08lX", (unsigned long)my_id);
+    Bluefruit.setName(nm);
+    Bluefruit.Periph.setConnectCallback(ble_connect_cb);
+    Bluefruit.Periph.setDisconnectCallback(ble_disconnect_cb);
+    bleuart.begin();
+    Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+    Bluefruit.Advertising.addTxPower();
+    Bluefruit.Advertising.addService(bleuart);
+    Bluefruit.ScanResponse.addName();
+    Bluefruit.Advertising.restartOnDisconnect(true);
+    Bluefruit.Advertising.setInterval(32, 244);
+    Bluefruit.Advertising.setFastTimeout(30);
+    Bluefruit.Advertising.start(0);
+}
+
+// Decode HDLC frames arriving over BLE ([u32 dst][payload]) and push them into the
+// mesh — the inbound half of the BLE<->mesh tunnel.
+static void ble_poll() {
+    static uint8_t  bf[4 + MAX_PAYLOAD];
+    static uint16_t bl = 0;
+    static bool     inf = false, esc = false;
+    while (bleuart.available()) {
+        uint8_t c = (uint8_t)bleuart.read();
+        ble_rxb++;
+        if (inf && c == HDLC_FLAG) { inf = false; if (bl > 0) tunnel_rx_frame(bf, bl); }
+        else if (c == HDLC_FLAG)   { inf = true; bl = 0; esc = false; }
+        else if (inf && bl < sizeof(bf)) {
+            if (c == HDLC_ESC) esc = true;
+            else { bf[bl++] = esc ? (c ^ HDLC_ESC_MASK) : c; esc = false; }
+        }
+    }
+}
+#endif // AGN_BLE
 // resend queue (sender side, fed by NACKs)
 static uint16_t  sar_resend[mesh::SAR_MAX_FRAGS];
 static uint16_t  sar_resend_n   = 0;
@@ -379,7 +444,7 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                     sar_rx_last_ms = millis();
                     sar_quiet_until = millis() + 8000;   // hush our beacons mid-transfer (half-duplex)
                     if (sar_rx.verify()) {
-                        if (tunnel_mode)   // hand the reassembled app packet to the host
+                        if (host_tunnel_active())   // hand the reassembled app packet to the host
                             tunnel_emit(sar_rx_sender, sar_rx.data(), (uint16_t)sar_rx.total_len());
                         snprintf(line, sizeof(line), "[SAR] complete xfer=%u len=%lu frags=%u crc=OK",
                                  (unsigned)sar_rx.xfer_id(), (unsigned long)sar_rx.total_len(),
@@ -393,8 +458,8 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                                  (unsigned)sar_rx.xfer_id());
                     }
                     Serial.println(line);
-                } else if (tunnel_mode) {
-                    tunnel_emit(net.src, pay, plen);     // opaque app packet -> host bridge
+                } else if (host_tunnel_active()) {
+                    tunnel_emit(net.src, pay, plen);     // opaque app packet -> host bridge (USB or BLE)
                 } else {
                     char payload[64];
                     uint16_t n = plen < sizeof(payload) - 1 ? plen : (uint16_t)(sizeof(payload) - 1);
@@ -459,17 +524,29 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
 }
 
 // --- tunnel framing (HDLC, matches RNS's PipeInterface) ---------------------
-static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
+// (HDLC constants declared earlier so BLE input decoding can share them.)
 
-// Write one HDLC frame: FLAG, byte-stuffed payload, FLAG.
+// Route raw bytes to the attached host transport: BLE if a client is connected,
+// else USB serial. BLEUart.write chunks across notifications internally.
+static void host_write(const uint8_t* d, uint16_t n) {
+#ifdef AGN_BLE
+    if (ble_connected) { bleuart.write(d, n); ble_txb += n; return; }
+#endif
+    Serial.write(d, n);
+}
+
+// Write one HDLC frame (FLAG, byte-stuffed payload, FLAG) to the host transport.
 static void hdlc_write(const uint8_t* d, uint16_t n) {
-    Serial.write(HDLC_FLAG);
+    static uint8_t out[2 + 2 * (4 + MAX_PAYLOAD)];
+    uint16_t o = 0;
+    out[o++] = HDLC_FLAG;
     for (uint16_t i = 0; i < n; i++) {
         uint8_t b = d[i];
-        if (b == HDLC_FLAG || b == HDLC_ESC) { Serial.write(HDLC_ESC); Serial.write(b ^ HDLC_ESC_MASK); }
-        else Serial.write(b);
+        if (b == HDLC_FLAG || b == HDLC_ESC) { out[o++] = HDLC_ESC; out[o++] = b ^ HDLC_ESC_MASK; }
+        else out[o++] = b;
     }
-    Serial.write(HDLC_FLAG);
+    out[o++] = HDLC_FLAG;
+    host_write(out, o);
 }
 
 // Emit a delivered app payload to the host as [u32 src][payload].
@@ -733,6 +810,11 @@ void setup() {
              (unsigned)sizeof(NetHeader));
     Serial.println(banner);
 
+#ifdef AGN_BLE
+    ble_setup();   // bring up the SoftDevice/BLE before configuring the radio interrupt
+    Serial.println("BLE up: advertising (Nordic UART Service)");
+#endif
+
     Serial.println("initializing radio...");
     Serial.flush();
     int16_t st = radio.begin(on_rx);
@@ -775,6 +857,12 @@ void loop() {
                  (unsigned)(router ? router->routes().count() : 0),
                  (unsigned)txq_count);
         Serial.println(hb);
+#ifdef AGN_BLE
+        char bl[48];
+        snprintf(bl, sizeof(bl), "[ble] connected=%d rx=%lu tx=%lu",
+                 (int)ble_connected, (unsigned long)ble_rxb, (unsigned long)ble_txb);
+        Serial.println(bl);   // watch this stay connected=1 through the LoRa beacons above
+#endif
 #ifdef LED_BUILTIN
         static bool led = false; led = !led; digitalWrite(LED_BUILTIN, led);  // slow blink = alive & radio up
 #endif
@@ -815,6 +903,10 @@ void loop() {
     // 6) Drive an in-progress SAR file transfer + the receiver's missing-frag requests.
     sar_tx_tick();
     sar_rx_tick();
+
+#ifdef AGN_BLE
+    ble_poll();    // service the BLE UART (echo) — must stay non-blocking
+#endif
 
     // 7) Service the runtime command console (USB serial). This is the local stand-in
     //    for the Tier-1 control plane — `block`/`unblock` here will later arrive as

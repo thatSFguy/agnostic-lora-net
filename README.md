@@ -1,148 +1,119 @@
-# LoRa Mesh Backbone — Phase 0 + routing core
+# agnostic-LoRa-Net
 
-App-agnostic LoRa transport. See [`Agent.md`](Agent.md) for the full plan and the
-non-negotiable requirements. This repo currently has **Phase 0** (the working-baseline
-SX1262 link) plus the **portable routing core** that Phases 2–3 are built from —
-link-quality, independent per-direction paths — developed and unit-tested host-side.
+An **app-agnostic LoRa mesh backbone** — a dumb, efficient transport that moves
+addressed packets between nodes the way the internet moves IP. Applications ride on
+top as **opaque payload** (a Reticulum app, a phone over BLE, anything); the backbone
+itself is never programmed per-app. See [`Agent.md`](Agent.md) for the full design and
+the non-negotiable requirements.
 
-What's here, and what is deliberately *not* yet:
+The novelty (vs. Meshtastic/MeshCore/Reticulum): **link-quality-aware routing with
+independent per-direction paths** — asymmetric/one-way links are *used*, not discarded.
 
-| Here now | Not yet (later phases) |
+## Status — proven on real hardware
+
+Validated end-to-end on 2× RAK4631 + a Seeed XIAO nRF52840 (Wio-SX1262), all SX1262:
+
+| Capability | Where |
 |---|---|
-| Interrupt-driven SX1262 HAL (never blocks `loop()`, §2.6) | BLE host link — *borrowed* from the MeshCore fork, never hand-rolled (§9) |
-| Draft two-layer packet header (§5) | The MeshCore fork **build** itself (designed in `docs/`, hardware-gated) |
-| Beacon carries the routing announce (DV table + neighbour reports) over the air | End-to-end ACK (optional, per §3) |
-| Multi-hop DATA forwarding: deliver / forward(`next_hop`) / drop(dup·TTL·no-route) | Controller, crypto, HLR (Phase 4–5) |
-| **Directed link-layer unicast**: negotiated 1-byte neighbour aliases (§5) | Hardware validation on real RF (no boards this session) |
-| **Hop-by-hop ACK + small retry** (link ARQ) over a non-blocking TX queue | |
-| Routing + codec + relay + aliases + ARQ — all host-tested (25 cases) | |
-| MeshCore Phase 1 integration design — grounded in the real seam (`docs/`) | |
+| Non-blocking SX1262 transport (never blocks `loop()`) | `radio_hal.*` |
+| Neighbour discovery + **per-direction** link quality (q_rx / q_tx) | `lib/mesh` |
+| Distance-vector routing, announces piggybacked on beacons | `router.*`, `announce_codec.*` |
+| Directed link-layer unicast (negotiated 1-byte aliases) | `neighbor_table.*` |
+| **Multi-hop forwarding** (deliver / forward / drop) | `forwarder.*` |
+| Hop-by-hop **ARQ** (ACK + retry) over a non-blocking TX queue | `link_arq.*` |
+| **Reliable file transfer** (SAR fragment/reassembly + CRC + NACK) | `sar.*` |
+| Runtime **link blocking** (the Tier-1 "block a bad link" control hook) | `router.block()` |
+| **Reticulum** running over the mesh (announce + proven echo) | `reticulum/`, `scripts/rns_*` |
+| **BLE + LoRa coexistence (Req 1)** + phone-app ⇄ BLE ⇄ mesh ⇄ BLE ⇄ phone-app | `-DAGN_BLE`, `web/ble.html` |
+
+The routing/codec/relay/alias/ARQ/SAR logic is **portable C++ in `lib/mesh`**, host
+unit-tested (**32 cases, `pio test -e native`**) and cross-compiled unchanged onto the
+nRF52.
+
+> **BLE note:** the original plan assumed BLE+LoRa coexistence required forking
+> MeshCore (because every hand-rolled attempt had failed). On this firmware it **works
+> without the fork** — the failures were from *blocking* radio code, and ours is
+> rigorously non-blocking. The MeshCore fork is no longer on the critical path.
 
 ## Layout
 
 ```
-platformio.ini                  3 envs: wiscore_rak4631 (real) + compile_check + native (tests)
-boards/wiscore_rak4631.json     project-local RAK4631 board definition
-variants/wiscore_rak4631/       vendored RAK4631 pin-map variant (RAKwireless BSP)
-include/board_config.h          SX1262 wiring + network-wide PHY (the only board-specific knobs)
-include/packet.h                on-air frame format (link + network headers)
-include/radio_hal.h  src/radio_hal.cpp   non-blocking SX1262 transport
-lib/mesh/                       PORTABLE routing core (no Arduino) — builds for nRF52 + host:
-    link_metric.*                 RSSI/SNR -> per-direction quality q ∈ [0,1]
-    neighbor_table.*              neighbours with independent q_rx / q_tx + asymmetry flag
-    routing_table.*               distance-vector, per-direction next hop (Babel-inspired)
-    router.*                      ties it together: beacon in, next_hop() out
-    announce_codec.*              compact, bounds-checked beacon (de)serialisation
-    forwarder.*                   relay decision: deliver / forward / drop + dedup
-    link_arq.*                    hop-by-hop ACK + small retry (link reliability)
-docs/meshcore-integration.md    Phase 1 fork seam design (grounded in MeshCore source)
-src/main.cpp                    prober + routing + forwarding + ARQ + outbound TX queue
-test/test_mesh/                 host unit tests: routing logic (Unity)
-test/test_codec/                host unit tests: wire codec (Unity)
-test/test_forward/              host unit tests: relay decisions (Unity)
-test/test_alias/                host unit tests: link-alias negotiation (Unity)
-test/test_arq/                  host unit tests: hop-by-hop ACK/retry (Unity)
+platformio.ini            envs: wiscore_rak4631 [_ble] · xiao_nrf52 · promicro · compile_check · native
+boards/ · variants/       project-local board defs + vendored pin-map variants (RAK / XIAO / Pro Micro)
+include/board_config.h    per-board SX1262 wiring + network-wide PHY (904.375 MHz, BW250, SF11, sync 0x4D)
+include/packet.h          on-air frame format (link + network headers)
+radio_hal.*               non-blocking SX1262 transport (default SPI + setPins, per-board TCXO/RXEN)
+lib/mesh/                 PORTABLE core (no Arduino — builds for nRF52 + host):
+    link_metric · neighbor_table · routing_table · router      link quality + per-direction DV
+    announce_codec · forwarder · link_arq · sar                wire codec · relay · ARQ · file transfer
+src/main.cpp              firmware: prober + routing + forwarding + ARQ + SAR + console + tunnel + BLE
+test/test_*/              host unit tests (Unity): mesh · codec · forward · alias · arq · sar
+docs/hardware-bringup.md  flashing + bring-up runbook
+docs/meshcore-integration.md   Phase-1 fork seam design (now optional — BLE works without it)
+reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
+scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
+web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
 ```
 
 ## Build & test
 
-PlatformIO (verified against the `nordicnrf52` platform + Adafruit nRF52 core +
-RadioLib 7.x, and host `g++` for the native tests):
+PlatformIO (`nordicnrf52` + Adafruit nRF52 core + RadioLib 7.x; host `g++` for tests):
 
 ```bash
-pio run -e wiscore_rak4631    # RAK4631 firmware       -> .pio/build/wiscore_rak4631/firmware.{hex,zip}
-pio run -e xiao_nrf52         # Seeed XIAO nRF52840 + Wio-SX1262
-pio run -e promicro           # Pro Micro nRF52840 ("faketec") + SX1262
-pio run -e compile_check      # host compile-verify on an Adafruit Feather nRF52840 (identical MCU/core)
-pio test -e native            # run the routing/codec/relay/arq unit tests (no hardware)
+pio test -e native               # 32 host unit tests for lib/mesh (no hardware)
+pio run  -e wiscore_rak4631      # RAK4631 mesh firmware
+pio run  -e wiscore_rak4631_ble  # RAK4631 + BLE (Nordic UART Service)
+pio run  -e xiao_nrf52           # Seeed XIAO nRF52840 + Wio-SX1262 (SoftDevice s140 v7)
+pio run  -e promicro             # Pro Micro nRF52840 + SX1262
+pio run  -e compile_check        # host compile-verify on a stock Feather nRF52840
 ```
 
-All three boards carry an SX1262, so one firmware covers them; per-board pins, TCXO
-voltage, RXEN RF-switch and power-enable live in `include/board_config.h` (values from
-MeshCore's definitions). **Flashing + bring-up: see
-[`docs/hardware-bringup.md`](docs/hardware-bringup.md)** — RAK pair first, then a 3rd
-node for multi-hop + ARQ.
+All boards carry an SX1262, so one firmware covers them; per-board pins, TCXO voltage,
+RXEN RF-switch and power-enable live in `include/board_config.h` (values from MeshCore).
+The SX1262 sits on the default `SPI` remapped to the LoRa pins (`SPI.setPins`) with a
+crystal-mode fallback — matching MeshCore's working RAK4631 init.
 
-`compile_check` exists so the firmware logic builds on a stock nRF52840 toolchain
-without the RAK board files. `native` runs `lib/mesh` — which is pure portable C++ —
-as host unit tests, so the exact routing logic that ships on the nRF52 is verified
-without a radio in hand.
+**Flashing + bring-up: [`docs/hardware-bringup.md`](docs/hardware-bringup.md).** Node
+IDs auto-derive from each chip's FICR, so boards differ without configuration.
 
-## Routing core — what the tests prove
+## The stack
 
-`pio test -e native` exercises the project's actual novelty (§9, "asymmetric routing
-is ours to build"):
+- **Routing** — each node measures `q ∈ [0,1]` per direction from RSSI/SNR, runs
+  Babel-style distance-vector, and forwards toward `next_hop()`. Forward and return
+  paths are computed independently, so asymmetric links are first-class.
+- **Reliability** — every directed hop requests a 1-byte-sequenced ACK and retransmits
+  (`link_arq`); all TX paths share a non-blocking outbound queue so beacons, forwards,
+  ACKs and retransmits never collide mid-air.
+- **App transport (SAR)** — payloads larger than one frame are fragmented, reassembled
+  and CRC-verified; a missing-fragment NACK recovers end-to-end loss. Proven by
+  transferring a real image byte-perfect over 1 and 2 hops (`scripts/sar_*`).
+- **Runtime console** (USB serial): `send`/`block`/`unblock`/`info`/`sbegin`+`xfer`+
+  `dump`/`tunnel`. `block` is the local stand-in for the Tier-1 controller's signed
+  "block a bad link" command.
 
-- **link metric** — RSSI/SNR maps monotonically into a clamped quality;
-- **line topology** A–B–C — a node with no direct link reaches the destination via a relay;
-- **asymmetric per-direction (Req 3)** — on a ring strong one way and weak the other,
-  the forward path A→C (via B) and the return path C→A (via D) come out **different**,
-  exactly as intended — one-way links are used, not discarded;
-- **reroute** — when the preferred relay goes silent, traffic shifts to the backup;
-- **wire codec** — announces round-trip within quantisation, and malformed/truncated
-  buffers off the radio are rejected without overruns;
-- **relay decisions** — deliver / forward(+TTL) / drop on dup·TTL·no-route·own;
-- **link aliases** — each node assigns distinct 1-byte aliases; after negotiation the
-  alias one node uses to address another lands in that node's own alias space, so
-  forwarding is directed unicast rather than blind rebroadcast (§5);
-- **link ARQ** — a tracked frame clears on ACK, retransmits on timeout, and is given
-  up after the retry limit (never resent forever).
+## Reticulum over the mesh
 
-On hardware, every directed hop now requests a tiny ACK and retransmits if it's lost
-(`[ACK]`/retry visible in the log); all TX paths share a non-blocking outbound queue so
-beacons, forwards, ACKs and retransmits never collide mid-air.
+The backbone is a transparent **Reticulum interface** — RNS packets ride as opaque
+payload; *our* routing carries them. (Not RNode emulation, which would bypass our
+routing.) The node's `tunnel` mode turns USB serial into a binary HDLC pipe carrying
+`[node-id][payload]`; `reticulum/interfaces/AgnosticLoraInterface.py` plugs that into
+RNS. `scripts/rns_demo.py` runs two isolated RNS instances (no LAN path) bound to two
+RAKs and round-trips a cryptographically-proven echo **over the mesh**.
 
-The beacon carries each node's announce over the air (`+announce NB` in the TX log),
-and DATA packets are delivered / forwarded along `next_hop()` / dropped by the relay
-engine. Build one node with `-DAGN_DATA_DEST=0x...` to watch a 3-node line forward end
-to end (`[FWD] …` / `[RX] DATA delivered …`).
+## BLE (Req 1)
 
-**Phase 1 (MeshCore fork)** is designed in
-[`docs/meshcore-integration.md`](docs/meshcore-integration.md) against MeshCore's real
-seam (`onRecvPacket` / `allowPacketForward` / `sendDirect`); the fork build + BLE
-coexistence validation are hardware-gated. The routing/codec/forwarding logic it needs
-is the host-tested `lib/mesh` here — the fork work is marshalling, not new logic.
+`pio run -e wiscore_rak4631_ble` adds a SoftDevice BLE Nordic UART Service alongside
+the mesh. BLE frames are tunnelled into the mesh and deliveries come back out over BLE,
+so the full path is **webapp → BLE → node → LoRa → node → BLE → webapp**. Open
+`web/ble.html` (served over `http://localhost` for Web Bluetooth) in two tabs, connect
+each to an `AgnLoRa-<id>` node, and chat across the backbone — the BLE links stay up
+through LoRa traffic.
 
-## Flash two RAK4631s
+## What's left
 
-Give each node a distinct ID (until pubkey-derived IDs land, §3), then flash over
-USB (double-tap reset for the bootloader if needed):
-
-```bash
-# Node A
-pio run -e wiscore_rak4631 -t upload --upload-port /dev/ttyACM0
-# Node B — override the node ID at build time
-PLATFORMIO_BUILD_FLAGS="-DAGN_NODE_ID=0x0000000B" pio run -e wiscore_rak4631 -t upload --upload-port /dev/ttyACM1
-```
-
-Leaving `AGN_NODE_ID=0` auto-derives a stable per-chip ID from the nRF52 FICR, so
-two boards already differ without overriding.
-
-## Expected output
-
-`pio device monitor -e wiscore_rak4631` on each node — every node beacons every
-~10 s and prints what it hears:
-
-```
-=== LoRa Mesh Backbone — Phase 0 link prober ===
-fw=0.0.1-phase0  node=1A2B3C4D
-PHY: 904.375 MHz BW250 SF11 CR4/5 sync=0x4D
-header=17 bytes (link=4 net=13)
-radio up, listening...
-[TX] beacon seq=0 from 1A2B3C4D
-[RX] beacon  src=0000000B seq=3 up=41s  rssi=-87.0 dBm  snr=9.2 dB  q=0.78  neighbors=1
-```
-
-Seeing the other node's `src`, an incrementing `seq`, live `rssi`/`snr`, the derived
-quality `q`, and a growing `neighbors` count is the milestone: a proven non-blocking
-link feeding the routing core's neighbour table. The next step is to serialise the
-announce (neighbour reports + DV table) into the beacon so the per-direction routing
-proven in `pio test -e native` runs over the air.
-
-## Hardware notes (verify on first flash)
-
-The SX1262 wiring in `include/board_config.h` follows the RAK4631 reference (NSS 42,
-DIO1 47, NRST 38, BUSY 46; dedicated LoRa SPI on SCK 43 / MOSI 44 / MISO 45; RF
-switch on DIO2; 3.3 V TCXO on DIO3). The production firmware will inherit this radio
-layer from the forked MeshCore BSP (§9) rather than carry a standalone variant — this
-Phase 0 sketch vendors the variant so it builds and flashes on its own.
+- **Tier-1 controller** — an RPi driving `block`/power/route APIs via signed control
+  packets (the console is its stand-in today).
+- **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
+  an RNode-compatible BLE front-end backed by the mesh).
+- Polish: pub-key-derived node IDs + signed control plane (§3/§5), FCC handling for the
+  1 W class (§8), flash-write minimization for solar nodes (§4 Req 4).
