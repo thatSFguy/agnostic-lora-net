@@ -25,10 +25,13 @@ def node_id(port):
         if m: s.close(); return m.group(1).decode().upper()
     s.close(); return None
 
-def write_config(cfgdir, port, peer_hex):
+def write_config(cfgdir, port, identity, peer_identity):
     os.makedirs(os.path.join(cfgdir, "interfaces"), exist_ok=True)
     shutil.copy(IFACE_SRC, os.path.join(cfgdir, "interfaces", "AgnosticLoraInterface.py"))
     with open(os.path.join(cfgdir, "config"), "w") as f:
+        # Identity-addressed: the interface REGISTERs `identity` and RESOLVEs
+        # `peer_identity` to a node id via the distributed directory — the far node id is
+        # discovered, not hardcoded (Phase 4 of docs/distributed-lookup-plan.md).
         f.write(f"""[reticulum]
   enable_transport = True
   share_instance = No
@@ -42,7 +45,8 @@ def write_config(cfgdir, port, peer_hex):
     type = AgnosticLoraInterface
     interface_enabled = yes
     port = {port}
-    peer = {peer_hex}
+    identity = {identity}
+    peer_identity = {peer_identity}
     speed = 115200
 """)
 
@@ -56,8 +60,12 @@ def main():
 
     cfg_a = os.path.join(ROOT, "reticulum", "inst_a")   # client side, talks to peer B
     cfg_b = os.path.join(ROOT, "reticulum", "inst_b")   # server side, talks to peer A
-    write_config(cfg_a, pa, idb)
-    write_config(cfg_b, pb, ida)
+    # Opaque identities (NOT node ids) — each side registers its own and resolves the
+    # other's to a node id via the directory. Proves identity-addressed routing.
+    A_ID, B_ID = "A1A1A1A1A1A1A1A1", "B2B2B2B2B2B2B2B2"
+    write_config(cfg_a, pa, A_ID, B_ID)   # A registers A_ID, resolves B_ID -> B's node
+    write_config(cfg_b, pb, B_ID, A_ID)   # B registers B_ID, resolves A_ID -> A's node
+    print(f"identities: A={A_ID} (at {ida})  B={B_ID} (at {idb})")
 
     print("\nstarting RNS server (instance B)...")
     srv = subprocess.Popen([PYTHON, os.path.join(HERE, "rns_echo.py"), "--role", "server", "--config", cfg_b],
