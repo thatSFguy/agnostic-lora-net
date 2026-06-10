@@ -39,6 +39,57 @@ using namespace Adafruit_LittleFS_Namespace;
 #ifndef AGN_NODE_ID
 #  define AGN_NODE_ID 0
 #endif
+// Build stamp so a board can always be matched to the firmware it runs (printed in the
+// boot banner and by `info` — there was previously no way to tell builds apart).
+static const char FW_BUILD[] = __DATE__ " " __TIME__;
+
+// The core's USB-CDC write() BLOCKS FOREVER if a host holds DTR but stops draining:
+// Adafruit_USBD_CDC::write spins `while (remain && tud_cdc_n_connected())` once the
+// 256-byte FIFO fills. One stale host session (browser tab that never closed the port,
+// half-dead monitor) then wedges the ENTIRE loop — LoRa included — within ~2 heartbeats,
+// and the node looks dead until reboot. A mesh node must never hang on console output,
+// so every print drops instead of blocking when the FIFO can't take it. Defined BEFORE
+// the #define below so its internals reach the real CDC object.
+class NonBlockingUSB : public Stream {
+public:
+    void begin(uint32_t baud)        { Serial.begin(baud); }
+    int  available()        override { return Serial.available(); }
+    int  read()             override { return Serial.read(); }
+    int  peek()             override { return Serial.peek(); }
+    void flush()            override { Serial.flush(); }
+    int  availableForWrite()override { return Serial.availableForWrite(); }
+    size_t write(uint8_t c) override { return write(&c, 1); }
+    // Chunk through the 256-byte FIFO so frames bigger than it still go out whole to a
+    // draining host; if the FIFO stays full ~20 ms the host is stalled -> latch and drop
+    // everything (cheaply) until it drains again. Claim n so callers never retry-loop.
+    size_t write(const uint8_t* b, size_t n) override {
+        size_t sent = 0; uint32_t stall0 = 0;
+        if (stalled) {
+            if (Serial.availableForWrite() < 64) return n;     // still backed up -> drop fast
+            stalled = false;                                   // host is draining again
+        }
+        while (sent < n) {
+            int avail = Serial.availableForWrite();
+            if (avail > 0) {
+                size_t k = n - sent; if (k > (size_t)avail) k = (size_t)avail;
+                Serial.write(b + sent, k);                     // fits the FIFO: returns at once
+                sent += k; stall0 = 0;
+            } else {
+                if (!(bool)Serial) break;                      // host gone -> drop the rest
+                if (!stall0) stall0 = millis();
+                else if (millis() - stall0 > 20) { stalled = true; break; }
+                yield();                                       // let the USB task drain
+            }
+        }
+        return n;
+    }
+    using Print::write;
+    operator bool()                  { return (bool)Serial; }
+private:
+    bool stalled = false;
+};
+static NonBlockingUSB usb_serial;
+#define Serial usb_serial   // all of main.cpp's console/tunnel I/O goes through the guard
 
 static RadioHal        radio;
 static node_id_t       my_id;
@@ -75,6 +126,10 @@ static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
 //   frame body := [u8 addr_type][u8 addr_len][addr bytes…][payload…]
 static const uint8_t TUN_ADDR_LOCATOR  = 0x01;   // addr = node-id locator (the only live type)
 static const uint8_t TUN_ADDR_IDENTITY = 0x02;   // reserved: resolve-and-forward (deferred)
+// Max payload delivered mesh->host in one tunnel frame. Must exceed the largest single
+// RNS packet (interface HW_MTU = 500); an LXMF announce is ~213B, and capping host
+// delivery at MAX_PAYLOAD(200) TRUNCATED it -> RNS rejected the broken announce.
+static const uint16_t TUN_HOST_MAX     = 768;
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen);  // fwd decl
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n);                       // fwd decl
 
@@ -140,6 +195,13 @@ static void rf_print(const RadioCfg& c, const char* tag) {
 #ifdef AGN_BLE
 static volatile bool ble_connected = false;
 static uint32_t  ble_rxb = 0, ble_txb = 0;
+// NUS-frame diagnostics (catches the classic "phone sends a frame too big for the ATT
+// MTU and doesn't chunk it" bug): completed HDLC tunnel frames seen on BLE, and the
+// largest in-progress accumulator. If a phone announce fires and `frames` does NOT
+// increment while `fmax` jumps to ~MTU-3, the closing FLAG never arrived => the write
+// was truncated host-side (chunk BLE writes to <=20B, contract §0.2).
+static uint32_t  ble_frames = 0;
+static uint16_t  ble_open_max = 0;
 #endif
 
 // A host transport (USB tunnel or BLE) is attached and wants opaque app frames.
@@ -161,8 +223,42 @@ static char      ble_pin[7]      = "000000";   // 6-digit pairing PIN
 static bool      ble_advertising = false;
 static bool      ble_inited      = false;      // SoftDevice/BLE stack brought up yet?
 
-static void ble_connect_cb(uint16_t)            { ble_connected = true; }
-static void ble_disconnect_cb(uint16_t, uint8_t){ ble_connected = false; }
+// These callbacks run in the SoftDevice event task — NEVER do USB/console I/O here.
+// Printing from this context took the node down outright (bisected on hardware: the
+// build with prints-in-callbacks failed 100%, identical build without them works).
+// They only latch flags; ble_evt_drain() prints from the main loop.
+static volatile bool    ble_evt_conn = false, ble_evt_disc = false;
+static volatile bool    ble_evt_pair = false, ble_evt_sec  = false;
+static volatile uint8_t ble_evt_disc_reason = 0, ble_evt_auth = 0;
+static void ble_connect_cb(uint16_t)            { ble_connected = true;  ble_evt_conn = true; }
+static void ble_disconnect_cb(uint16_t, uint8_t reason) {
+    ble_connected = false; ble_evt_disc_reason = reason; ble_evt_disc = true;
+}
+static void ble_pair_complete_cb(uint16_t, uint8_t auth_status) {
+    ble_evt_auth = auth_status; ble_evt_pair = true;
+}
+static void ble_secured_cb(uint16_t) { ble_evt_sec = true; }
+
+// Main-loop side of the BLE event logging. Disconnect reason is the HCI error
+// (0x13=remote ended, 0x16=local ended, 0x08=conn timeout, 0x3D=MIC failure/bond
+// mismatch, 0x05=auth failure); pair auth_status 0x00=success, else the SMP failure
+// (0x01 passkey-entry fail, 0x04 confirm-value/PIN mismatch, 0x08 timeout).
+static void ble_evt_drain() {
+    char m[48];
+    if (ble_evt_conn) { ble_evt_conn = false; Serial.println("[ble] connected"); }
+    if (ble_evt_sec)  { ble_evt_sec  = false; Serial.println("[ble] link secured (encrypted)"); }
+    if (ble_evt_pair) {
+        ble_evt_pair = false;
+        snprintf(m, sizeof(m), "[ble] pair complete auth=0x%02X %s",
+                 ble_evt_auth, ble_evt_auth == 0 ? "OK" : "FAIL");
+        Serial.println(m);
+    }
+    if (ble_evt_disc) {
+        ble_evt_disc = false;
+        snprintf(m, sizeof(m), "[ble] disconnect reason=0x%02X", ble_evt_disc_reason);
+        Serial.println(m);
+    }
+}
 
 // Generate a fresh 6-digit pairing PIN.
 static void ble_gen_pin() {
@@ -240,6 +336,8 @@ static void ble_setup() {
     Bluefruit.Security.setPIN(ble_pin);             // static passkey -> phone must enter it
     Bluefruit.Periph.setConnectCallback(ble_connect_cb);
     Bluefruit.Periph.setDisconnectCallback(ble_disconnect_cb);
+    Bluefruit.Security.setPairCompleteCallback(ble_pair_complete_cb);  // log SMP outcome
+    Bluefruit.Security.setSecuredCallback(ble_secured_cb);             // log encryption up
     bleuart.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);  // require pairing
     bleuart.begin();
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
@@ -260,7 +358,8 @@ static void ble_setup() {
 //     with responses sent back over BLE. This is the field-config / retune-rescue path.
 static void ble_poll() {
     if (!ble_inited) return;   // stack not up (BLE never enabled) — nothing to service
-    static uint8_t  bf[4 + MAX_PAYLOAD];   // HDLC tunnel frame
+    ble_evt_drain();           // print latched BLE events from loop context (never in callbacks)
+    static uint8_t  bf[2 + sizeof(node_id_t) + TUN_HOST_MAX];   // HDLC tunnel frame (envelope+payload)
     static uint16_t bl = 0;
     static bool     inf = false, esc = false;
     static char     cl[160];               // text console-line accumulator
@@ -269,7 +368,7 @@ static void ble_poll() {
         uint8_t c = (uint8_t)bleuart.read();
         ble_rxb++;
         if (c == HDLC_FLAG) {                       // frame boundary -> tunnel channel
-            if (inf) { inf = false; if (bl > 0) tunnel_rx_frame(bf, bl); }
+            if (inf) { inf = false; if (bl > 0) { ble_frames++; tunnel_rx_frame(bf, bl); } }
             else     { inf = true; bl = 0; esc = false; }
             cn = 0;                                 // never part of a text line
             continue;
@@ -278,6 +377,7 @@ static void ble_poll() {
             if (bl < sizeof(bf)) {
                 if (c == HDLC_ESC) esc = true;
                 else { bf[bl++] = esc ? (c ^ HDLC_ESC_MASK) : c; esc = false; }
+                if (bl > ble_open_max) ble_open_max = bl;   // diag: high-water of an in-flight frame
             }
             continue;
         }
@@ -889,7 +989,7 @@ static void host_write(const uint8_t* d, uint16_t n) {
 // Write one HDLC frame (FLAG, byte-stuffed payload, FLAG) to the host transport.
 static void hdlc_write(const uint8_t* d, uint16_t n) {
     // Sized for the worst case: a fully-escaped envelope ([type][len][locator]+payload).
-    static uint8_t out[2 + 2 * (2 + sizeof(node_id_t) + MAX_PAYLOAD)];
+    static uint8_t out[2 + 2 * (2 + sizeof(node_id_t) + TUN_HOST_MAX)];
     uint16_t o = 0;
     out[o++] = HDLC_FLAG;
     for (uint16_t i = 0; i < n; i++) {
@@ -905,8 +1005,8 @@ static void hdlc_write(const uint8_t* d, uint16_t n) {
 // [LOCATOR][len=sizeof(node_id)][src node-id LE][payload].
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen) {
     const uint8_t alen = (uint8_t)sizeof(node_id_t);
-    uint8_t f[2 + sizeof(node_id_t) + MAX_PAYLOAD];
-    if (plen > MAX_PAYLOAD) plen = MAX_PAYLOAD;
+    static uint8_t f[2 + sizeof(node_id_t) + TUN_HOST_MAX];   // static: too big for the stack
+    if (plen > TUN_HOST_MAX) plen = TUN_HOST_MAX;
     f[0] = TUN_ADDR_LOCATOR;
     f[1] = alen;
     memcpy(f + 2, &src, alen);
@@ -1012,6 +1112,8 @@ static void print_info() {
     if (!router) return;
     Print& Serial = *g_con;   // route to the active console sink (USB or BLE)
     char l[100];
+    snprintf(l, sizeof(l), "fw %s  built %s", AGN_FW_VERSION, FW_BUILD);
+    Serial.println(l);
     snprintf(l, sizeof(l), "node %08lX  neighbors=%u routes=%u blocked=%u",
              (unsigned long)my_id, (unsigned)router->neighbors().count(),
              (unsigned)router->routes().count(), (unsigned)router->blocked_count());
@@ -1099,10 +1201,20 @@ static void handle_command(char* line) {
         tunnel_mode = true;     // serial becomes a binary HDLC pipe for a host bridge
         Serial.println("tunnel on");
 #ifdef AGN_BLE
-    } else if (!strcmp(cmd, "ble")) {        // ble | ble on | ble off
+    } else if (!strcmp(cmd, "ble")) {        // ble | ble on | ble off | ble unbond
         char* a = strtok(nullptr, " ");
         if (a && !strcmp(a, "on"))  { ble_start_adv(); cfg_save(); }
         else if (a && !strcmp(a, "off")) { ble_stop_adv(); cfg_save(); }
+        else if (a && (!strcmp(a, "unbond") || !strcmp(a, "clear"))) {
+            // Wipe stored bonds. Reflashing the app does NOT erase the InternalFS bond
+            // store, so a node keeps stale keys after a phone deletes its pairing -> the
+            // asymmetric bond makes re-pairing fail (advertises, connects briefly, drops).
+            // This clears them so the next pairing starts fresh.
+            ble_setup();                          // ensure the SoftDevice is up
+            Bluefruit.Periph.clearBonds();
+            if (ble_advertising) ble_start_adv();  // restart clean advertising
+            Serial.println("BLE bonds cleared — re-pair from the phone now");
+        }
         char m[80];
         snprintf(m, sizeof(m), "BLE name=AgnLoRa-%08lX advertising=%d connected=%d PIN=%s",
                  (unsigned long)my_id, (int)ble_advertising, (int)ble_connected, ble_pin);
@@ -1178,7 +1290,7 @@ static void handle_command(char* line) {
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("register <idhex> | resolve <idhex> | dirdump");
 #ifdef AGN_BLE
-        Serial.println("ble [on|off] | blepin [random|<6 digits>]");
+        Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
     } else {
         Serial.print("unknown cmd: "); Serial.println(cmd);
@@ -1197,8 +1309,8 @@ static void poll_console() {
     // Text-line console until `tunnel` switches us to a binary HDLC pipe.
     static char    buf[720];
     static uint16_t len = 0;
-    // HDLC decode state (tunnel mode)
-    static uint8_t  frame[4 + MAX_PAYLOAD];
+    // HDLC decode state (tunnel mode) — sized for a full host frame (envelope+payload)
+    static uint8_t  frame[2 + sizeof(node_id_t) + TUN_HOST_MAX];
     static uint16_t flen = 0;
     static bool     in_frame = false, esc = false;
 
@@ -1258,8 +1370,8 @@ void setup() {
     Serial.println();
     Serial.println("=== LoRa Mesh Backbone — Phase 0 link prober ===");
     char banner[80];
-    snprintf(banner, sizeof(banner), "fw=%s  node=%08lX",
-             AGN_FW_VERSION, (unsigned long)my_id);
+    snprintf(banner, sizeof(banner), "fw=%s  built=%s  node=%08lX",
+             AGN_FW_VERSION, FW_BUILD, (unsigned long)my_id);
     Serial.println(banner);
     snprintf(banner, sizeof(banner), "PHY: %d.%03d MHz BW250 SF%d CR4/%d sync=0x%02X",
              (int)PHY_FREQ_MHZ, (int)((PHY_FREQ_MHZ - (int)PHY_FREQ_MHZ) * 1000 + 0.5f),
@@ -1311,24 +1423,26 @@ void setup() {
     next_arq_ms    = millis() + ARQ_TICK_MS;
 }
 
-void loop() {
+static void agn_loop_once() {
     // 0) Bring-up heartbeat: a line every ~3 s so a monitor opened at any moment
     //    sees the node is alive (and whether it has found neighbours), without
     //    waiting for the ~10 s beacon cadence.
     static uint32_t next_hb_ms = 0;
     if ((int32_t)(millis() - next_hb_ms) >= 0) {
-        char hb[80];
-        snprintf(hb, sizeof(hb), "[hb] up=%lus  node=%08lX  nbrs=%u routes=%u txq=%u",
+        static char hb[96];   // static: keep the hot loop's stack frame minimal
+        snprintf(hb, sizeof(hb), "[hb] up=%lus  node=%08lX  nbrs=%u routes=%u txq=%u stk=%u",
                  (unsigned long)((millis() - boot_ms) / 1000u), (unsigned long)my_id,
                  (unsigned)(router ? router->neighbors().count() : 0),
                  (unsigned)(router ? router->routes().count() : 0),
-                 (unsigned)txq_count);
+                 (unsigned)txq_count,
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));  // words of stack never yet used
         Serial.println(hb);
 #ifdef AGN_BLE
-        char bl[72];
-        snprintf(bl, sizeof(bl), "[ble] adv=%d connected=%d rx=%lu tx=%lu PIN=%s",
+        static char bl[104];  // static: this +32B over the old [72] was THE stack tipper
+        snprintf(bl, sizeof(bl), "[ble] adv=%d connected=%d rx=%lu tx=%lu frames=%lu fmax=%u PIN=%s",
                  (int)ble_advertising, (int)ble_connected,
-                 (unsigned long)ble_rxb, (unsigned long)ble_txb, ble_pin);
+                 (unsigned long)ble_rxb, (unsigned long)ble_txb,
+                 (unsigned long)ble_frames, (unsigned)ble_open_max, ble_pin);
         Serial.println(bl);   // watch this stay connected=1 through the LoRa beacons above
 #endif
 #ifdef LED_BUILTIN
@@ -1388,4 +1502,24 @@ void loop() {
     //    for the Tier-1 control plane — `block`/`unblock` here will later arrive as
     //    signed control packets from the RPi controller, driving the same Router API.
     poll_console();
+}
+
+// The Adafruit core hard-codes loop()'s stack at LOOP_STACK_SZ = 1024 words (4 KB,
+// cores/nRF5/main.cpp) with no override. This firmware's deepest paths (radio service +
+// SAR + console snprintf) ran that to within a few WORDS of the cliff: adding one 32-byte
+// local to the heartbeat crashed the node at the first beat (bisected on hardware — K1
+// fail vs K2 pass differed only in moving that buffer off the stack). So the real loop
+// runs in our own task with 2048 words (8 KB), and the core's loop() just parks. The
+// heartbeat's stk= field reports this task's remaining headroom — watch it in the field.
+static void agn_main_task(void*) {
+    for (;;) { agn_loop_once(); yield(); }
+}
+
+void loop() {
+    static bool started = false;   // vTaskDelay(portMAX_DELAY) is ~49 days, not forever:
+    if (!started) {                // guard so a wrap can never spawn a second main task
+        started = true;
+        xTaskCreate(agn_main_task, "agn", 2048, NULL, TASK_PRIO_LOW, NULL);
+    }
+    vTaskDelay(portMAX_DELAY);     // park the core's thin-stacked loop task
 }
