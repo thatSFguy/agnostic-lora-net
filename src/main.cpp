@@ -230,14 +230,18 @@ static bool      ble_inited      = false;      // SoftDevice/BLE stack brought u
 static volatile bool    ble_evt_conn = false, ble_evt_disc = false;
 static volatile bool    ble_evt_pair = false, ble_evt_sec  = false;
 static volatile uint8_t ble_evt_disc_reason = 0, ble_evt_auth = 0;
-static void ble_connect_cb(uint16_t)            { ble_connected = true;  ble_evt_conn = true; }
+static volatile bool    ble_dump_pending = false;   // new client owed the binding dump
+static void ble_connect_cb(uint16_t)            { ble_connected = true;  ble_evt_conn = true; ble_dump_pending = true; }
 static void ble_disconnect_cb(uint16_t, uint8_t reason) {
     ble_connected = false; ble_evt_disc_reason = reason; ble_evt_disc = true;
+    ble_dump_pending = false;
 }
 static void ble_pair_complete_cb(uint16_t, uint8_t auth_status) {
     ble_evt_auth = auth_status; ble_evt_pair = true;
 }
 static void ble_secured_cb(uint16_t) { ble_evt_sec = true; }
+
+static void loc_dump_to_client();   // fwd decl — needs locdir, defined later
 
 // Main-loop side of the BLE event logging. Disconnect reason is the HCI error
 // (0x13=remote ended, 0x16=local ended, 0x08=conn timeout, 0x3D=MIC failure/bond
@@ -245,6 +249,13 @@ static void ble_secured_cb(uint16_t) { ble_evt_sec = true; }
 // (0x01 passkey-entry fail, 0x04 confirm-value/PIN mismatch, 0x08 timeout).
 static void ble_evt_drain() {
     char m[48];
+    // A fresh client gets the CURRENT directory as `loc` lines (pushes only cover
+    // bindings learned after attach). Wait for the notify subscription — the connect
+    // event fires before CCCD setup, and anything sent earlier is silently lost.
+    if (ble_dump_pending && bleuart.notifyEnabled()) {
+        ble_dump_pending = false;
+        loc_dump_to_client();
+    }
     if (ble_evt_conn) { ble_evt_conn = false; Serial.println("[ble] connected"); }
     if (ble_evt_sec)  { ble_evt_sec  = false; Serial.println("[ble] link secured (encrypted)"); }
     if (ble_evt_pair) {
@@ -752,6 +763,36 @@ static void loc_dirdump(Print* sink) {
     }
 }
 
+// Push notification (distributed lookup, phone↔phone discovery): when this node LEARNS
+// a binding from the network, tell the attached client unsolicited, using the exact
+// `loc <id> <node>` line a resolve returns — so an app discovers newly registered peers
+// the moment the REGISTER flood arrives, without polling dirdump. Sent to the BLE client
+// when one is connected AND always to USB (the desktop interface parses the same line).
+static void loc_push_notify(const uint8_t* id, uint8_t id_len, node_id_t loc) {
+    char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(id, id_len, hx);
+    char line[64]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)loc);
+#ifdef AGN_BLE
+    if (ble_connected) bleuart.println(line);
+#endif
+    Serial.println(line);
+}
+
+// Initial sync for a freshly attached BLE client: emit every live binding as the same
+// `loc <id> <node>` line as a push/reply, so the client starts with the full directory
+// and the pushes keep it current — no dirdump polling. (Called from ble_evt_drain once
+// the client's notify subscription is up.)
+static void loc_dump_to_client() {
+#ifdef AGN_BLE
+    static mesh::LocatorDir::View v[mesh::LOC_DIR_CAP];   // static: off the loop stack
+    uint16_t n = locdir.snapshot(v, mesh::LOC_DIR_CAP, millis());
+    for (uint16_t i = 0; i < n; i++) {
+        char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(v[i].id, v[i].id_len, hx);
+        char line[64]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)v[i].loc);
+        bleuart.println(line);
+    }
+#endif
+}
+
 // Handle a received PKT_LOC frame (REGISTER/QUERY flood, or REPLY unicast).
 static void on_loc_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, const LinkHeader& lh) {
     const uint8_t* pay = buf + HEADER_BYTES;
@@ -763,7 +804,14 @@ static void on_loc_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, co
         if (loc_flood_seen(net.src, net.pkt_id)) return; // already handled this flood
         loc_flood_mark(net.src, net.pkt_id);
         if (m.kind == mesh::LOC_REGISTER) {
-            locdir.upsert(m.id, m.id_len, net.src, m.epoch, m.seq, m.ttl_s, millis());
+            // Push only on NEW or MOVED bindings (upsert==false drops stale floods, and
+            // the 240 s refresh of an unchanged binding must not re-notify every client).
+            mesh::LocBinding prev;
+            bool had = locdir.lookup_full(m.id, m.id_len, &prev, millis());
+            if (locdir.upsert(m.id, m.id_len, net.src, m.epoch, m.seq, m.ttl_s, millis())
+                && (!had || prev.loc != net.src)) {
+                loc_push_notify(m.id, m.id_len, net.src);
+            }
         } else if (m.kind == mesh::LOC_QUERY) {
             mesh::LocBinding b;
             if (locdir.lookup_full(m.id, m.id_len, &b, millis())) {
@@ -785,9 +833,10 @@ static void on_loc_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, co
         if (m.kind == mesh::LOC_REPLY) {
             locdir.upsert(m.id, m.id_len, m.loc, m.epoch, m.seq, m.ttl_s, millis());
             locres.on_reply(m.qid);
-            char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(m.id, m.id_len, hx);
-            char line[80]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)m.loc);
-            Serial.println(line);                        // async resolve result
+            // Async resolve result — via the push path so a BLE resolver gets it too
+            // (it used to print to USB only: a cache-miss resolve over BLE never
+            // returned its answer to the client that asked).
+            loc_push_notify(m.id, m.id_len, m.loc);
         }
     } else if (d.action == mesh::Action::FORWARD && lh.next_hop != LINK_ADDR_BROADCAST) {
         forward_frame(buf, len, d.next_hop, d.out_ttl);
@@ -981,7 +1030,21 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
 // else USB serial. BLEUart.write chunks across notifications internally.
 static void host_write(const uint8_t* d, uint16_t n) {
 #ifdef AGN_BLE
-    if (ble_connected) { bleuart.write(d, n); ble_txb += n; return; }
+    if (ble_connected) {
+        // BLEUart::write -> notify() silently CLAMPS each call to the TXD characteristic
+        // max_len (~247): the tail of any larger single write is dropped, the closing
+        // HDLC FLAG never reaches the client, and the whole frame dies invisibly at the
+        // last hop (BR-4: every >=3-fragment SAR delivery, e.g. 323B LXMF reactions,
+        // while <=247B frames sailed through). Chunk well under the clamp; notify()
+        // handles per-MTU splitting and HVN flow control within each chunk itself.
+        const uint16_t CH = 128;
+        for (uint16_t off = 0; off < n; off += CH) {
+            uint16_t k = (uint16_t)((n - off) < CH ? (n - off) : CH);
+            bleuart.write(d + off, k);
+        }
+        ble_txb += n;
+        return;
+    }
 #endif
     Serial.write(d, n);
 }
@@ -1025,14 +1088,24 @@ static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
     node_id_t dst; memcpy(&dst, f + 2, sizeof(node_id_t));
     const uint8_t* payload = f + 2 + addr_len;
     uint16_t plen = (uint16_t)(n - 2 - addr_len);
+    // One [tun] line per ingested host frame (USB console only): without it a SAR-sized
+    // send is fully invisible (fragments are verbose=false) and a healthy transfer is
+    // indistinguishable from a silent drop — that ambiguity cost a real debug round.
+    char m[56];
     if (plen <= MAX_PAYLOAD - HEADER_BYTES) {
         send_data_bytes(dst, payload, plen, false);   // fits one frame
+        snprintf(m, sizeof(m), "[tun] >%08lX %uB 1-frame", (unsigned long)dst, (unsigned)plen);
     } else if (!sar_tx_active && !sar_resend_active && plen <= mesh::SAR_MAX_FILE) {
         memcpy(sar_buf, payload, plen);                // larger: segment over the mesh
         sar_len = plen; sar_crc = mesh::sar_crc32(sar_buf, plen); sar_xfer_id++;
         sar_tx_dst = dst; sar_tx_count = mesh::sar_frag_count(plen); sar_tx_idx = 0; sar_tx_active = true;
+        snprintf(m, sizeof(m), "[tun] >%08lX %uB sar=%u", (unsigned long)dst, (unsigned)plen,
+                 (unsigned)sar_tx_count);
+    } else {
+        // big packet while a transfer is busy — dropped; the app layer retries
+        snprintf(m, sizeof(m), "[tun] >%08lX %uB DROPPED busy", (unsigned long)dst, (unsigned)plen);
     }
-    // else: a big packet while a transfer is busy — drop; the app layer will retry.
+    Serial.println(m);
 }
 
 // --- runtime command console (USB serial) ----------------------------------
