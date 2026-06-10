@@ -38,6 +38,14 @@ These are non-negotiable — each was learned the hard way validating the deskto
      return traffic** ever arrives. (This is the exact shape of a real mobile-app bring-up bug.)
    - *identity*: send `register <my-id-hex>` and `resolve <peer-id-hex>` as text lines;
      parse the `loc <id> <node>` reply to learn the peer's node id (tracks mobility).
+     Since fw 0.4.3 the node also **pushes** `loc <id> <node>` lines *unsolicited* when it
+     learns a new/moved binding from the mesh (a peer registering anywhere in the network)
+     — same line format, so one parser handles resolve replies AND peer discovery. No
+     dirdump polling needed: register on connect, treat every `loc` line whose id isn't
+     yours as a discovered peer, resolve nothing extra, unicast your RNS announce to that
+     node. (Ids are opaque to the firmware, ≤16 bytes — use your 16-byte RNS destination
+     hash as 32 hex chars. Registrations are RAM-only: re-`register` on every connect;
+     the node re-floods on its own every ~240 s, TTL 600 s.)
 6. **One writer lock** — the directory/resolve loop and RNS both write the BLE characteristic;
    serialize writes so a text command never interleaves mid-HDLC-frame.
 7. **Android 13+ (API 33): override the 3-arg notification callback.** On API 33+ the framework
