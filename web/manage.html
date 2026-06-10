@@ -38,6 +38,7 @@ if it's attached to WSL via usbipd, detach it first).</p>
   <button id="connectble">Connect (BLE)</button>
   <span id="status" class="bad">disconnected</span>
   <span class="stat" style="margin-left:1rem;">node: <b id="node">—</b></span>
+  <span class="stat" style="margin-left:1rem;">fw: <b id="fw">—</b></span>
 </div>
 <p class="muted">USB (Web Serial) configures any node, including BLE security. <b>BLE</b>
 (Web Bluetooth) works on an already-paired node with BLE enabled — the field / retune-rescue
@@ -107,6 +108,10 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
   </fieldset>
 </div>
 
+<div style="margin:.4rem 0;">
+  <input id="cmd" placeholder="console command (info, ble unbond, rf show, help …)" style="width:24rem;">
+  <button id="cmdsend">Send</button>
+</div>
 <div id="log"></div>
 
 <script>
@@ -132,6 +137,7 @@ function markConnected(kind){
   log('connected over '+kind+' — reading…');
   setTimeout(()=>send('ble'),500);       // current BLE state + PIN
   setTimeout(()=>send('rf show'),900);    // current radio PHY -> prefill the form
+  setTimeout(()=>send('info'),1300);      // fw version + mesh state (boot banner scrolls away)
 }
 
 function fillRf(r){
@@ -148,6 +154,7 @@ function fillRf(r){
 function onLine(line){
   log(line);
   let m;
+  if((m=line.match(/^fw[= ](\S+)(?:\s+built[= ](.+))?/))) $('fw').textContent=m[1]+(m[2]?' ('+m[2]+')':'');
   if((m=line.match(/PIN=(\d{6})/))) $('pin').textContent=m[1].split('').join(' ');
   if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
   if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
@@ -165,18 +172,31 @@ function onLine(line){
 
 async function send(s){ if(sendRaw) await sendRaw(s+'\n'); else log('not connected'); }
 
+let usbReader=null;
 async function readLoop(){
-  const reader=port.readable.getReader();
+  usbReader=port.readable.getReader();
   try{
     while(true){
-      const {value,done}=await reader.read(); if(done) break;
+      const {value,done}=await usbReader.read(); if(done) break;
       feed(new TextDecoder().decode(value));
     }
-  }catch(e){ log('read end: '+e); } finally{ reader.releaseLock(); }
+  }catch(e){ log('read end: '+e); } finally{ usbReader.releaseLock(); usbReader=null; }
 }
+
+// Release the port fully. Without this a tab holds the port open forever after its
+// first Connect (there was no close path), so every later open() fails with
+// NetworkError until the node re-enumerates — i.e. "works once per reboot".
+async function closeUsb(){
+  try{ if(usbReader) await usbReader.cancel(); }catch(e){}
+  try{ if(writer){ writer.releaseLock(); } }catch(e){} writer=null;
+  try{ if(port) await port.close(); }catch(e){} port=null;
+  sendRaw=null;
+}
+window.addEventListener('pagehide',()=>{ closeUsb(); });   // free it for other tabs too
 
 async function connectUsb(){
   try{
+    await closeUsb();                       // reconnect cleanly without a node reboot
     port=await navigator.serial.requestPort();
     await port.open({baudRate:115200});
     writer=port.writable.getWriter();
@@ -240,6 +260,8 @@ async function applyRf(){
 
 $('connect').onclick=connectUsb;
 $('connectble').onclick=connectBle;
+$('cmdsend').onclick=()=>{ const c=$('cmd').value.trim(); if(c){ send(c); $('cmd').value=''; } };
+$('cmd').addEventListener('keydown',e=>{ if(e.key==='Enter') $('cmdsend').onclick(); });
 $('enable').onclick=()=>send('ble on');
 $('disable').onclick=()=>send('ble off');
 $('newpin').onclick=()=>send('blepin random');
