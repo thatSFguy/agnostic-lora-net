@@ -5,22 +5,33 @@
 # This is the "apps ride on top as opaque payload" model from Agent.md §1 — NOT
 # RNode emulation (which would bypass our routing).
 #
-# Wire to a node running tunnel mode over USB serial. Frames are HDLC (matching
-# RNS's PipeInterface) carrying [u32 node_id LE][payload]:
-#   outbound: [peer_dst][rns_packet]   -> node sends it into the mesh toward peer
-#   inbound:  [src][rns_packet]        <- node delivered it from the mesh
+# Wire to a node running tunnel mode over USB serial. Tunnel frames are HDLC carrying
+# the typed envelope [u8 addr_type][u8 addr_len][addr…][payload]:
+#   outbound: [LOCATOR][len][peer_node][rns_packet]  -> node routes it to that node
+#   inbound:  [LOCATOR][len][src_node ][rns_packet]  <- node delivered it from the mesh
+#
+# Addressing the peer (two ways):
+#   * STATIC      — config `peer = 9828F51B` pins the far node id (the original mode).
+#   * BY IDENTITY — config `identity`/`peer_identity` (opaque hex). The interface
+#     `register`s its own identity and `resolve`s the peer's via the node's distributed
+#     locator directory, so the far node id is *discovered* (and tracks mobility) rather
+#     than hardcoded. This is Phase 4 of docs/distributed-lookup-plan.md.
 #
 # Config (in the Reticulum config file):
 #   [[Mesh Link]]
 #     type = AgnosticLoraInterface
 #     interface_enabled = yes
 #     port = /dev/ttyACM0
-#     peer = 9828F51B          # destination node id (hex) on the mesh
+#     identity = A1A1A1A1A1A1A1A1     # this side's opaque id (hex) — registered
+#     peer_identity = B2B2B2B2B2B2B2B2 # far side's opaque id (hex) — resolved to a node
+#     # peer = 9828F51B               # …or pin the node id directly instead
 #     speed = 115200
-import time, threading, struct
+import time, threading, struct, os
 import serial
 import RNS
 from RNS.Interfaces.Interface import Interface
+
+_AGN_DEBUG = os.environ.get("AGN_IFACE_DEBUG")   # set to enable /tmp/agn_<port>.log tracing
 
 
 class HDLC:
@@ -53,12 +64,18 @@ class AgnosticLoraInterface(Interface):
         self.name    = c["name"]
         self.port    = c["port"]
         self.speed   = int(c["speed"]) if "speed" in c else 115200
-        self.peer    = int(c["peer"], 16)             # mesh node id of the far end
+        # Static node id (optional) or identity-based addressing via the directory.
+        self.peer          = int(c["peer"], 16) if "peer" in c else None
+        self.identity      = c["identity"]      if "identity" in c else None
+        self.peer_identity = c["peer_identity"] if "peer_identity" in c else None
         self.bitrate = 800                            # LoRa-class link (~0.8 kbit/s)
         self.HW_MTU  = 500
         self.IN = True; self.OUT = True
         self.online  = False
         self.serial  = None
+        self._wlock  = threading.Lock()               # serial is shared (RNS + directory thread)
+        self._pending = []                            # outgoing buffered until peer resolves
+        self._plock   = threading.Lock()
 
         self._connect()
 
@@ -68,49 +85,123 @@ class AgnosticLoraInterface(Interface):
         self.serial.dtr = True; self.serial.rts = True
         time.sleep(0.3)
         self.serial.reset_input_buffer()
-        self.serial.write(b"tunnel\n"); self.serial.flush()   # put the node into tunnel mode
+        self._write(b"tunnel\n")                       # put the node into tunnel mode
         time.sleep(0.3)
-        t = threading.Thread(target=self._read_loop, daemon=True); t.start()
+        threading.Thread(target=self._read_loop, daemon=True).start()
         self.online = True
-        RNS.log(f"{self} online (peer {self.peer:08X})", RNS.LOG_VERBOSE)
+        self._dbg(f"connect id={self.identity} peer_id={self.peer_identity} peer={self.peer}")
+        if self.identity or self.peer_identity:        # identity-addressed: drive the directory
+            threading.Thread(target=self._directory_loop, daemon=True).start()
+        who = ("%08X" % self.peer) if self.peer is not None else f"identity {self.peer_identity}"
+        RNS.log(f"{self} online (peer {who})", RNS.LOG_VERBOSE)
+
+    # All serial writes go through one lock so the directory thread's text commands and
+    # RNS's HDLC frames never interleave mid-write on the shared port.
+    def _write(self, raw):
+        with self._wlock:
+            self.serial.write(raw); self.serial.flush()
+
+    def _dbg(self, msg):
+        if not _AGN_DEBUG: return
+        try:
+            with open(f"/tmp/agn_{os.path.basename(self.port)}.log", "a") as f:
+                f.write(f"{time.time():.1f} {msg}\n")
+        except Exception: pass
+
+    def _cmd(self, line):
+        try: self._write((line + "\n").encode()); self._dbg(f"cmd> {line}")
+        except Exception: pass
+
+    # Register our identity once, then keep resolving the peer's (retry until found,
+    # then a slow refresh so a peer that moves nodes is picked up). `resolve` is a cheap
+    # local cache hit on the node once the peer's REGISTER has propagated.
+    def _directory_loop(self):
+        if self.identity:
+            self._cmd(f"register {self.identity}")
+        while self.online:
+            if self.peer_identity:
+                self._cmd(f"resolve {self.peer_identity}")
+            time.sleep(5 if self.peer is None else 30)
 
     def process_outgoing(self, data):
         if not self.online:
             return
-        loc = struct.pack("<I", self.peer)                          # locator (node id, LE)
+        if self.peer is None:
+            # Peer not resolved yet — BUFFER (bounded) instead of dropping, so the early
+            # RNS announce / path-request isn't lost (losing it = no path established).
+            with self._plock:
+                if len(self._pending) < 64:
+                    self._pending.append(data); self._dbg(f"QUEUE ({len(data)}B) n={len(self._pending)}")
+            return
+        self._send_frame(data)
+
+    def _send_frame(self, data):
+        loc = struct.pack("<I", self.peer)             # locator (node id, LE)
         payload = bytes([self.ADDR_LOCATOR, len(loc)]) + loc + data  # [type][len][locator][rns packet]
-        self.serial.write(HDLC.frame(payload)); self.serial.flush()
+        self._write(HDLC.frame(payload))
         self.txb += len(data)
 
     def _read_loop(self):
-        in_frame = False; esc = False; buf = bytearray()
+        in_frame = False; esc = False; buf = bytearray(); text = bytearray()
         try:
             while True:
                 b = self.serial.read(1)
                 if len(b) == 0:
                     continue
                 byte = b[0]
-                if in_frame and byte == HDLC.FLAG:
-                    in_frame = False
-                    # [addr_type][addr_len][addr][payload]; strip the envelope, hand the
-                    # RNS packet up. (We don't need the src locator for RNS, but caching
-                    # it here is the free reverse-path binding — see distributed-lookup-plan.)
-                    if len(buf) >= 2:
-                        addr_type, addr_len = buf[0], buf[1]
-                        if addr_type == self.ADDR_LOCATOR and len(buf) >= 2 + addr_len:
-                            data = bytes(buf[2 + addr_len:])
-                            self.rxb += len(data)
-                            self.owner.inbound(data, self)
-                elif byte == HDLC.FLAG:
-                    in_frame = True; esc = False; buf = bytearray()
-                elif in_frame and len(buf) < self.HW_MTU + 8:
-                    if byte == HDLC.ESC:
-                        esc = True
+                if byte == HDLC.FLAG:
+                    if in_frame:
+                        in_frame = False; self._handle_frame(buf)
                     else:
-                        buf.append(byte ^ HDLC.ESC_MASK if esc else byte); esc = False
+                        in_frame = True; esc = False; buf = bytearray()
+                    text = bytearray()                 # a frame boundary is never part of a line
+                    continue
+                if in_frame:
+                    if len(buf) < self.HW_MTU + 8:
+                        if byte == HDLC.ESC: esc = True
+                        else: buf.append(byte ^ HDLC.ESC_MASK if esc else byte); esc = False
+                    continue
+                # out-of-frame: the node's text console (e.g. `loc <id> <node>` answers)
+                if byte == 0x0A:
+                    self._handle_text(text.decode("latin1", "ignore")); text = bytearray()
+                elif byte != 0x0D and len(text) < 200:
+                    text.append(byte)
         except Exception as e:
             self.online = False
             RNS.log(f"{self} read error: {e}", RNS.LOG_ERROR)
+
+    def _handle_frame(self, buf):
+        # [addr_type][addr_len][addr][payload]; strip the envelope, hand the RNS packet up.
+        if len(buf) >= 2:
+            addr_type, addr_len = buf[0], buf[1]
+            if addr_type == self.ADDR_LOCATOR and len(buf) >= 2 + addr_len:
+                data = bytes(buf[2 + addr_len:])
+                self.rxb += len(data)
+                src = int.from_bytes(buf[2:2 + addr_len], "little")
+                self._rxn = getattr(self, "_rxn", 0) + 1
+                if self._rxn <= 8 or self._rxn % 25 == 0:
+                    self._dbg(f"INBOUND #{self._rxn} ({len(data)}B) from {src:08X}")
+                self.owner.inbound(data, self)
+
+    def _handle_text(self, line):
+        # `loc <idhex> <node8hex>` — a resolve answer from the node's directory.
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "loc" and self.peer_identity \
+                and parts[1].upper() == self.peer_identity.upper():
+            try:
+                node = int(parts[2], 16)
+            except ValueError:
+                return
+            if node != self.peer:
+                self.peer = node
+                self._dbg(f"RESOLVED {self.peer_identity} -> {node:08X}")
+                RNS.log(f"{self} resolved {self.peer_identity} -> {node:08X}", RNS.LOG_NOTICE)
+                with self._plock:
+                    pend, self._pending = self._pending, []
+                if pend: self._dbg(f"flush {len(pend)} buffered")
+                for d in pend: self._send_frame(d)   # send what we buffered while unresolved
+        elif _AGN_DEBUG and parts[:1] == ["loc"]:
+            self._dbg(f"loc line (no match): {line!r} want={self.peer_identity}")
 
     def __str__(self):
         return f"AgnosticLoraInterface[{self.name}]"
