@@ -1,0 +1,63 @@
+# CI: host-test the routing core, build the two release boards, package UF2s.
+# On a v* tag, attach the UF2s to a GitHub release. The RAK4631 board def and the
+# XIAO/promicro variants are vendored in-repo (boards/, variants/), so a stock
+# PlatformIO install builds everything with no extra setup.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write   # needed by the release step on tag builds
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Host tests (portable routing core, 44 tests)
+        run: pio test -e native
+
+      - name: Build firmware (RAK4631 + XIAO nRF52840)
+        run: pio run -e wiscore_rak4631 -e xiao_nrf52
+
+      - name: Package UF2s
+        run: |
+          UF2CONV=$(find ~/.platformio/packages -name uf2conv.py | head -1)
+          python "$UF2CONV" .pio/build/wiscore_rak4631/firmware.hex -c -f 0xADA52840 -o agn-rak.uf2
+          python "$UF2CONV" .pio/build/xiao_nrf52/firmware.hex     -c -f 0xADA52840 -o agn-xiao.uf2
+          ls -la agn-rak.uf2 agn-xiao.uf2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-uf2
+          path: |
+            agn-rak.uf2
+            agn-xiao.uf2
+
+      - name: Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            agn-rak.uf2
+            agn-xiao.uf2
+          generate_release_notes: true
