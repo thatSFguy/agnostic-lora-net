@@ -1030,7 +1030,21 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
 // else USB serial. BLEUart.write chunks across notifications internally.
 static void host_write(const uint8_t* d, uint16_t n) {
 #ifdef AGN_BLE
-    if (ble_connected) { bleuart.write(d, n); ble_txb += n; return; }
+    if (ble_connected) {
+        // BLEUart::write -> notify() silently CLAMPS each call to the TXD characteristic
+        // max_len (~247): the tail of any larger single write is dropped, the closing
+        // HDLC FLAG never reaches the client, and the whole frame dies invisibly at the
+        // last hop (BR-4: every >=3-fragment SAR delivery, e.g. 323B LXMF reactions,
+        // while <=247B frames sailed through). Chunk well under the clamp; notify()
+        // handles per-MTU splitting and HVN flow control within each chunk itself.
+        const uint16_t CH = 128;
+        for (uint16_t off = 0; off < n; off += CH) {
+            uint16_t k = (uint16_t)((n - off) < CH ? (n - off) : CH);
+            bleuart.write(d + off, k);
+        }
+        ble_txb += n;
+        return;
+    }
 #endif
     Serial.write(d, n);
 }
