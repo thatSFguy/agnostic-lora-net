@@ -917,13 +917,20 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
         router->on_beacon(net.src, q, ann, millis());
     }
 
-    // Link-layer filter: a directed frame carries the next hop's alias. If it's
-    // addressed to someone else's alias (not broadcast, not one of ours), it isn't
-    // for us to act on — drop it without running the relay engine.
+    // Link-layer filter: a directed frame carries BOTH link aliases — next_hop
+    // (the alias we assigned to the sender's link) and prev_hop (the alias the
+    // sender assigned to ours) — and is ours only if both match the SAME
+    // neighbour. Matching next_hop alone is ambiguous on a broadcast medium:
+    // every node runs its own alias space starting near 1, so with 3+ nodes a
+    // frame's alias numerically equals one WE assigned to a different link
+    // (observed live: spurious accepts/forwards + ACKs to the wrong neighbour
+    // corrupted ARQ state and collapsed 3-node throughput ~10x).
     LinkHeader lh;
     memcpy(&lh, buf, sizeof(lh));
-    if (lh.next_hop != LINK_ADDR_BROADCAST && router && !router->is_my_alias(lh.next_hop)) {
-        return;
+    node_id_t link_from = 0;
+    if (lh.next_hop != LINK_ADDR_BROADCAST) {
+        link_from = router ? router->link_sender(lh.next_hop, lh.prev_hop) : 0;
+        if (!link_from) return;          // someone else's link — not ours to act on
     }
 
     // A link-layer ACK addressed to us: clear the matching pending frame, done.
@@ -933,11 +940,9 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     }
 
     // A directed frame that requested an ACK: acknowledge the previous hop now —
-    // even for a duplicate, so the sender's retransmit stops. The previous hop is
-    // the neighbour we assigned this frame's next_hop alias to.
-    if ((lh.flags & LINK_FLAG_ACK_REQ) && lh.next_hop != LINK_ADDR_BROADCAST && router) {
-        node_id_t prev = router->neighbors().neighbor_by_my_alias(lh.next_hop);
-        if (prev) send_ack(prev, lh.link_seq);
+    // even for a duplicate, so the sender's retransmit stops.
+    if ((lh.flags & LINK_FLAG_ACK_REQ) && link_from) {
+        send_ack(link_from, lh.link_seq);
     }
 
     // --- LOC: distributed locator directory (REGISTER/QUERY flood, REPLY unicast) ---
