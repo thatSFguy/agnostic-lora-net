@@ -192,10 +192,11 @@ integration surface for everything:
   binds a full RNS stack to a USB node; the mobile app does the same over BLE.
   Wire contract: [`docs/tcp-bridge.md`](docs/tcp-bridge.md), worked examples:
   [`docs/INTEGRATING-AGNOSTIC-LORA-NET.md`](docs/INTEGRATING-AGNOSTIC-LORA-NET.md).
-- **TCP bridge (small host daemon, no firmware change)** — expose a USB node on
-  the LAN: any Reticulum `TCPClientInterface` (Sideband on a desktop, an RPi
-  gateway) reaches the mesh through it. ~100 lines of Python around the
-  existing tunnel framing.
+- **TCP bridge (shipped: [`scripts/tcp_bridge.py`](scripts/tcp_bridge.py))** —
+  expose a USB node on the LAN: multi-client, serial-reconnect, atomic frame
+  writes. Custom apps speak the §4.2 framing over the socket; Reticulum users
+  can also run Path A from the doc (an RNS instance bridging
+  `TCPServerInterface` ⇄ `AgnosticLoraInterface`).
 - **KISS TNC mode (planned, small firmware addition)** — speak standard KISS
   (`0xC0` framing) on the console so the node presents as a plain TNC: RNS's
   stock `KISSInterface` and the wider packet-radio ecosystem work unmodified.

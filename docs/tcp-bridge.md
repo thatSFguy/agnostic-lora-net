@@ -190,7 +190,23 @@ the TCP socket exactly as if it were wired to the node's serial port.
  your app ──TCP──► [ relay: copy bytes both ways ] ──serial/BLE──► node ──► mesh
 ```
 
-### 4.1 Reference relay (Python, single client)
+### 4.1 The shipped relay — `scripts/tcp_bridge.py`
+
+The repo ships a production version of the relay below:
+
+```bash
+python3 scripts/tcp_bridge.py                  # first /dev/ttyACM*, listen 0.0.0.0:7878
+python3 scripts/tcp_bridge.py --port /dev/ttyACM1 --listen 0.0.0.0:7878
+```
+
+It accepts **multiple TCP clients** (node output fans out to all; each client's
+input is reassembled into whole HDLC frames / console lines and written under a
+lock, so clients can never interleave bytes mid-frame), and **reconnects the
+serial side forever** — a node reboot is just a gap. Clients speak exactly the
+§4.2 framing; console text lines work over the same socket (send `info\n`,
+read the reply).
+
+### 4.1b Minimal reference relay (single client, for porting)
 
 ```python
 #!/usr/bin/env python3
