@@ -37,14 +37,15 @@ jobs:
         run: pio test -e native
 
       - name: Build firmware (RAK4631 + XIAO nRF52840)
-        run: pio run -e wiscore_rak4631 -e xiao_nrf52
+        run: pio run -e wiscore_rak4631 -e xiao_nrf52 -e promicro
 
       - name: Package UF2s
         run: |
           UF2CONV=$(find ~/.platformio/packages -name uf2conv.py | head -1)
           python "$UF2CONV" .pio/build/wiscore_rak4631/firmware.hex -c -f 0xADA52840 -o agn-rak.uf2
           python "$UF2CONV" .pio/build/xiao_nrf52/firmware.hex     -c -f 0xADA52840 -o agn-xiao.uf2
-          ls -la agn-rak.uf2 agn-xiao.uf2
+          python "$UF2CONV" .pio/build/promicro/firmware.hex       -c -f 0xADA52840 -o agn-promicro.uf2
+          ls -la agn-rak.uf2 agn-xiao.uf2 agn-promicro.uf2
 
       - uses: actions/upload-artifact@v4
         with:
@@ -52,6 +53,7 @@ jobs:
           path: |
             agn-rak.uf2
             agn-xiao.uf2
+            agn-promicro.uf2
 
       - name: Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -60,4 +62,5 @@ jobs:
           files: |
             agn-rak.uf2
             agn-xiao.uf2
+            agn-promicro.uf2
           generate_release_notes: true

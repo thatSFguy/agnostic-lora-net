@@ -1,5 +1,9 @@
 # agnostic-LoRa-Net
 
+[![build](https://github.com/thatSFguy/agnostic-lora-net/actions/workflows/build.yml/badge.svg)](https://github.com/thatSFguy/agnostic-lora-net/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/thatSFguy/agnostic-lora-net)](https://github.com/thatSFguy/agnostic-lora-net/releases/latest)
+MIT licensed.
+
 An **app-agnostic LoRa mesh backbone** — a dumb, efficient transport that moves
 addressed packets between nodes the way the internet moves IP. Applications ride on
 top as **opaque payload** (a Reticulum app, a phone over BLE, anything); the backbone
