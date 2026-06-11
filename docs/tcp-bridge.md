@@ -206,6 +206,11 @@ serial side forever** — a node reboot is just a gap. Clients speak exactly the
 §4.2 framing; console text lines work over the same socket (send `info\n`,
 read the reply).
 
+> **Pick a bridge node without a phone attached**: when a BLE client is
+> connected, the node delivers mesh traffic to BLE in preference to USB — the
+> bridge's clients would see console output but not deliveries. One node, one
+> host.
+
 ### 4.1b Minimal reference relay (single client, for porting)
 
 ```python
