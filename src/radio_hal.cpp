@@ -147,21 +147,46 @@ void RadioHal::arm_rx() {
 }
 
 bool RadioHal::send(const uint8_t* buf, uint16_t len) {
-    if (state_ == TX) return false;          // a TX is already in flight
+    if (state_ != RX || pend_len_ > 0) return false;  // a send is pending or in flight
     if (len == 0 || len > RADIO_MAX_FRAME) return false;
 
-    // Non-blocking: kick off the transmission and return. DIO1 will fire on
-    // completion; poll() finishes up and re-arms RX.
-    int16_t st = radio_.startTransmit(const_cast<uint8_t*>(buf), len);
-    if (st != RADIOLIB_ERR_NONE) {
-        arm_rx();                            // recover the radio into RX
-        return false;
-    }
-    state_ = TX;
+    // Park the frame; CSMA airs it. With CAD off this degenerates to the
+    // pre-0.5 immediate transmit.
+    memcpy(pend_buf_, buf, len);
+    pend_len_  = len;
+    cad_tries_ = 0;
+    if (cad_enabled_) start_cad();
+    else              start_pending_tx();
     return true;
 }
 
+// Listen-before-talk: ask the SX1262 to scan for LoRa activity. DIO1 fires on
+// CAD_DONE and poll() reads the verdict. If the scan can't even start, fall
+// through to transmitting — a send must never be lost to a scan hiccup.
+void RadioHal::start_cad() {
+    state_ = CAD;
+    if (radio_.startChannelScan() != RADIOLIB_ERR_NONE) start_pending_tx();
+}
+
+void RadioHal::start_pending_tx() {
+    // startTransmit copies the frame into the radio FIFO synchronously, so the
+    // pending slot frees as soon as the call returns.
+    int16_t st = radio_.startTransmit(pend_buf_, pend_len_);
+    pend_len_ = 0;
+    if (st != RADIOLIB_ERR_NONE) {
+        // Mirror the old send() failure path: recover into RX and drop the frame
+        // (per-hop ARQ re-sends data; beacons have the next period).
+        arm_rx();
+        return;
+    }
+    state_ = TX;
+}
+
 bool RadioHal::poll() {
+    // Backoff expired while the channel was busy? Re-scan for the parked frame.
+    if (state_ == RX && pend_len_ > 0 && (int32_t)(millis() - next_cad_ms_) >= 0)
+        start_cad();
+
     if (!dio1_flag_) return false;
     dio1_flag_ = false;
 
@@ -170,6 +195,27 @@ bool RadioHal::poll() {
         radio_.finishTransmit();
         tx_count_++;
         arm_rx();
+        return true;
+    }
+
+    if (state_ == CAD) {
+        // Scan verdict for the parked frame.
+        int16_t res = radio_.getChannelScanResult();
+        if (res == RADIOLIB_LORA_DETECTED && cad_tries_ + 1 < CAD_MAX_TRIES) {
+            // Channel busy: hold off and listen. Randomized exponential backoff
+            // (~20-100 ms doubling per round) so two waiting senders don't fire
+            // in lock-step when the channel frees — the failure the fixed NACK
+            // timer had before 0.4.7.
+            cad_busy_count_++;
+            cad_tries_++;
+            next_cad_ms_ = millis() + ((20 + (uint32_t)random(0, 80)) << (cad_tries_ - 1));
+            arm_rx();   // hear the traffic we detected while we wait
+        } else {
+            // Channel free — or busy too many rounds (send anyway rather than
+            // starve; the collision risk is now the lesser evil).
+            if (res == RADIOLIB_LORA_DETECTED) { cad_busy_count_++; cad_forced_count_++; }
+            start_pending_tx();
+        }
         return true;
     }
 
