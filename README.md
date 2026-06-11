@@ -197,12 +197,12 @@ integration surface for everything:
   writes. Custom apps speak the §4.2 framing over the socket; Reticulum users
   can also run Path A from the doc (an RNS instance bridging
   `TCPServerInterface` ⇄ `AgnosticLoraInterface`).
-- **KISS TNC mode (planned, small firmware addition)** — speak standard KISS
-  (`0xC0` framing) on the console so the node presents as a plain TNC: RNS's
-  stock `KISSInterface` and the wider packet-radio ecosystem work unmodified.
-  Honest caveat: KISS carries no destination, so a KISS node pins traffic to a
-  configured default destination (or broadcast) — fine for point-to-point and
-  RNS-over-KISS, not a replacement for the typed envelope.
+- **KISS TNC mode (shipped, fw ≥ 0.7.1)** — `kiss <node-id>` (persisted) turns
+  the USB console into a standard KISS TNC: RNS's stock `KISSInterface` and the
+  wider packet-radio ecosystem work unmodified; the node stays manageable over
+  BLE. Honest caveat: KISS carries no destination, so a KISS node pins traffic
+  to its configured peer — point-to-point by construction, not a replacement
+  for the typed envelope.
 
 ## What's left
 
