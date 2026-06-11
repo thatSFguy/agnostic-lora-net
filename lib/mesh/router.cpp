@@ -4,6 +4,7 @@ namespace mesh {
 
 Router::Router(node_id_t my_id) : my_id_(my_id) {
     routes_.set_self(my_id_, 0);
+    neighbors_.set_alias_seed(my_id_);   // spread alias ranges across assigners
 }
 
 bool Router::block(node_id_t id) {

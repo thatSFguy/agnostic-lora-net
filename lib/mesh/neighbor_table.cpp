@@ -18,15 +18,37 @@ const Neighbor* NeighborTable::find(node_id_t id) const {
 }
 
 link_addr_t NeighborTable::alloc_alias() const {
-    // Smallest value in 1..254 not already assigned to a live neighbour.
-    for (uint16_t cand = 1; cand <= 254; cand++) {
+    // First free value walking cyclically from an id-derived base. Aliases are
+    // only meaningful within the assigner's own space, but the radio is a
+    // broadcast medium: when every node allocates from 1, a 3-node full mesh
+    // hands out IDENTICAL alias sets and every directed frame numerically
+    // matches every node's filter (observed live: spurious accepts/forwards/
+    // ACKs-to-the-wrong-neighbour collapsed throughput ~10x). Seeding the base
+    // from the node id makes numeric overlap the rare case instead of the
+    // certain one; the (next_hop, prev_hop) pair check covers the remainder.
+    for (uint16_t k = 0; k < 254; k++) {
+        link_addr_t cand = (link_addr_t)(1 + (alias_base_ + k) % 254);
         bool taken = false;
         for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
-            if (slots_[i].used && slots_[i].my_alias == (link_addr_t)cand) { taken = true; break; }
+            if (slots_[i].used && slots_[i].my_alias == cand) { taken = true; break; }
         }
-        if (!taken) return (link_addr_t)cand;
+        if (!taken) return cand;
     }
     return ALIAS_NONE;  // table effectively full of aliases (shouldn't happen with 32 slots)
+}
+
+node_id_t NeighborTable::neighbor_by_link(link_addr_t next_hop, link_addr_t prev_hop) const {
+    // A directed frame is ours only if BOTH header fields agree on the same
+    // neighbour: next_hop is the alias WE assigned to the sender's link, prev_hop
+    // the alias the sender assigned to OURS. Matching next_hop alone (the
+    // pre-0.5.4 filter) is ambiguous across alias spaces — see alloc_alias().
+    if (next_hop == ALIAS_NONE) return 0;
+    for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
+        if (slots_[i].used && slots_[i].my_alias == next_hop &&
+            slots_[i].their_alias == prev_hop)
+            return slots_[i].id;
+    }
+    return 0;
 }
 
 Neighbor* NeighborTable::heard(node_id_t id, float q, uint32_t now_ms) {

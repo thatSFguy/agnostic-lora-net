@@ -71,6 +71,34 @@ static void test_resolver_receive_side() {
     TEST_ASSERT_FALSE(B.is_my_alias(200));
 }
 
+// TRIANGLE (full mesh, every node hears every frame): a directed frame A->B must
+// match B's strict link filter and must NOT match C's — even though each node
+// runs its own small alias space. This is the 3-node regression: matching
+// next_hop alone let C accept/ACK/forward frames meant for B (alias spaces are
+// only meaningful per assigner), corrupting ARQ and collapsing throughput.
+static void test_triangle_no_cross_space_match() {
+    Router A(0x9828F51Bu), B(0xD97EEC3Au), C(0xB51EEC13u);
+    converge_pair(A, B, 4);
+    converge_pair(A, C, 4);
+    converge_pair(B, C, 4);
+
+    // A sends a directed frame to B, stamped exactly as the firmware does.
+    link_addr_t next_hop = A.link_addr_for(B.id());   // B's alias for the A-link
+    link_addr_t prev_hop = A.my_alias_for(B.id());    // A's alias for the B-link
+    TEST_ASSERT_NOT_EQUAL(ALIAS_NONE, next_hop);
+    TEST_ASSERT_NOT_EQUAL(ALIAS_NONE, prev_hop);
+
+    // The intended receiver resolves it to A; the bystander resolves NOTHING.
+    TEST_ASSERT_EQUAL_HEX32(A.id(), B.link_sender(next_hop, prev_hop));
+    TEST_ASSERT_EQUAL_HEX32(0,      C.link_sender(next_hop, prev_hop));
+
+    // All four remaining directed links behave the same way.
+    TEST_ASSERT_EQUAL_HEX32(B.id(), A.link_sender(B.link_addr_for(A.id()), B.my_alias_for(A.id())));
+    TEST_ASSERT_EQUAL_HEX32(0,      C.link_sender(B.link_addr_for(A.id()), B.my_alias_for(A.id())));
+    TEST_ASSERT_EQUAL_HEX32(C.id(), B.link_sender(C.link_addr_for(B.id()), C.my_alias_for(B.id())));
+    TEST_ASSERT_EQUAL_HEX32(0,      A.link_sender(C.link_addr_for(B.id()), C.my_alias_for(B.id())));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -79,5 +107,6 @@ int main(int, char**) {
     RUN_TEST(test_alias_allocation_distinct);
     RUN_TEST(test_alias_negotiation_symmetry);
     RUN_TEST(test_resolver_receive_side);
+    RUN_TEST(test_triangle_no_cross_space_match);
     return UNITY_END();
 }

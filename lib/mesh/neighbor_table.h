@@ -71,6 +71,16 @@ public:
     bool is_my_alias(link_addr_t a) const;
     // Which neighbour did I assign alias `a` to? 0 if none.
     node_id_t neighbor_by_my_alias(link_addr_t a) const;
+    // STRICT directed-frame match: the neighbour for which next_hop is the alias
+    // I assigned AND prev_hop is the alias it assigned to me — both fields must
+    // agree on the same entry, or 0. is_my_alias() alone is ambiguous on a
+    // broadcast medium once 3+ nodes each run their own alias space.
+    node_id_t neighbor_by_link(link_addr_t next_hop, link_addr_t prev_hop) const;
+
+    // Seed for id-derived alias allocation (call once, before any heard()):
+    // spreads each node's alias range so different assigners rarely hand out
+    // numerically identical aliases. See alloc_alias().
+    void set_alias_seed(node_id_t my_id) { alias_base_ = (uint16_t)(my_id % 254); }
 
     Neighbor* find(node_id_t id);
     const Neighbor* find(node_id_t id) const;
@@ -88,10 +98,12 @@ public:
     const Neighbor* at(uint8_t i) const { return &slots_[i]; }  // iterate 0..MAX_NEIGHBORS, check .used
 
 private:
-    // Pick the smallest free alias in 1..254 (unique among current neighbours).
+    // First free alias in 1..254 walking cyclically from the id-derived base
+    // (unique among current neighbours).
     link_addr_t alloc_alias() const;
 
     Neighbor slots_[MAX_NEIGHBORS];
+    uint16_t  alias_base_ = 0;   // id-derived start of this node's alias range
 };
 
 } // namespace mesh

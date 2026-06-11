@@ -75,6 +75,11 @@ public:
     link_addr_t link_addr_for(node_id_t dst) const { return neighbors_.their_alias_for(dst); }
     link_addr_t my_alias_for(node_id_t dst)  const { return neighbors_.my_alias_for(dst); }
     bool        is_my_alias(link_addr_t a)   const { return neighbors_.is_my_alias(a); }
+    // Strict directed-frame ownership: the neighbour matching BOTH header fields
+    // (next_hop = my alias for the link, prev_hop = its alias for me), else 0.
+    node_id_t   link_sender(link_addr_t next_hop, link_addr_t prev_hop) const {
+        return neighbors_.neighbor_by_link(next_hop, prev_hop);
+    }
 
     const NeighborTable& neighbors() const { return neighbors_; }
     const RoutingTable&  routes()    const { return routes_; }
