@@ -283,6 +283,37 @@ app on the destination node — bring your own encryption.
 
 ---
 
+## 4.5 Path C — KISS TNC mode (fw ≥ 0.7.1)
+
+The node's USB console can speak standard **KISS** framing (`kiss <node-id>`,
+persisted — the node boots as a TNC appliance). Stock packet software then uses
+it with zero custom code, e.g. Reticulum:
+
+```ini
+[[Mesh TNC]]
+  type              = KISSInterface
+  interface_enabled = yes
+  port              = /dev/ttyACM0
+  speed             = 115200
+```
+
+The contract, honestly stated:
+
+- **KISS carries no destination** — every data frame goes to the configured
+  `kiss <node-id>` peer (point-to-point, like a radio link). It is NOT a
+  replacement for the typed envelope; it's compatibility with the KISS world.
+- Inbound mesh deliveries arrive as KISS data frames (source id dropped — RNS
+  packets are self-describing).
+- Console access while in KISS mode: over **BLE** (the BLE console keeps
+  working), or send KISS command `0xFF` to drop back to the text console for
+  the session (`kiss off` clears the persisted setting).
+- The same caveat as the TCP bridge applies: a connected BLE client takes
+  delivery precedence — run the TNC on a phone-free node.
+- KISS + `scripts/tcp_bridge.py` compose: a KISS-mode node behind the bridge is
+  a KISS-over-TCP TNC for tools that support that.
+
+---
+
 ## 5. Operational notes
 
 - **Node prep.** For USB the relay/interface sends `tunnel\n` to enter tunnel mode. For

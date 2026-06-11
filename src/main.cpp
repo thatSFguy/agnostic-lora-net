@@ -23,6 +23,7 @@
 #include "forwarder.h"
 #include "link_arq.h"
 #include "telemetry.h"
+#include "kiss.h"
 #include "sar.h"
 #include "locator_dir.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
@@ -124,6 +125,17 @@ static bool      tunnel_mode = false;
 // the map app (4 nodes = a line every ~2 s). Runtime-toggled; the map app sends
 // `trace off` on connect.
 static bool      trace_beacons = true;
+// KISS TNC mode (lib/mesh/kiss.h): the USB console speaks standard KISS framing so
+// stock packet software (Reticulum KISSInterface, etc.) can use the node as a plain
+// TNC. KISS carries no destination, so data frames are pinned to kiss_dst
+// (`kiss <node8hex>`, persisted — the node boots straight into TNC mode). BLE keeps
+// the normal console/tunnel, so a KISS node stays manageable over BLE.
+static bool      kiss_mode = false;
+static node_id_t kiss_dst  = 0;
+static mesh::KissDecoder kiss_rx;
+static const char     KISS_PATH[]  = "/agn_kiss.cfg";
+static const uint32_t KISS_MAGIC   = 0x534B4741;   // "AGKS"
+struct __attribute__((packed)) KissStore { uint32_t magic; node_id_t dst; uint8_t enabled; };
 static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
 // Host-tunnel frame envelope (host<->node), TYPED + LENGTH-PREFIXED so the address can
 // widen (4-byte locator today -> 16-byte node-pubkey hash later, identity-vs-locator §6)
@@ -137,6 +149,7 @@ static const uint8_t TUN_ADDR_IDENTITY = 0x02;   // reserved: resolve-and-forwar
 static const uint16_t TUN_HOST_MAX     = 768;
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen);  // fwd decl
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n);                       // fwd decl
+static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen);   // fwd decl
 
 // The console (rf/ble/info/help/…) can be driven over USB serial OR, when a paired
 // client is connected, over the BLE NUS — so a node can be reconfigured in the field
@@ -248,6 +261,25 @@ static void batt_cfg_save() {
     InternalFS.remove(BATT_PATH);
     File f(InternalFS);
     if (f.open(BATT_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+static void kiss_cfg_load() {
+    InternalFS.begin();   // idempotent (boot-order safe)
+    KissStore rec;
+    File f(InternalFS);
+    if (!f.open(KISS_PATH, FILE_O_READ)) return;
+    int n = f.read((void*)&rec, sizeof(rec));
+    f.close();
+    if (n == (int)sizeof(rec) && rec.magic == KISS_MAGIC) {
+        kiss_dst = rec.dst;
+        kiss_mode = rec.enabled && rec.dst != 0;
+    }
+}
+static void kiss_cfg_save() {
+    KissStore want; want.magic = KISS_MAGIC; want.dst = kiss_dst; want.enabled = kiss_mode ? 1 : 0;
+    InternalFS.remove(KISS_PATH);
+    File f(InternalFS);
+    if (f.open(KISS_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
 }
 
 static void batt_refresh() {            // cheap cached read for heartbeat/info
@@ -1416,9 +1448,22 @@ static void hdlc_write(const uint8_t* d, uint16_t n) {
 // Emit a delivered app payload to the host as the typed envelope:
 // [LOCATOR][len=sizeof(node_id)][src node-id LE][payload].
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen) {
+    if (plen > TUN_HOST_MAX) plen = TUN_HOST_MAX;
+#ifdef AGN_BLE
+    bool usb_leg = !ble_connected;     // host_write prefers a connected BLE client
+#else
+    bool usb_leg = true;
+#endif
+    if (kiss_mode && usb_leg) {
+        // KISS has no addressing: the source id is dropped (RNS packets are
+        // self-describing; KISS peers are point-to-point by construction).
+        static uint8_t kf[2 * mesh::KISS_MAX_FRAME + 3];   // worst-case escaping
+        uint16_t kn = mesh::kiss_encode(mesh::KISS_CMD_DATA, payload, plen, kf, sizeof(kf));
+        if (kn) Serial.write(kf, kn);
+        return;
+    }
     const uint8_t alen = (uint8_t)sizeof(node_id_t);
     static uint8_t f[2 + sizeof(node_id_t) + TUN_HOST_MAX];   // static: too big for the stack
-    if (plen > TUN_HOST_MAX) plen = TUN_HOST_MAX;
     f[0] = TUN_ADDR_LOCATOR;
     f[1] = alen;
     memcpy(f + 2, &src, alen);
@@ -1450,11 +1495,15 @@ static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
     uint8_t addr_len  = f[1];
     (void)addr_type;
     node_id_t dst; memcpy(&dst, f + 2, sizeof(node_id_t));
-    const uint8_t* payload = f + 2 + addr_len;
-    uint16_t plen = (uint16_t)(n - 2 - addr_len);
-    // One [tun] line per ingested host frame (USB console only): without it a SAR-sized
-    // send is fully invisible (fragments are verbose=false) and a healthy transfer is
-    // indistinguishable from a silent drop — that ambiguity cost a real debug round.
+    tunnel_send(dst, f + 2 + addr_len, (uint16_t)(n - 2 - addr_len));
+}
+
+// Send one host payload into the mesh (shared by the HDLC tunnel and KISS mode):
+// loopback / single frame / SAR / queue / dedup, with one [tun] console line per
+// ingested payload — without it a SAR-sized send is fully invisible (fragments are
+// verbose=false) and a healthy transfer is indistinguishable from a silent drop.
+static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen) {
+    char m[56];
     if (dst == my_id) {
         // Self-addressed: deliver straight back to the attached host, never the radio.
         // Transmitting would just echo into the own-packet filter — a silent black hole
@@ -1784,6 +1833,26 @@ static void handle_command(char* line) {
         }
         Serial.println(l);
 #endif
+    } else if (!strcmp(cmd, "kiss")) {         // kiss <node8hex> | kiss off — USB KISS TNC mode
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "off")) {
+            kiss_mode = false; kiss_cfg_save();
+            Serial.println("KISS off (persisted)");
+        } else if (a) {
+            node_id_t d = parse_id(a);
+            if (!d) { Serial.println("usage: kiss <dest node id, 8 hex> | kiss off"); return; }
+            kiss_dst = d; kiss_mode = true; kiss_cfg_save();
+            char l[96];
+            snprintf(l, sizeof(l), "KISS ON (persisted): USB is now a TNC, data -> %08lX.",
+                     (unsigned long)kiss_dst);
+            Serial.println(l);
+            Serial.println("Exit: KISS cmd 0xFF (runtime), or `kiss off` over BLE console.");
+        } else {
+            char l[80];
+            snprintf(l, sizeof(l), "kiss %s dst=%08lX", kiss_mode ? "on" : "off",
+                     (unsigned long)kiss_dst);
+            Serial.println(l);
+        }
     } else if (!strcmp(cmd, "status")) {       // status <node8hex> — on-demand remote telemetry
         char* a = strtok(nullptr, " ");
         node_id_t t = a ? parse_id(a) : 0;
@@ -1898,7 +1967,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | status <id> | battdump");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | status <id> | battdump | kiss [<id>|off]");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
@@ -1926,6 +1995,22 @@ static void poll_console() {
 
     while (Serial.available()) {
         uint8_t c = (uint8_t)Serial.read();
+
+        if (kiss_mode) {
+            // USB is a KISS TNC: data frames go to the pinned destination; the
+            // standard 0xFF 'return' command drops back to the text console
+            // (runtime only — `kiss off` clears the persisted setting).
+            if (kiss_rx.feed(c)) {
+                uint8_t cmd = kiss_rx.frame()[0];
+                if (cmd == mesh::KISS_CMD_RETURN) {
+                    kiss_mode = false;
+                    Serial.println("KISS: returned to console (persisted setting unchanged)");
+                } else if ((cmd & 0x0F) == mesh::KISS_CMD_DATA && kiss_rx.len() > 1) {
+                    tunnel_send(kiss_dst, kiss_rx.frame() + 1, (uint16_t)(kiss_rx.len() - 1));
+                }   // other commands (TXDELAY etc.) accepted and ignored, per KISS
+            }
+            continue;
+        }
 
         if (!tunnel_mode) {
             if (c == '\r') continue;
@@ -1995,6 +2080,7 @@ void setup() {
     batt_cfg_load();   // restore the battery calibration scale (LittleFS, like rf/ble)
     batt_refresh();
     net_cfg_load();    // restore the beacon-period setting (0 = auto-by-SF)
+    kiss_cfg_load();   // restore KISS TNC mode (the node can boot as a TNC appliance)
 
 #ifdef AGN_BLE
     cfg_load();    // restore the persisted PIN + BLE-enabled state from flash (no SoftDevice needed)
