@@ -149,6 +149,13 @@ void RadioHal::arm_rx() {
 bool RadioHal::send(const uint8_t* buf, uint16_t len) {
     if (state_ != RX || pend_len_ > 0) return false;  // a send is pending or in flight
     if (len == 0 || len > RADIO_MAX_FRAME) return false;
+    // A DIO1 event is pending but unserviced (an RX completed since the last poll).
+    // Starting a scan/transmit NOW would desync the state machine: the next poll()
+    // would consume that stale flag as if it were OUR event — read a garbage CAD
+    // verdict, or "finish" a transmission still in the air and truncate it mid-frame.
+    // Observed under image load as the radio going deaf+mute for ~60-90 s. Let
+    // poll() service the event first; the caller retries next loop.
+    if (dio1_flag_) return false;
 
     // Park the frame; CSMA airs it. With CAD off this degenerates to the
     // pre-0.5 immediate transmit.
@@ -183,8 +190,10 @@ void RadioHal::start_pending_tx() {
 }
 
 bool RadioHal::poll() {
-    // Backoff expired while the channel was busy? Re-scan for the parked frame.
-    if (state_ == RX && pend_len_ > 0 && (int32_t)(millis() - next_cad_ms_) >= 0)
+    // Backoff expired while the channel was busy? Re-scan for the parked frame —
+    // but never while a DIO1 event is pending (same stale-flag race as send()).
+    if (state_ == RX && pend_len_ > 0 && !dio1_flag_ &&
+        (int32_t)(millis() - next_cad_ms_) >= 0)
         start_cad();
 
     if (!dio1_flag_) return false;
