@@ -65,11 +65,12 @@
 // ---------------------------------------------------------------------------
 #define PHY_FREQ_MHZ      904.375f  // single fixed channel for v1
 #define PHY_BW_KHZ        250.0f    // bandwidth
-#define PHY_SF            11        // spreading factor
+#define PHY_SF            9         // spreading factor: 5 dB more budget than SF7,
+                                    // texts still ~2 s — the deployment sweet spot
 #define PHY_CODING_RATE   5         // 4/5  (RadioLib takes the denominator: 5..8)
 #define PHY_SYNC_WORD     0x4D      // clear of MeshCore 0x12 / Meshtastic 0x2B / LoRaWAN 0x34
 #define PHY_PREAMBLE_SYMS 16        // preamble length in symbols
-#define PHY_TX_POWER_DBM  14        // conservative bench default; FCC/airtime budget tuned later (Tier 1)
+#define PHY_TX_POWER_DBM  22        // SX1262 max (Meshtastic parity); FCC 915 ISM allows it
 
 // SX1262 hardware ceiling (used to range-check PHY_TX_POWER_DBM at init).
 #define LORA_MAX_TX_POWER_DBM 22
