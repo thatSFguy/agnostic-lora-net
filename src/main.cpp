@@ -786,6 +786,14 @@ static void loc_dump_to_client() {
     static mesh::LocatorDir::View v[mesh::LOC_DIR_CAP];   // static: off the loop stack
     uint16_t n = locdir.snapshot(v, mesh::LOC_DIR_CAP, millis());
     for (uint16_t i = 0; i < n; i++) {
+        // Skip ids this node's own client registered: handing a client its own binding
+        // invites it to "discover" itself and unicast announces at its own node — which
+        // used to vanish into the RF echo filter (BR-5). Defense in depth with the app's
+        // own self-filter and the tunnel loopback.
+        bool own = false;
+        for (auto& r : my_regs)
+            if (r.used && r.id_len == v[i].id_len && memcmp(r.id, v[i].id, r.id_len) == 0) { own = true; break; }
+        if (own) continue;
         char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(v[i].id, v[i].id_len, hx);
         char line[64]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)v[i].loc);
         bleuart.println(line);
@@ -1092,6 +1100,16 @@ static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
     // send is fully invisible (fragments are verbose=false) and a healthy transfer is
     // indistinguishable from a silent drop — that ambiguity cost a real debug round.
     char m[56];
+    if (dst == my_id) {
+        // Self-addressed: deliver straight back to the attached host, never the radio.
+        // Transmitting would just echo into the own-packet filter — a silent black hole
+        // that burned real airtime when an app mistook its own registration for a peer
+        // and unicast announces/proofs at its own node on repeat (BR-5).
+        tunnel_emit(my_id, payload, plen);
+        snprintf(m, sizeof(m), "[tun] >%08lX %uB loopback", (unsigned long)dst, (unsigned)plen);
+        Serial.println(m);
+        return;
+    }
     if (plen <= MAX_PAYLOAD - HEADER_BYTES) {
         send_data_bytes(dst, payload, plen, false);   // fits one frame
         snprintf(m, sizeof(m), "[tun] >%08lX %uB 1-frame", (unsigned long)dst, (unsigned)plen);
