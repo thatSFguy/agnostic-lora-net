@@ -133,7 +133,7 @@ function feedBytes(bytes) {
     else if (lineBuf.length < 300) lineBuf += String.fromCharCode(b);
   }
 }
-const NOISY = /^(\[hb\]|\[ble\]|\[RX\]|\[TX\]|\[rf\]|nbr |route |node |fw |cad |batt mv|\[nbrs\]|\[dir\])/;
+const NOISY = /^(\[hb\]|\[ble\]|\[RX\]|\[TX\]|\[rf\]|nbr |route |node |fw |cad |batt mv|\[nbrs\]|\[dir\]|\[batt\]|\[status\]|status query)/;
 function logLine(s) {
   if (!$('verbose').checked && NOISY.test(s.trim())) return;
   const el = $('log');
@@ -175,11 +175,19 @@ function gwUp(label) {
   $('gwPill').textContent = label; $('gwPill').className = 'pill ok';
   $('cmd').disabled = $('cmdSend').disabled = false;
   setTimeout(() => gw && gw.sendLine('trace off').catch(()=>{}), 400);
-  let tick = 0;
+  let tick = 0, rrIdx = 0;
   const poll = () => { if (!gw) return;
     gw.sendLine('info').catch(()=>{});
     if (tick % 3 === 0) setTimeout(() => gw && gw.sendLine('nbrdump').catch(()=>{}), 1200);
     if (tick % 12 === 0) setTimeout(() => gw && gw.sendLine('rf show').catch(()=>{}), 2400);
+    if (tick % 12 === 6) setTimeout(() => gw && gw.sendLine('battdump').catch(()=>{}), 2400);
+    if (tick % 12 === 9) {              // STATUS round-robin: one remote node per minute
+      const remotes = [...nodes.keys()].filter(id => id !== gatewayId && positions[id]);
+      if (remotes.length) {
+        const t = remotes[rrIdx++ % remotes.length];
+        setTimeout(() => gw && gw.sendLine('status ' + t).catch(()=>{}), 2400);
+      }
+    }
     tick++;
   };
   poll(); pollTimer = setInterval(poll, 5000);
@@ -193,7 +201,8 @@ function gwDown() {
 }
 
 // ---------- console line parser ----------
-let nbrsCtx = null;   // current [nbrs] block source while parsing nbrdump output
+let nbrsCtx = null;   // current [nbrs]/[status] block source
+let statusCtx = false; // true when nbrsCtx came from a [status] reply (has q_tx too)
 function onLine(line) {
   const t = line.trim();
   if (!t) return;
@@ -223,8 +232,11 @@ function onLine(line) {
   if ((m = t.match(/^net beacon=(\d+)s/))) { beaconSec = +m[1]; return; }
   // gateway's own nbr lines (info):  nbr ID q_rx=NN q_tx=NN (x100) ... [rssi=R snr=S]
   if ((m = t.match(/^nbr ([0-9A-F]{8})\s+q_rx=(-?\d+) q_tx=(-?\d+).*?(?:rssi=(-?\d+) snr=(-?\d+))?$/i))) {
-    if (nbrsCtx) {        // inside an [nbrs] block: SRC hears ID at q_rx
-      node(nbrsCtx).hears[m[1].toUpperCase()] = { q:+m[2]/100, age:0, src:'announce', at:now };
+    if (nbrsCtx) {        // inside an [nbrs]/[status] block: SRC hears ID at q_rx
+      const src = statusCtx ? 'status' : 'announce';
+      node(nbrsCtx).hears[m[1].toUpperCase()] = { q:+m[2]/100, age:0, src, at:now };
+      if (statusCtx && +m[3] > 0)   // status replies carry q_tx: ID hears SRC too
+        node(m[1].toUpperCase()).hears[nbrsCtx] = Object.assign(node(m[1].toUpperCase()).hears[nbrsCtx]||{}, { q:+m[3]/100, src, at:now });
       node(m[1].toUpperCase()).lastSeen = Math.max(node(m[1].toUpperCase()).lastSeen, now - 1);
     } else if (gatewayId) {
       const other = m[1].toUpperCase(), g = node(gatewayId), o = node(other);
@@ -240,6 +252,20 @@ function onLine(line) {
     node(gatewayId).routes.push({ dst:m[1].toUpperCase(), via:m[2].toUpperCase(), cost:+m[3]/16, hops:+m[4] });
     return;
   }
+  if ((m = t.match(/^\[batt\] ([0-9A-F]{8}) mv=(\d+) pct=(\d+) age=(\d+)s/i))) {
+    const n = node(m[1].toUpperCase());
+    const at = now - (+m[4]) * 1000;
+    if (!n.batt || (n.batt.at || 0) <= at) n.batt = { mv:+m[2], pct:+m[3], at };
+    return;
+  }
+  if ((m = t.match(/^\[status\] ([0-9A-F]{8}) fw=(\S+) up=(\d+)min batt=(?:(\d+)mV\/(\d+)%|\?)/i))) {
+    const n = node(m[1].toUpperCase());
+    n.lastSeen = now; n.fw = m[2];
+    if (m[4] !== undefined) n.batt = { mv:+m[4], pct:+m[5], at: now };
+    nbrsCtx = m[1].toUpperCase();      // following 'nbr ID q_rx=N q_tx=N' lines belong to it
+    statusCtx = true;
+    render(); return;
+  }
   if ((m = t.match(/^\[nbrs\] ([0-9A-F]{8}) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?/i))) {
     nbrsCtx = m[1].toUpperCase();
     const n = node(nbrsCtx);
@@ -252,7 +278,7 @@ function onLine(line) {
     }
     return;
   }
-  if (t.startsWith('[hb]') || t.startsWith('[ble]') || t.startsWith('cad ')) { nbrsCtx = null; return; }
+  if (t.startsWith('[hb]') || t.startsWith('[ble]') || t.startsWith('cad ')) { nbrsCtx = null; statusCtx = false; return; }
 }
 
 // ---------- map ----------
