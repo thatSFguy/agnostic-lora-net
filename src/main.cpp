@@ -1122,19 +1122,27 @@ static void sar_start(node_id_t dst, const uint8_t* payload, uint16_t plen) {
 }
 
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
-    if (n < 2) return;
+    // Envelope rejects must be LOUD: a silently-eaten host frame looks like an app
+    // that never sent — that ambiguity hid a vanishing first-send for a whole morning.
+    char m[56];
+    if (n < 2 ||
+        n < (uint16_t)(2 + f[1]) ||                              // truncated envelope
+        f[0] == TUN_ADDR_IDENTITY ||                             // reserved (resolve-and-forward) — not yet
+        f[0] != TUN_ADDR_LOCATOR || f[1] != sizeof(node_id_t)) { // unknown/unsupported addr
+        snprintf(m, sizeof(m), "[tun] DROPPED bad-envelope type=%u alen=%u n=%u",
+                 (unsigned)(n >= 1 ? f[0] : 0), (unsigned)(n >= 2 ? f[1] : 0), (unsigned)n);
+        Serial.println(m);
+        return;
+    }
     uint8_t addr_type = f[0];
     uint8_t addr_len  = f[1];
-    if (n < (uint16_t)(2 + addr_len)) return;                    // truncated envelope
-    if (addr_type == TUN_ADDR_IDENTITY) return;                  // reserved (resolve-and-forward) — not yet
-    if (addr_type != TUN_ADDR_LOCATOR || addr_len != sizeof(node_id_t)) return;  // unknown/unsupported addr
+    (void)addr_type;
     node_id_t dst; memcpy(&dst, f + 2, sizeof(node_id_t));
     const uint8_t* payload = f + 2 + addr_len;
     uint16_t plen = (uint16_t)(n - 2 - addr_len);
     // One [tun] line per ingested host frame (USB console only): without it a SAR-sized
     // send is fully invisible (fragments are verbose=false) and a healthy transfer is
     // indistinguishable from a silent drop — that ambiguity cost a real debug round.
-    char m[56];
     if (dst == my_id) {
         // Self-addressed: deliver straight back to the attached host, never the radio.
         // Transmitting would just echo into the own-packet filter — a silent black hole
@@ -1284,6 +1292,10 @@ static void print_info() {
              (unsigned long)my_id, (unsigned)router->neighbors().count(),
              (unsigned)router->routes().count(), (unsigned)router->blocked_count());
     Serial.println(l);
+    snprintf(l, sizeof(l), "cad %s  busy=%lu forced=%lu",
+             radio.cad_enabled() ? "on" : "off",
+             (unsigned long)radio.cad_busy_count(), (unsigned long)radio.cad_forced_count());
+    Serial.println(l);
     const mesh::NeighborTable& nt = router->neighbors();
     for (uint8_t i = 0; i < mesh::MAX_NEIGHBORS; i++) {
         const mesh::Neighbor* n = nt.at(i);
@@ -1393,6 +1405,15 @@ static void handle_command(char* line) {
         cfg_save();                             // persist the new PIN across reboots
         char m[40]; snprintf(m, sizeof(m), "BLE PIN=%s (saved)", ble_pin); Serial.println(m);
 #endif
+    } else if (!strcmp(cmd, "cad")) {          // cad [on|off] — CSMA listen-before-talk
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "on"))  radio.set_cad(true);
+        if (a && !strcmp(a, "off")) radio.set_cad(false);
+        char m[64];
+        snprintf(m, sizeof(m), "cad %s  busy=%lu forced=%lu",
+                 radio.cad_enabled() ? "on" : "off",
+                 (unsigned long)radio.cad_busy_count(), (unsigned long)radio.cad_forced_count());
+        Serial.println(m);
     } else if (!strcmp(cmd, "rf")) {           // rf [show] | rf <field> <val> | rf apply|revert|default
         char* a = strtok(nullptr, " ");
         char* v = a ? strtok(nullptr, " ") : nullptr;
@@ -1454,6 +1475,7 @@ static void handle_command(char* line) {
     } else if (!strcmp(cmd, "help")) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
+        Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
         Serial.println("register <idhex> | resolve <idhex> | dirdump");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");

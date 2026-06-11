@@ -73,13 +73,25 @@ public:
     // pending. Returns true if it serviced an event this call.
     bool poll();
 
-    // Queue a frame for transmission. Non-blocking: kicks off startTransmit and
-    // returns immediately; completion is handled in a later poll(). Returns false
-    // if a TX is already in flight (caller should retry later) or on radio error.
+    // Queue a frame for transmission. Non-blocking: the frame is copied into a
+    // pending slot and aired via CSMA — a hardware CAD scan (channel activity
+    // detection: the SX1262 listens ~1 ms for LoRa chirps) runs first; if the
+    // channel is busy the HAL re-scans after a randomized exponential backoff,
+    // and after CAD_MAX_TRIES busy verdicts it transmits anyway so a hogged
+    // channel can't starve us. Returns false if a send is already pending/in
+    // flight (caller retries later — busy() covers the whole CSMA window) or
+    // the frame doesn't fit. With CAD disabled this transmits immediately
+    // (pre-0.5 behavior).
     bool send(const uint8_t* buf, uint16_t len);
 
-    // True while a transmission is in flight (radio can't accept another send()).
-    bool busy() const { return state_ == TX; }
+    // True while a send is pending or in flight (radio can't accept another send()).
+    bool busy() const { return state_ != RX || pend_len_ > 0; }
+
+    // Runtime CSMA switch + visibility (console `cad on|off`, `info`).
+    void set_cad(bool on)          { cad_enabled_ = on; }
+    bool cad_enabled() const       { return cad_enabled_; }
+    uint32_t cad_busy_count() const   { return cad_busy_count_; }    // scans that found the channel busy
+    uint32_t cad_forced_count() const { return cad_forced_count_; }  // sends forced after CAD_MAX_TRIES
 
     // Metrics of the most recently received frame.
     float last_rssi() const { return last_rssi_; }
@@ -91,15 +103,28 @@ public:
     uint32_t rx_err_count()  const { return rx_err_count_; }
 
 private:
-    enum State : uint8_t { RX, TX };
+    enum State : uint8_t { RX, TX, CAD };
+
+    static const uint8_t CAD_MAX_TRIES = 4;   // busy verdicts before sending anyway
 
     void arm_rx();                   // (re)enter continuous receive
+    void start_cad();                // kick a channel scan for the pending frame
+    void start_pending_tx();         // air the pending frame now
     static void AGN_ISR_ATTR isr();  // DIO1 handler — sets the flag only
 
     SX1262          radio_;
     RadioRxCallback on_rx_;
     RadioCfg        cfg_;             // PHY parameters currently applied
     volatile State  state_;
+
+    // CSMA pending slot: send() parks the frame here; CAD/backoff air it.
+    uint8_t  pend_buf_[255];
+    uint16_t pend_len_      = 0;
+    uint8_t  cad_tries_     = 0;
+    uint32_t next_cad_ms_   = 0;     // backoff deadline for the next scan
+    bool     cad_enabled_   = true;
+    uint32_t cad_busy_count_   = 0;
+    uint32_t cad_forced_count_ = 0;
 
     float    last_rssi_;
     float    last_snr_;
