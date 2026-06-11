@@ -414,6 +414,23 @@ static uint16_t  sar_rx_last_xfer = 0xFFFF;
 static uint8_t   sar_nack_rounds = 0;
 static const uint32_t SAR_NACK_TIMEOUT_MS = 6000;   // sender quiet this long => ask for missing
 static const uint8_t  SAR_MAX_NACK_ROUNDS = 6;
+// A fixed NACK timeout lock-steps two half-duplex receivers recovering from the same
+// collision: both ask, both answers collide, repeat (observed live: 6 straight wasted
+// rounds — one transfer died at the round cap). Same disease the beacons already cure
+// with jitter. Re-rolled per event so the two timers can never stay synchronized.
+static uint32_t sar_nack_jit = 0;
+static void sar_nack_rearm() {
+    sar_rx_last_ms = millis();
+    sar_nack_jit   = (my_id & 0x3FF) + (uint32_t)random(0, 2000);
+}
+// While mid-receiving a transfer, our own initial-pass TX is deferred (half-duplex:
+// talking means not hearing the fragments we're missing) — but only while the inbound
+// is fresh, so a vanished sender can't gag our TX for good.
+static const uint32_t SAR_RX_DEFER_MS = 10000;
+static bool sar_rx_busy() {
+    return sar_rx.active() && !sar_rx.complete() &&
+           (int32_t)(millis() - sar_rx_last_ms) < (int32_t)SAR_RX_DEFER_MS;
+}
 // Outbound tunnel ingest queue (BR-6): a host frame needing SAR while a transfer is
 // already airing used to be DROPPED busy — the app's RNS retry redelivered it ~70 s
 // later, which reads as a "stuck in sending" message. Queue it instead and start it
@@ -952,7 +969,7 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                     if (xf != sar_rx_last_xfer) { sar_rx_last_xfer = xf; sar_nack_rounds = 0; }
                     sar_rx.add(pay, plen);
                     sar_rx_sender  = net.src;
-                    sar_rx_last_ms = millis();
+                    sar_nack_rearm();
                     sar_quiet_until = millis() + 8000;   // hush our beacons mid-transfer (half-duplex)
                     if (sar_rx.verify()) {
                         if (host_tunnel_active())   // hand the reassembled app packet to the host
@@ -1136,14 +1153,27 @@ static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
         snprintf(m, sizeof(m), "[tun] >%08lX %uB sar=%u", (unsigned long)dst, (unsigned)plen,
                  (unsigned)sar_tx_count);
     } else if (tq_count < TQ_CAP && plen <= TUN_HOST_MAX) {
-        // big packet while a transfer is busy — hold it; tun_queue_tick starts it
-        // after the active transfer (and its NACK window) ends
-        uint8_t tail = (uint8_t)((tq_head + tq_count) % TQ_CAP);
-        tq[tail].dst = dst; tq[tail].len = plen;
-        memcpy(tq[tail].buf, payload, plen);
-        tq_count++;
-        snprintf(m, sizeof(m), "[tun] >%08lX %uB queued=%u", (unsigned long)dst, (unsigned)plen,
-                 (unsigned)tq_count);
+        // An identical payload already airing or queued is an app-layer retry of a
+        // packet we haven't delivered yet — a second copy would only double airtime
+        // (the original's delivery proof satisfies the retry: same packet, same hash).
+        bool dup = (sar_tx_active || sar_resend_active) && sar_tx_dst == dst &&
+                   sar_len == plen && memcmp(sar_buf, payload, plen) == 0;
+        for (uint8_t k = 0; !dup && k < tq_count; k++) {
+            TunPending& q = tq[(tq_head + k) % TQ_CAP];
+            dup = q.dst == dst && q.len == plen && memcmp(q.buf, payload, plen) == 0;
+        }
+        if (dup) {
+            snprintf(m, sizeof(m), "[tun] >%08lX %uB dup-drop", (unsigned long)dst, (unsigned)plen);
+        } else {
+            // big packet while a transfer is busy — hold it; tun_queue_tick starts it
+            // after the active transfer (and its NACK window) ends
+            uint8_t tail = (uint8_t)((tq_head + tq_count) % TQ_CAP);
+            tq[tail].dst = dst; tq[tail].len = plen;
+            memcpy(tq[tail].buf, payload, plen);
+            tq_count++;
+            snprintf(m, sizeof(m), "[tun] >%08lX %uB queued=%u", (unsigned long)dst, (unsigned)plen,
+                     (unsigned)tq_count);
+        }
     } else {
         snprintf(m, sizeof(m), "[tun] >%08lX %uB DROPPED qfull", (unsigned long)dst, (unsigned)plen);
     }
@@ -1180,6 +1210,11 @@ static uint16_t hex_decode(const char* s, uint8_t* out, uint16_t cap) {
 static void sar_tx_tick() {
     if (!sar_tx_active && !sar_resend_active) return;
     if (radio.busy() || txq_count > 0 || arq.pending_count() > 0) return;  // wait for prev
+    // Half-duplex courtesy: hold our initial-pass fragments while mid-receiving someone
+    // else's transfer (talking = not hearing the fragments we're missing — the embrace
+    // where both sides transmit at each other and both transfers stall). NACK answers
+    // are exempt: a peer that just NACKed us is listening, not talking.
+    if (!sar_resend_active && sar_rx_busy()) return;
 
     uint16_t idx;
     if (sar_tx_active) {
@@ -1207,6 +1242,7 @@ static void sar_tx_tick() {
 static void tun_queue_tick() {
     if (tq_count == 0 || sar_tx_active || sar_resend_active) return;
     if ((int32_t)(millis() - sar_tx_done_ms) < (int32_t)TQ_DRAIN_GRACE_MS) return;
+    if (sar_rx_busy()) return;   // don't claim the slot while an inbound transfer needs the air
     TunPending& p = tq[tq_head];
     sar_start(p.dst, p.buf, p.len);
     char m[56];
@@ -1220,7 +1256,7 @@ static void tun_queue_tick() {
 // fragments we're still missing. Bounded rounds so a dead link gives up.
 static void sar_rx_tick() {
     if (!sar_rx.active() || sar_rx.complete()) return;
-    if ((int32_t)(millis() - sar_rx_last_ms) < (int32_t)SAR_NACK_TIMEOUT_MS) return;
+    if ((int32_t)(millis() - sar_rx_last_ms) < (int32_t)(SAR_NACK_TIMEOUT_MS + sar_nack_jit)) return;
     if (sar_nack_rounds >= SAR_MAX_NACK_ROUNDS) return;
 
     uint16_t miss[mesh::SAR_MAX_FRAGS];
@@ -1231,7 +1267,7 @@ static void sar_rx_tick() {
                                          (uint16_t)(MAX_PAYLOAD - HEADER_BYTES));
     send_data_bytes(sar_rx_sender, nack, nlen, false);
     sar_nack_rounds++;
-    sar_rx_last_ms = millis();
+    sar_nack_rearm();
     sar_quiet_until = millis() + 8000;
     char l[64]; snprintf(l, sizeof(l), "[SAR] NACK round %u: %u missing",
                          (unsigned)sar_nack_rounds, (unsigned)nm);
