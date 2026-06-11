@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<!-- map.html — mesh map & node management (Phase A of docs/node-map-webapp-plan.md).
+
+     Connect ONE gateway node (Web Serial on the bench, Web Bluetooth in the field).
+     The app polls `info` (5 s) + `nbrdump` (15 s): the gateway's own tables plus the
+     announce-derived view of every neighbour's links — the passive 1-hop topology.
+     Nodes are placed on a Leaflet map (positions in localStorage + JSON export);
+     links render as per-direction arrows colored by quality, with asymmetry badges
+     and SNR-margin popups. Battery panel includes `batt cal` single-point calibration.
+
+     fw >= 0.6.0 (nbrdump / batt verbs). Serve over http://localhost (Web Serial/BT
+     need a secure context):  python3 -m http.server 8000  ->  /web/map.html        -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgnLoRa mesh map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg:#10151c; --panel:#1a212b; --line:#2b3645; --fg:#dfe7f1; --dim:#8a97a8;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         display:grid; grid-template-columns:300px 1fr 340px; grid-template-rows:48px 1fr; height:100vh; }
+  header { grid-column:1/4; display:flex; align-items:center; gap:10px; padding:0 12px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0 12px 0 0; }
+  button { background:#21304a; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:5px 10px; cursor:pointer; font-size:13px; }
+  button:hover { background:#2a3d5e; } button:disabled { opacity:.4; cursor:default; }
+  .pill { padding:2px 8px; border-radius:10px; font-size:12px; background:#26303d; color:var(--dim); }
+  .pill.ok { color:var(--ok); } .pill.bad { color:var(--bad); }
+  #left  { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:10px; }
+  #map   { background:#0a0e13; }
+  #right { background:var(--panel); border-left:1px solid var(--line); overflow:auto; padding:10px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:14px 0 6px; }
+  .node-row { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; cursor:pointer; }
+  .node-row:hover { background:#222c39; } .node-row.sel { background:#23344f; }
+  .dot { width:10px; height:10px; border-radius:50%; flex:none; }
+  .mono { font-family:ui-monospace,monospace; font-size:12.5px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12.5px; }
+  .kv div:nth-child(odd) { color:var(--dim); }
+  input[type=text],input[type=number] { background:#0f1722; color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:5px 8px; width:100%; font-size:13px; }
+  #log { font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); white-space:pre-wrap;
+         max-height:160px; overflow:auto; background:#0d131b; border-radius:6px; padding:6px; }
+  .linkrow { padding:4px 6px; border-radius:5px; font-size:12.5px; cursor:pointer; }
+  .linkrow:hover { background:#222c39; }
+  .nodelabel { background:#16202e; border:2px solid #555; border-radius:8px; padding:1px 6px;
+               font:600 11px ui-monospace,monospace; color:#dfe7f1; white-space:nowrap; box-shadow:0 1px 4px #0009; }
+  .nodelabel small { font-weight:400; color:#9fb4cc; }
+  .leaflet-container { background:#0a0e13; }
+  .hint { font-size:12px; color:var(--dim); }
+  .asym-badge { font-size:14px; text-shadow:0 0 3px #000; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgnLoRa mesh — northern Kent County</h1>
+  <button id="btnSerial">Connect gateway (Serial)</button>
+  <button id="btnBle">Connect gateway (BLE)</button>
+  <span id="gwPill" class="pill">no gateway</span>
+  <span style="flex:1"></span>
+  <button id="btnExport">Export positions</button>
+  <button id="btnImport">Import</button>
+  <input type="file" id="impFile" accept=".json" style="display:none">
+</header>
+
+<div id="left">
+  <h2>Nodes</h2>
+  <div id="nodeList"></div>
+  <div class="hint" id="placeHint" style="display:none">Click the map to place <b id="placeId"></b> — Esc to cancel.</div>
+  <h2>Mesh health</h2>
+  <div id="healthList" class="mono"></div>
+  <h2>Gateway console <label style="font-weight:400;text-transform:none;letter-spacing:0">
+  <input type="checkbox" id="verbose"> verbose</label></h2>
+  <div id="log"></div>
+  <div style="display:flex; gap:6px; margin-top:6px;">
+    <input type="text" id="cmd" placeholder="console command…" disabled>
+    <button id="cmdSend" disabled>Send</button>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<div id="right">
+  <h2>Selected node</h2>
+  <div id="detail" class="hint">Click a node on the map or in the list.</div>
+</div>
+
+<script>
+'use strict';
+// ---------- constants ----------
+const KENT = [43.05, -85.60], ZOOM = 11;
+const ASYM_THRESHOLD = 0.35;                       // mirrors lib/mesh ASYM_THRESHOLD
+const SNR_LIMIT = {5:-2.5, 6:-5, 7:-7.5, 8:-10, 9:-12.5, 10:-15, 11:-17.5, 12:-20};
+// Marker freshness scales with the network's beacon cadence (fw `net beacon`,
+// auto-by-SF by default): stale after ~3 missed beacons, lost after ~9.
+const BEACON_AUTO = {5:10,6:10,7:10,8:15,9:25,10:40,11:75,12:140};   // seconds, mirrors fw
+let beaconSec = 10;
+const STALE_MS = () => beaconSec * 3000, LOST_MS = () => beaconSec * 9000;
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',
+      NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e',   // we write here
+      NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // node notifies here
+
+// ---------- state ----------
+// nodes: id -> { lastSeen, fw, vitals:{}, batt:{mv,pct}, sf, power,
+//                hears: {fromId: {q, rssi, snr, age, src}},  // directed: fromId -> this node
+//                routes: [{dst, via, cost, hops}], isGateway }
+const nodes = new Map();
+let gatewayId = null, selected = null, placing = null;
+const positions = JSON.parse(localStorage.getItem('agn-node-pos') || '{}');
+
+const $ = id => document.getElementById(id);
+function node(id) {
+  if (!nodes.has(id)) nodes.set(id, { id, lastSeen:0, fw:'', vitals:{}, batt:null, sf:null,
+                                      power:null, hears:{}, routes:[], isGateway:false });
+  return nodes.get(id);
+}
+
+// ---------- gateway transport (Serial or BLE), text-line demux ----------
+// The NUS/serial stream interleaves console text with HDLC tunnel frames (0x7E…0x7E).
+// Frame bytes are discarded; text bytes accumulate into lines.
+let gw = null;          // {sendLine(s), close()}
+let inFrame = false, lineBuf = '';
+function feedBytes(bytes) {
+  for (const b of bytes) {
+    if (b === 0x7E) { inFrame = !inFrame; continue; }
+    if (inFrame) continue;
+    if (b === 0x0D) continue;
+    if (b === 0x0A) { onLine(lineBuf); lineBuf = ''; }
+    else if (lineBuf.length < 300) lineBuf += String.fromCharCode(b);
+  }
+}
+const NOISY = /^(\[hb\]|\[ble\]|\[RX\]|\[TX\]|\[rf\]|nbr |route |node |fw |cad |batt mv|\[nbrs\]|\[dir\])/;
+function logLine(s) {
+  if (!$('verbose').checked && NOISY.test(s.trim())) return;
+  const el = $('log');
+  el.textContent = (el.textContent + s + '\n').split('\n').slice(-120).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function connectSerial() {
+  const port = await navigator.serial.requestPort();
+  await port.open({ baudRate: 115200 });
+  const writer = port.writable.getWriter();
+  (async () => {
+    const reader = port.readable.getReader();
+    try { for (;;) { const {value, done} = await reader.read(); if (done) break; feedBytes(value); } }
+    catch (e) { logLine('serial: ' + e); } finally { gwDown(); }
+  })();
+  gw = { sendLine: async s => writer.write(new TextEncoder().encode(s + '\n')),
+         close: () => port.close().catch(()=>{}) };
+  gwUp('serial');
+}
+
+async function connectBle() {
+  const dev = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:'AgnLoRa'}], optionalServices:[NUS] });
+  dev.addEventListener('gattserverdisconnected', gwDown);
+  const srv = await (await dev.gatt.connect()).getPrimaryService(NUS);
+  const rx = await srv.getCharacteristic(NUS_RX), tx = await srv.getCharacteristic(NUS_TX);
+  await tx.startNotifications();
+  tx.addEventListener('characteristicvaluechanged', ev => feedBytes(new Uint8Array(ev.target.value.buffer)));
+  gw = { sendLine: async s => {                    // ≤20 B chunks (ATT MTU floor)
+           const data = new TextEncoder().encode(s + '\n');
+           for (let i = 0; i < data.length; i += 20) await rx.writeValueWithoutResponse(data.slice(i, i + 20));
+         },
+         close: () => dev.gatt.disconnect() };
+  gwUp('BLE ' + dev.name);
+}
+
+let pollTimer = null;
+function gwUp(label) {
+  $('gwPill').textContent = label; $('gwPill').className = 'pill ok';
+  $('cmd').disabled = $('cmdSend').disabled = false;
+  setTimeout(() => gw && gw.sendLine('trace off').catch(()=>{}), 400);
+  let tick = 0;
+  const poll = () => { if (!gw) return;
+    gw.sendLine('info').catch(()=>{});
+    if (tick % 3 === 0) setTimeout(() => gw && gw.sendLine('nbrdump').catch(()=>{}), 1200);
+    if (tick % 12 === 0) setTimeout(() => gw && gw.sendLine('rf show').catch(()=>{}), 2400);
+    tick++;
+  };
+  poll(); pollTimer = setInterval(poll, 5000);
+}
+function gwDown() {
+  if (pollTimer) clearInterval(pollTimer); pollTimer = null;
+  gw = null; gatewayId = null;
+  $('gwPill').textContent = 'no gateway'; $('gwPill').className = 'pill bad';
+  $('cmd').disabled = $('cmdSend').disabled = true;
+  render();
+}
+
+// ---------- console line parser ----------
+let nbrsCtx = null;   // current [nbrs] block source while parsing nbrdump output
+function onLine(line) {
+  const t = line.trim();
+  if (!t) return;
+  logLine(t);
+  const now = Date.now();
+  let m;
+
+  if ((m = t.match(/^node ([0-9A-F]{8})\s+neighbors=\d+ routes=\d+/i))) {
+    gatewayId = m[1].toUpperCase();
+    const n = node(gatewayId); n.isGateway = true; n.lastSeen = now; n.routes = [];
+    nbrsCtx = null; render(); return;
+  }
+  if ((m = t.match(/^fw (\S+)/)) && gatewayId) { node(gatewayId).fw = m[1]; return; }
+  if ((m = t.match(/^batt .*mv=(\d+) pct=(\d+)/)) && gatewayId) {
+    node(gatewayId).batt = { mv:+m[1], pct:+m[2], at:now }; renderDetail(); return;
+  }
+  if ((m = t.match(/^batt mv=(\d+) pct=(\d+)/)) && gatewayId) {
+    node(gatewayId).batt = { mv:+m[1], pct:+m[2], at:now }; return;
+  }
+  if ((m = t.match(/^batt raw=(\d+) UNCALIBRATED/)) && gatewayId) {
+    node(gatewayId).batt = { raw:+m[1], at:now }; renderDetail(); return;
+  }
+  if ((m = t.match(/^\[rf\].*sf=(\d+).*power_dbm=(-?\d+)/)) && gatewayId) {
+    node(gatewayId).sf = +m[1]; node(gatewayId).power = +m[2];
+    beaconSec = BEACON_AUTO[+m[1]] || 10; return;
+  }
+  if ((m = t.match(/^net beacon=(\d+)s/))) { beaconSec = +m[1]; return; }
+  // gateway's own nbr lines (info):  nbr ID q_rx=NN q_tx=NN (x100) ... [rssi=R snr=S]
+  if ((m = t.match(/^nbr ([0-9A-F]{8})\s+q_rx=(-?\d+) q_tx=(-?\d+).*?(?:rssi=(-?\d+) snr=(-?\d+))?$/i))) {
+    if (nbrsCtx) {        // inside an [nbrs] block: SRC hears ID at q_rx
+      node(nbrsCtx).hears[m[1].toUpperCase()] = { q:+m[2]/100, age:0, src:'announce', at:now };
+      node(m[1].toUpperCase()).lastSeen = Math.max(node(m[1].toUpperCase()).lastSeen, now - 1);
+    } else if (gatewayId) {
+      const other = m[1].toUpperCase(), g = node(gatewayId), o = node(other);
+      g.hears[other] = { q:+m[2]/100, rssi:m[4]!==undefined?+m[4]:null,
+                         snr:m[5]!==undefined?+m[5]:null, src:'gateway', at:now };
+      o.hears[gatewayId] = Object.assign(o.hears[gatewayId]||{},
+                         { q:+m[3]/100, src:'gateway-q_tx', at:now });
+      o.lastSeen = Math.max(o.lastSeen, now - 1);
+    }
+    render(); return;
+  }
+  if ((m = t.match(/^route dst=([0-9A-F]{8}) via=([0-9A-F]{8}) cost=(-?\d+) hops=(\d+)/i)) && gatewayId) {
+    node(gatewayId).routes.push({ dst:m[1].toUpperCase(), via:m[2].toUpperCase(), cost:+m[3]/16, hops:+m[4] });
+    return;
+  }
+  if ((m = t.match(/^\[nbrs\] ([0-9A-F]{8}) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?/i))) {
+    nbrsCtx = m[1].toUpperCase();
+    const n = node(nbrsCtx);
+    n.lastSeen = Math.max(n.lastSeen, now - (+m[2]) * 1000);
+    if (m[5] !== undefined) n.batt = { pct: +m[5], at: now };
+    if (gatewayId) {      // the gateway heard this announce directly
+      const h = node(gatewayId).hears[nbrsCtx] || {};
+      h.rssi = +m[3]; h.snr = +m[4]; h.at = now;
+      node(gatewayId).hears[nbrsCtx] = h;
+    }
+    return;
+  }
+  if (t.startsWith('[hb]') || t.startsWith('[ble]') || t.startsWith('cad ')) { nbrsCtx = null; return; }
+}
+
+// ---------- map ----------
+const map = L.map('map').setView(KENT, ZOOM);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+const layerLinks = L.layerGroup().addTo(map);
+const markers = new Map();
+
+function freshColor(n) {
+  if (!n.lastSeen) return '#777';
+  const age = Date.now() - n.lastSeen;
+  return age < STALE_MS() ? 'var(--ok)' : age < LOST_MS() ? 'var(--warn)' : 'var(--bad)';
+}
+function qColor(q) { return q >= 0.9 ? '#3fb950' : q >= 0.6 ? '#d29922' : '#f85149'; }
+
+function markerFor(id) {
+  if (markers.has(id)) return markers.get(id);
+  const pos = positions[id]; if (!pos) return null;
+  const mk = L.marker(pos, { draggable: true, icon: nodeIcon(node(id)) }).addTo(map);
+  mk.on('dragend', () => { positions[id] = [mk.getLatLng().lat, mk.getLatLng().lng]; savePos(); render(); });
+  mk.on('click', () => select(id));
+  markers.set(id, mk);
+  return mk;
+}
+function nodeIcon(n) {
+  const battTxt = n.batt && n.batt.pct !== undefined ? `<small> ${n.batt.pct}%</small>` : '';
+  const gwTxt = n.isGateway ? '<small> ⌂</small>' : '';
+  const border = n.isGateway ? 'var(--acc)' : freshColor(n);
+  return L.divIcon({ className: '',
+    html: `<div class="nodelabel" style="border-color:${border}">${n.id.slice(-4)}${gwTxt}${battTxt}</div>`,
+    iconAnchor: [22, 10] });
+}
+function savePos() { localStorage.setItem('agn-node-pos', JSON.stringify(positions)); }
+
+map.on('click', e => {
+  if (!placing) return;
+  positions[placing] = [e.latlng.lat, e.latlng.lng]; savePos();
+  placing = null; $('placeHint').style.display = 'none';
+  render();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { placing = null; $('placeHint').style.display = 'none'; select(null); }
+});
+
+// Two parallel directional arrows per adjacency, offset perpendicular ~5 px.
+function offsetLine(a, b, px) {
+  const pa = map.latLngToLayerPoint(a), pb = map.latLngToLayerPoint(b);
+  const dx = pb.x - pa.x, dy = pb.y - pa.y, len = Math.hypot(dx, dy) || 1;
+  const ox = -dy / len * px, oy = dx / len * px;
+  return [map.layerPointToLatLng(L.point(pa.x + ox, pa.y + oy)),
+          map.layerPointToLatLng(L.point(pb.x + ox, pb.y + oy))];
+}
+function arrowAt(a, b, color) {     // small ▶ rotated along the (offset) line at 62%
+  const pa = map.latLngToLayerPoint(a), pb = map.latLngToLayerPoint(b);
+  const t = 0.62, p = L.point(pa.x + (pb.x - pa.x) * t, pa.y + (pb.y - pa.y) * t);
+  const ang = Math.atan2(pb.y - pa.y, pb.x - pa.x) * 180 / Math.PI;
+  return L.marker(map.layerPointToLatLng(p), { interactive: false, icon: L.divIcon({ className: '',
+    html: `<div style="transform:rotate(${ang}deg);color:${color};font-size:13px;text-shadow:0 0 2px #000">➤</div>`,
+    iconAnchor: [6, 9] }) });
+}
+
+function drawLinks() {
+  layerLinks.clearLayers();
+  const done = new Set();
+  for (const [bid, b] of nodes) {
+    for (const aid of Object.keys(b.hears)) {
+      const key = [aid, bid].sort().join('-');
+      if (done.has(key)) continue; done.add(key);
+      if (!positions[aid] || !positions[bid]) continue;
+      const A = positions[aid], B = positions[bid];
+      const ab = nodes.get(bid)?.hears[aid];                 // a -> b (b hears a)
+      const ba = nodes.get(aid)?.hears[bid];                 // b -> a (a hears b)
+      const dim = selected && selected !== aid && selected !== bid;
+      const op = dim ? 0.15 : 0.9;
+      for (const [dir, dat, from, to] of [['ab', ab, A, B], ['ba', ba, B, A]]) {
+        const [f, t] = offsetLine(from, to, 4);
+        if (dat && dat.q > 0) {
+          const pl = L.polyline([f, t], { color:qColor(dat.q), weight:1+3*dat.q, opacity:op });
+          pl.on('click', () => linkPopup(aid, bid, ab, ba, [(A[0]+B[0])/2,(A[1]+B[1])/2]));
+          layerLinks.addLayer(pl);
+          if (!dim) layerLinks.addLayer(arrowAt(f, t, qColor(dat.q)));
+        } else {
+          layerLinks.addLayer(L.polyline([f, t], { color:'#666', weight:1, dashArray:'4 6', opacity:op*0.7 }));
+        }
+      }
+      if (ab && ba && ab.q > 0 && ba.q > 0 && Math.abs(ab.q - ba.q) > ASYM_THRESHOLD && !dim) {
+        layerLinks.addLayer(L.marker([(A[0]+B[0])/2, (A[1]+B[1])/2], { interactive:false,
+          icon: L.divIcon({ className:'', html:'<div class="asym-badge">⚠️</div>', iconAnchor:[8,8] }) }));
+      }
+    }
+  }
+  // routes overlay for the selected node: curved blue arrows dst-by-dst
+  if (selected && nodes.get(selected)) {
+    for (const r of nodes.get(selected).routes || []) {
+      if (!positions[selected] || !positions[r.dst]) continue;
+      const A = positions[selected], B = positions[r.dst], V = positions[r.via];
+      const mid = V && r.via !== r.dst ? V : [(A[0]+B[0])/2 + 0.004, (A[1]+B[1])/2 + 0.004];
+      const pl = L.polyline([A, mid, B], { color:'#58a6ff', weight:2, opacity:0.8, dashArray:'1 7' });
+      pl.bindTooltip(`→ ${r.dst.slice(-4)} via ${r.via.slice(-4)} cost=${r.cost.toFixed(1)} hops=${r.hops}`);
+      layerLinks.addLayer(pl);
+    }
+  }
+}
+
+function snrMargin(snr) {
+  const sf = (gatewayId && nodes.get(gatewayId)?.sf) || 7;
+  const lim = SNR_LIMIT[sf] ?? -7.5;
+  return `${snr - lim >= 0 ? '+' : ''}${(snr - lim).toFixed(1)} dB margin (SF${sf})`;
+}
+function linkPopup(aid, bid, ab, ba, at) {
+  const fmt = (lbl, d) => d && d.q > 0
+    ? `${lbl}: q=${d.q.toFixed(2)}${d.rssi != null ? ` rssi=${d.rssi} snr=${d.snr} → ${snrMargin(d.snr)}` : ''} <i>(${d.src})</i>`
+    : `${lbl}: unknown`;
+  const asym = ab && ba && Math.abs(ab.q - ba.q) > ASYM_THRESHOLD ? '<br><b>⚠ asymmetric link</b>' : '';
+  L.popup().setLatLng(at)
+    .setContent(`<b>${aid.slice(-4)} ⇄ ${bid.slice(-4)}</b><br>` +
+                fmt(`${aid.slice(-4)} → ${bid.slice(-4)}`, ab) + '<br>' +
+                fmt(`${bid.slice(-4)} → ${aid.slice(-4)}`, ba) + asym)
+    .openOn(map);
+}
+
+// ---------- UI ----------
+function select(id) { selected = id; render(); }
+
+function render() {
+  // node list + placement
+  const list = $('nodeList'); list.innerHTML = '';
+  for (const [id, n] of [...nodes.entries()].sort()) {
+    const row = document.createElement('div');
+    row.className = 'node-row' + (selected === id ? ' sel' : '');
+    row.innerHTML = `<span class="dot" style="background:${freshColor(n)}"></span>
+      <span class="mono">${id}</span>${n.isGateway ? '<span class="pill ok">GW</span>' : ''}
+      ${positions[id] ? '' : '<span class="pill">place ▸</span>'}`;
+    row.onclick = () => {
+      if (!positions[id]) { placing = id; $('placeId').textContent = id; $('placeHint').style.display = 'block'; }
+      select(id);
+      if (positions[id]) map.panTo(positions[id]);
+    };
+    list.appendChild(row);
+  }
+  // markers
+  for (const [id] of nodes) {
+    const mk = markerFor(id);
+    if (mk) { mk.setIcon(nodeIcon(node(id))); mk.setLatLng(positions[id]); }
+  }
+  drawLinks();
+  renderHealth();
+  renderDetail();
+}
+
+function renderHealth() {
+  const rows = [];
+  const done = new Set();
+  for (const [bid, b] of nodes) for (const aid of Object.keys(b.hears)) {
+    const key = [aid, bid].sort().join('-');
+    if (done.has(key)) continue; done.add(key);
+    const ab = nodes.get(bid)?.hears[aid], ba = nodes.get(aid)?.hears[bid];
+    const worst = Math.min(ab?.q ?? 1.01, ba?.q ?? 1.01);
+    const asym = ab && ba && Math.abs(ab.q - ba.q) > ASYM_THRESHOLD;
+    rows.push({ key, aid, bid, worst, asym, oneway: !(ab?.q > 0) || !(ba?.q > 0) });
+  }
+  rows.sort((x, y) => x.worst - y.worst);
+  $('healthList').innerHTML = rows.map(r =>
+    `<div class="linkrow" style="color:${qColor(r.worst > 1 ? 1 : r.worst)}">
+       ${r.aid.slice(-4)} ⇄ ${r.bid.slice(-4)} q=${r.worst > 1 ? '?' : r.worst.toFixed(2)}
+       ${r.asym ? ' ⚠asym' : ''}${r.oneway ? ' ⇢one-way' : ''}</div>`).join('') || '<span class="hint">no links yet</span>';
+}
+
+function renderDetail() {
+  const el = $('detail');
+  if (!selected || !nodes.has(selected)) { el.innerHTML = '<span class="hint">Click a node on the map or in the list.</span>'; return; }
+  const n = nodes.get(selected);
+  const isGw = n.isGateway;
+  const batt = n.batt
+    ? (n.batt.pct !== undefined ? `${n.batt.mv} mV — ${n.batt.pct}%` : `raw=${n.batt.raw} (uncalibrated)`)
+    : '—';
+  el.innerHTML = `
+    <div class="mono" style="font-size:15px">${n.id} ${isGw ? '<span class="pill ok">gateway</span>' : '<span class="pill">remote</span>'}</div>
+    <div class="kv" style="margin-top:8px">
+      <div>fw</div><div>${n.fw || '—'}</div>
+      <div>last seen</div><div>${n.lastSeen ? Math.round((Date.now() - n.lastSeen) / 1000) + ' s ago' : '—'}</div>
+      <div>battery</div><div>${batt}</div>
+      <div>SF / power</div><div>${n.sf ? 'SF' + n.sf + ' / ' + n.power + ' dBm' : '—'}</div>
+      <div>links</div><div>${Object.keys(n.hears).length} inbound known</div>
+    </div>
+    <h2>Hears (inbound)</h2>
+    <div id="hearsList">${Object.entries(n.hears).map(([fid, d]) =>
+      `<div class="linkrow" data-nid="${fid}" style="color:${qColor(d.q || 0)}">
+         ${fid} &nbsp;q=${(d.q ?? 0).toFixed(2)}${d.rssi != null ? ` rssi=${d.rssi} snr=${d.snr}` : ''}
+         <i style="color:var(--dim)">(${d.src})</i></div>`).join('')
+      || '<span class="hint">nothing heard yet</span>'}</div>
+    <h2>Heard by (outbound)</h2>
+    <div id="heardByList">${[...nodes.entries()]
+      .filter(([oid, o]) => oid !== n.id && o.hears[n.id])
+      .map(([oid, o]) => `<div class="linkrow" data-nid="${oid}" style="color:${qColor(o.hears[n.id].q || 0)}">
+         ${oid} &nbsp;q=${(o.hears[n.id].q ?? 0).toFixed(2)}</div>`).join('')
+      || '<span class="hint">no node reports hearing it yet</span>'}</div>
+    ${isGw ? `
+    <h2>Battery calibration</h2>
+    <div class="hint">Measure the battery with a meter, enter mV:</div>
+    <div style="display:flex; gap:6px; margin-top:4px;">
+      <input type="number" id="calMv" step="0.01" placeholder="V or mV: 4.02 / 4020">
+      <button id="calBtn">batt cal</button>
+    </div>
+    <div style="margin-top:6px"><button id="battBtn">read batt now</button></div>
+    <h2>Actions</h2>
+    <div class="hint">rf / ble / block via the console box (left) — gateway only until the signed control plane.</div>`
+    : `<h2 style="margin-top:12px">Remote node</h2>
+       <div class="hint">Telemetry via gateway announces. Management requires walking up (BLE) or Phase C.</div>`}
+  `;
+  el.querySelectorAll('[data-nid]').forEach(r => r.onclick = () => {
+    select(r.dataset.nid);
+    if (positions[r.dataset.nid]) map.panTo(positions[r.dataset.nid]);
+  });
+  if (isGw) {
+    $('calBtn').onclick = () => { let v = +$('calMv').value; if (v > 0 && v < 10) v = Math.round(v * 1000); if (v >= 1000 && v <= 6000 && gw) gw.sendLine('batt cal ' + v); };
+    $('battBtn').onclick = () => gw && gw.sendLine('batt');
+  }
+}
+
+// ---------- wire up ----------
+$('btnSerial').onclick = () => connectSerial().catch(e => logLine('error: ' + e));
+$('btnBle').onclick    = () => connectBle().catch(e => logLine('error: ' + e));
+$('cmdSend').onclick   = () => { const v = $('cmd').value.trim(); if (v && gw) { gw.sendLine(v); $('cmd').value = ''; } };
+$('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') $('cmdSend').click(); });
+$('btnExport').onclick = () => {
+  const blob = new Blob([JSON.stringify(positions, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'node-positions.json'; a.click();
+};
+$('btnImport').onclick = () => $('impFile').click();
+$('impFile').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  Object.assign(positions, JSON.parse(await f.text())); savePos(); render();
+};
+const legend = L.control({ position: 'bottomright' });
+legend.onAdd = () => {
+  const d = L.DomUtil.create('div');
+  d.style.cssText = 'background:#1a212bd9;border:1px solid #2b3645;border-radius:8px;padding:8px 10px;font:12px system-ui;color:#dfe7f1;line-height:1.7';
+  d.innerHTML =
+    '<b>Legend</b><br>' +
+    '<span style="color:#3fb950">━➤</span> link direction, q ≥ 0.9 ' +
+    '(<span style="color:#d29922">amber</span> 0.6–0.9, <span style="color:#f85149">red</span> &lt; 0.6)<br>' +
+    '<span style="color:#888">╌ ╌</span> direction not heard (one-way link)<br>' +
+    '⚠️ asymmetric (|Δq| &gt; 0.35)<br>' +
+    '<span style="color:#58a6ff">·····</span> route of selected node (kink = via relay)<br>' +
+    'marker ring: <span style="color:#3fb950">fresh</span> / ' +
+    '<span style="color:#d29922">stale</span> / <span style="color:#f85149">lost</span>';
+  return d;
+};
+legend.addTo(map);
+
+map.on('zoomend moveend', drawLinks);
+setInterval(render, 5000);          // freshness rings tick even without new data
+render();
+</script>
+</body>
+</html>

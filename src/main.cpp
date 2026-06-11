@@ -119,6 +119,10 @@ static uint32_t  sar_quiet_until = 0;           // suppress our beacons during a
 // so a host bridge (e.g. a Reticulum interface) can push/pull opaque app packets
 // through the mesh. Enabled by the `tunnel` console command.
 static bool      tunnel_mode = false;
+// Beacon RX/TX console lines: invaluable on the bench, noise on a gateway feeding
+// the map app (4 nodes = a line every ~2 s). Runtime-toggled; the map app sends
+// `trace off` on connect.
+static bool      trace_beacons = true;
 static const uint8_t HDLC_FLAG = 0x7E, HDLC_ESC = 0x7D, HDLC_ESC_MASK = 0x20;
 // Host-tunnel frame envelope (host<->node), TYPED + LENGTH-PREFIXED so the address can
 // widen (4-byte locator today -> 16-byte node-pubkey hash later, identity-vs-locator §6)
@@ -172,6 +176,116 @@ static void rf_save(const RadioCfg& c) {
     InternalFS.remove(RF_PATH);
     File f(InternalFS);
     if (f.open(RF_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+// --- battery sense (solar telemetry, docs/node-map-webapp-plan.md §6) -------
+// Per-board VBAT pin; the divider/reference product is deliberately NOT
+// hardcoded — one scale factor (mV per ADC count) is calibrated against a real
+// meter (`batt cal <measured_mV>`, typed into the map app at install time) and
+// persisted. Single-point suffices: a resistive divider is linear through zero.
+#if defined(AGN_BOARD_XIAO)
+  #define AGN_VBAT_PIN PIN_VBAT
+  #define AGN_VBAT_EN  VBAT_ENABLE        // drive LOW to connect the divider
+#elif defined(AGN_BOARD_RAK4631)
+  #define AGN_VBAT_PIN PIN_A0             // WisBlock base routes VBAT/divider to A0
+#elif defined(PIN_VBAT)
+  #define AGN_VBAT_PIN PIN_VBAT
+#endif
+static const char     BATT_PATH[]  = "/agn_batt.cfg";
+static const uint32_t BATT_MAGIC   = 0x54424741;   // "AGBT"
+struct __attribute__((packed)) BattStore { uint32_t magic; float scale; };
+static float    batt_scale   = 0.0f;    // mV per ADC count; 0 = uncalibrated
+static uint16_t batt_last_mv = 0;       // refreshed ~60 s; heartbeat prints this
+
+static uint16_t batt_raw() {
+#ifdef AGN_VBAT_PIN
+  #ifdef AGN_VBAT_EN
+    pinMode(AGN_VBAT_EN, OUTPUT); digitalWrite(AGN_VBAT_EN, LOW);
+    delayMicroseconds(200);              // divider settle
+  #endif
+    analogReference(AR_INTERNAL);        // 0.6 V ref x6 = 3.6 V range
+    analogReadResolution(12);
+    uint32_t acc = 0;
+    for (uint8_t i = 0; i < 8; i++) acc += analogRead(AGN_VBAT_PIN);
+  #ifdef AGN_VBAT_EN
+    pinMode(AGN_VBAT_EN, INPUT);         // disconnect divider — it drains the cell
+  #endif
+    return (uint16_t)(acc / 8);
+#else
+    return 0;
+#endif
+}
+
+static uint8_t batt_pct(uint16_t mv) {
+    // 1S Li-ion rest-voltage curve, linear between points. Honest only when not
+    // charging — the app shows raw mV alongside and trends it (plan §6).
+    static const struct { uint16_t mv; uint8_t pct; } C[] = {
+        {3300,0},{3450,5},{3680,10},{3740,20},{3770,30},{3790,40},
+        {3820,50},{3870,60},{3920,70},{3980,80},{4060,90},{4200,100}};
+    const uint8_t N = sizeof(C) / sizeof(C[0]);
+    if (mv <= C[0].mv) return 0;
+    for (uint8_t i = 1; i < N; i++)
+        if (mv < C[i].mv)
+            return (uint8_t)(C[i-1].pct +
+                   (uint32_t)(C[i].pct - C[i-1].pct) * (mv - C[i-1].mv) / (C[i].mv - C[i-1].mv));
+    return 100;
+}
+
+static void batt_cfg_load() {
+    InternalFS.begin();   // idempotent — this runs BEFORE rf_load's begin (boot order);
+                          // File ops on an un-begun LittleFS hang setup() (XIAO, 0.6.0)
+    BattStore rec;
+    File f(InternalFS);
+    if (!f.open(BATT_PATH, FILE_O_READ)) return;
+    int n = f.read((void*)&rec, sizeof(rec));
+    f.close();
+    if (n == (int)sizeof(rec) && rec.magic == BATT_MAGIC) batt_scale = rec.scale;
+}
+
+static void batt_cfg_save() {
+    BattStore want; want.magic = BATT_MAGIC; want.scale = batt_scale;
+    InternalFS.remove(BATT_PATH);
+    File f(InternalFS);
+    if (f.open(BATT_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+static void batt_refresh() {            // cheap cached read for heartbeat/info
+    batt_last_mv = (batt_scale > 0.0f) ? (uint16_t)(batt_raw() * batt_scale) : 0;
+}
+
+// --- announce cache (passive 1-hop topology for the map app) ----------------
+// Last announce heard from each direct neighbour + its RF metrics. The beacons
+// already carry every node's neighbour report; caching them gives `nbrdump` —
+// the map's tier-2 telemetry — without a single extra packet on the air.
+struct AnnCache {
+    node_id_t src;
+    uint32_t  ms;
+    float     rssi, snr;
+    uint8_t   batt_pct_plus1;   // from the beacon payload: 0 = unknown, 1..101 = 0..100%
+    uint8_t   n;
+    mesh::Announce::Report rep[mesh::MAX_NEIGHBORS];
+    bool      used;
+};
+static AnnCache ann_cache[8];
+
+static void ann_cache_put(node_id_t src, const mesh::Announce& a, float rssi, float snr, uint8_t batt_pp1) {
+    AnnCache* slot = nullptr;
+    for (auto& c : ann_cache) if (c.used && c.src == src) { slot = &c; break; }
+    if (!slot) for (auto& c : ann_cache) if (!c.used) { slot = &c; break; }
+    if (!slot) {                       // full: evict the stalest
+        slot = &ann_cache[0];
+        for (auto& c : ann_cache) if ((int32_t)(c.ms - slot->ms) < 0) slot = &c;
+    }
+    uint8_t n = a.n_reports;
+    if (n > mesh::MAX_NEIGHBORS) n = mesh::MAX_NEIGHBORS;
+    slot->used = true; slot->src = src; slot->ms = millis();
+    slot->rssi = rssi; slot->snr = snr; slot->batt_pct_plus1 = batt_pp1; slot->n = n;
+    memcpy(slot->rep, a.reports, sizeof(mesh::Announce::Report) * n);
+}
+
+static const AnnCache* ann_cache_find(node_id_t src) {
+    for (auto& c : ann_cache) if (c.used && c.src == src) return &c;
+    return nullptr;
 }
 
 // Load the persisted PHY at boot, or fall back to the compile-time network defaults.
@@ -448,10 +562,53 @@ static const uint32_t TQ_DONE_GAP_MS    = 1500;   // post-DONE breathing room fo
 // Cadence for ageing out dead neighbours/routes.
 static const uint32_t TICK_PERIOD_MS = 5000;
 
-// Beacon cadence. Airtime is the scarcest resource (§2.4): one short beacon every
-// ~10 s, with per-node jitter so two nodes don't lock-step and collide forever.
-static const uint32_t BEACON_PERIOD_MS = 10000;
-static const uint32_t BEACON_JITTER_MS = 2500;
+// Beacon cadence. Airtime is the scarcest resource (§2.4): one short beacon with
+// per-node jitter so two nodes don't lock-step and collide forever. The PERIOD is
+// runtime-configurable (`net beacon <s>`, persisted) because the right value is a
+// function of airtime: a ~60 B beacon is ~35 ms at SF7 but ~600 ms at SF11 — a
+// fixed 10 s period costs 0.3% duty at SF7 and 5.5% PER NODE at SF11 (≈150 mAh/day
+// of a solar cell at 22 dBm). Default is AUTO: constant ~0.3-0.5% duty per SF.
+// NETWORK-COORDINATED setting: neighbour/route timeouts derive from the period,
+// so mismatched nodes falsely expire each other — change it like a retune.
+static const uint32_t NET_MAGIC  = 0x544E4741;   // "AGNT"
+static const char     NET_PATH[] = "/agn_net.cfg";
+struct __attribute__((packed)) NetStore { uint32_t magic; uint32_t beacon_ms; }; // 0 = auto
+static uint32_t net_beacon_cfg = 0;              // persisted setting; 0 = auto-by-SF
+
+static uint32_t beacon_auto_ms(uint8_t sf) {     // ~constant duty across SFs
+    switch (sf) {
+        case 12: return 140000;
+        case 11: return 75000;
+        case 10: return 40000;
+        case 9:  return 25000;
+        case 8:  return 15000;
+        default: return 10000;                   // SF5-7
+    }
+}
+static uint32_t beacon_period_ms() {
+    return net_beacon_cfg ? net_beacon_cfg : beacon_auto_ms(radio.config().sf);
+}
+static uint32_t beacon_jitter_ms()   { return beacon_period_ms() / 4; }
+// Miss ~6 beacons (incl. jitter) before declaring a neighbour dead; routes ride
+// the same horizon. At the old fixed numbers (10 s / 90 s) this is unchanged.
+static uint32_t neighbor_timeout_ms() { uint32_t t = beacon_period_ms() * 9; return t < 90000 ? 90000 : t; }
+static uint32_t route_timeout_ms()    { return neighbor_timeout_ms(); }
+
+static void net_cfg_load() {
+    InternalFS.begin();   // idempotent (boot-order safe — see batt_cfg_load)
+    NetStore rec;
+    File f(InternalFS);
+    if (!f.open(NET_PATH, FILE_O_READ)) return;
+    int n = f.read((void*)&rec, sizeof(rec));
+    f.close();
+    if (n == (int)sizeof(rec) && rec.magic == NET_MAGIC) net_beacon_cfg = rec.beacon_ms;
+}
+static void net_cfg_save() {
+    NetStore want; want.magic = NET_MAGIC; want.beacon_ms = net_beacon_cfg;
+    InternalFS.remove(NET_PATH);
+    File f(InternalFS);
+    if (f.open(NET_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
 
 // Provisional 4-byte node ID. The real ID is derived from the node's public key
 // (self-certifying, §3); until crypto lands we use a per-chip stable value from
@@ -466,7 +623,7 @@ static node_id_t derive_node_id() {
 }
 
 static uint32_t schedule_next_beacon() {
-    return millis() + BEACON_PERIOD_MS + (uint32_t)random(0, BEACON_JITTER_MS);
+    return millis() + beacon_period_ms() + (uint32_t)random(0, beacon_jitter_ms());
 }
 
 // --- Outbound TX queue -----------------------------------------------------
@@ -567,7 +724,9 @@ static void send_beacon() {
 
     BeaconPayload pl;
     pl.hw_class = 0;                         // 0 = RAK4631
-    pl.reserved = 0;
+    // Battery rides the formerly-reserved byte: free 1-hop telemetry at beacon
+    // cadence (feeds nbrdump/the map); multi-hop telemetry is Phase B's TELEM.
+    pl.batt_pct_plus1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
     pl.uptime_s = (uint16_t)((millis() - boot_ms) / 1000u);
 
     memcpy(frame, &link, sizeof(link));
@@ -585,10 +744,12 @@ static void send_beacon() {
     const uint16_t frame_len = base + ann_len;
 
     if (txq_push(frame, frame_len)) {
-        char hdr[72];
-        snprintf(hdr, sizeof(hdr), "[TX] beacon seq=%u from %08lX  +announce %uB",
-                 (unsigned)beacon_seq, (unsigned long)my_id, (unsigned)ann_len);
-        Serial.println(hdr);
+        if (trace_beacons) {
+            char hdr[72];
+            snprintf(hdr, sizeof(hdr), "[TX] beacon seq=%u from %08lX  +announce %uB",
+                     (unsigned)beacon_seq, (unsigned long)my_id, (unsigned)ann_len);
+            Serial.println(hdr);
+        }
         beacon_seq++;
     } else {
         Serial.println("[TX] queue full, beacon dropped");
@@ -915,6 +1076,13 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
             mesh::announce_deserialize(buf + base, (uint16_t)(len - base), ann);
         }
         router->on_beacon(net.src, q, ann, millis());
+        uint8_t bpp = 0;                 // battery byte from the beacon payload
+        if (len >= HEADER_BYTES + (uint16_t)sizeof(BeaconPayload)) {
+            BeaconPayload bp;
+            memcpy(&bp, buf + HEADER_BYTES, sizeof(bp));
+            bpp = bp.batt_pct_plus1;
+        }
+        ann_cache_put(net.src, ann, rssi, snr, bpp);
     }
 
     // Link-layer filter: a directed frame carries BOTH link aliases — next_hop
@@ -1071,6 +1239,7 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     }
 
     // --- BEACON / other: log link metrics + table sizes ---
+    if (!trace_beacons && type == PKT_BEACON) return;
     char line[96];
     if (type == PKT_BEACON && len >= HEADER_BYTES + (uint16_t)sizeof(BeaconPayload)) {
         BeaconPayload pl;
@@ -1335,13 +1504,27 @@ static void print_info() {
              radio.cad_enabled() ? "on" : "off",
              (unsigned long)radio.cad_busy_count(), (unsigned long)radio.cad_forced_count());
     Serial.println(l);
+#ifdef AGN_VBAT_PIN
+    if (batt_scale > 0.0f) {
+        snprintf(l, sizeof(l), "batt mv=%u pct=%u", (unsigned)batt_last_mv,
+                 (unsigned)batt_pct(batt_last_mv));
+        Serial.println(l);
+    }
+#endif
     const mesh::NeighborTable& nt = router->neighbors();
     for (uint8_t i = 0; i < mesh::MAX_NEIGHBORS; i++) {
         const mesh::Neighbor* n = nt.at(i);
         if (!n->used) continue;
-        snprintf(l, sizeof(l), "  nbr %08lX  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u",
-                 (unsigned long)n->id, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
-                 (unsigned)n->my_alias, (unsigned)n->their_alias);
+        const AnnCache* ac = ann_cache_find(n->id);
+        if (ac) {
+            snprintf(l, sizeof(l), "  nbr %08lX  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u rssi=%d snr=%d",
+                     (unsigned long)n->id, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
+                     (unsigned)n->my_alias, (unsigned)n->their_alias, (int)ac->rssi, (int)ac->snr);
+        } else {
+            snprintf(l, sizeof(l), "  nbr %08lX  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u",
+                     (unsigned long)n->id, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
+                     (unsigned)n->my_alias, (unsigned)n->their_alias);
+        }
         Serial.println(l);
     }
     const mesh::RoutingTable& rt = router->routes();
@@ -1444,6 +1627,77 @@ static void handle_command(char* line) {
         cfg_save();                             // persist the new PIN across reboots
         char m[40]; snprintf(m, sizeof(m), "BLE PIN=%s (saved)", ble_pin); Serial.println(m);
 #endif
+    } else if (!strcmp(cmd, "trace")) {        // trace [on|off] — beacon RX/TX console lines
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "on"))  trace_beacons = true;
+        if (a && !strcmp(a, "off")) trace_beacons = false;
+        Serial.println(trace_beacons ? "trace on (beacon RX/TX lines)" : "trace off");
+    } else if (!strcmp(cmd, "net")) {          // net | net beacon <seconds>|auto
+        char* a = strtok(nullptr, " ");
+        char* v = a ? strtok(nullptr, " ") : nullptr;
+        if (a && !strcmp(a, "beacon") && v) {
+            if (!strcmp(v, "auto")) { net_beacon_cfg = 0; net_cfg_save(); }
+            else {
+                uint32_t s = strtoul(v, nullptr, 10);
+                if (s < 5 || s > 600) { Serial.println("usage: net beacon <5..600 seconds>|auto"); return; }
+                net_beacon_cfg = s * 1000; net_cfg_save();
+            }
+            Serial.println("WARNING: beacon period is NETWORK-COORDINATED — set the same");
+            Serial.println("value on ALL nodes or they will falsely expire each other.");
+        }
+        char l[96];
+        snprintf(l, sizeof(l), "net beacon=%lus (%s)  jitter=%lus  nbr_timeout=%lus",
+                 (unsigned long)(beacon_period_ms() / 1000),
+                 net_beacon_cfg ? "set" : "auto-by-SF",
+                 (unsigned long)(beacon_jitter_ms() / 1000),
+                 (unsigned long)(neighbor_timeout_ms() / 1000));
+        Serial.println(l);
+    } else if (!strcmp(cmd, "batt")) {         // batt | batt cal <measured_mV>
+#ifndef AGN_VBAT_PIN
+        Serial.println("batt: no VBAT sense on this board");
+#else
+        char* a = strtok(nullptr, " ");
+        uint16_t raw = batt_raw();
+        if (a && !strcmp(a, "cal")) {
+            char* v = strtok(nullptr, " ");
+            uint32_t mv = v ? strtoul(v, nullptr, 10) : 0;
+            if (mv < 1000 || mv > 6000 || raw == 0) {
+                Serial.println("usage: batt cal <measured_mV>  (1000..6000, from a real meter)");
+                return;
+            }
+            batt_scale = (float)mv / (float)raw;
+            batt_cfg_save();
+            batt_refresh();
+        }
+        char l[88];
+        if (batt_scale > 0.0f) {
+            uint16_t mv = (uint16_t)(raw * batt_scale);
+            snprintf(l, sizeof(l), "batt raw=%u mv=%u pct=%u scale=%lu.%04lu", (unsigned)raw,
+                     (unsigned)mv, (unsigned)batt_pct(mv),
+                     (unsigned long)batt_scale, (unsigned long)((batt_scale - (unsigned long)batt_scale) * 10000));
+        } else {
+            snprintf(l, sizeof(l), "batt raw=%u UNCALIBRATED — batt cal <measured_mV>", (unsigned)raw);
+        }
+        Serial.println(l);
+#endif
+    } else if (!strcmp(cmd, "nbrdump")) {      // announce-derived 1-hop topology (map app)
+        char l[96];
+        for (auto& c : ann_cache) {
+            if (!c.used) continue;
+            if (c.batt_pct_plus1)
+                snprintf(l, sizeof(l), "[nbrs] %08lX age=%lus rssi=%d snr=%d batt=%u%%",
+                         (unsigned long)c.src, (unsigned long)((millis() - c.ms) / 1000u),
+                         (int)c.rssi, (int)c.snr, (unsigned)(c.batt_pct_plus1 - 1));
+            else
+                snprintf(l, sizeof(l), "[nbrs] %08lX age=%lus rssi=%d snr=%d", (unsigned long)c.src,
+                         (unsigned long)((millis() - c.ms) / 1000u), (int)c.rssi, (int)c.snr);
+            Serial.println(l);
+            for (uint8_t i = 0; i < c.n; i++) {
+                snprintf(l, sizeof(l), "  nbr %08lX q_rx=%d alias=%u", (unsigned long)c.rep[i].id,
+                         (int)(c.rep[i].q * 100), (unsigned)c.rep[i].alias);
+                Serial.println(l);
+            }
+        }
     } else if (!strcmp(cmd, "cad")) {          // cad [on|off] — CSMA listen-before-talk
         char* a = strtok(nullptr, " ");
         if (a && !strcmp(a, "on"))  radio.set_cad(true);
@@ -1517,7 +1771,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off]");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
@@ -1611,6 +1865,10 @@ void setup() {
              (unsigned)sizeof(NetHeader));
     Serial.println(banner);
 
+    batt_cfg_load();   // restore the battery calibration scale (LittleFS, like rf/ble)
+    batt_refresh();
+    net_cfg_load();    // restore the beacon-period setting (0 = auto-by-SF)
+
 #ifdef AGN_BLE
     cfg_load();    // restore the persisted PIN + BLE-enabled state from flash (no SoftDevice needed)
     if (cfg_first_boot) cfg_save();          // persist the freshly-generated PIN (SD-safe write)
@@ -1657,21 +1915,31 @@ static void agn_loop_once() {
     //    sees the node is alive (and whether it has found neighbours), without
     //    waiting for the ~10 s beacon cadence.
     static uint32_t next_hb_ms = 0;
+    static uint32_t next_batt_ms = 0;
+    if ((int32_t)(millis() - next_batt_ms) >= 0) {   // ~60 s cached battery read
+        batt_refresh();
+        next_batt_ms = millis() + 60000;
+    }
     if ((int32_t)(millis() - next_hb_ms) >= 0) {
-        static char hb[96];   // static: keep the hot loop's stack frame minimal
-        snprintf(hb, sizeof(hb), "[hb] up=%lus  node=%08lX  nbrs=%u routes=%u txq=%u stk=%u",
+        static char hb[112];  // static: keep the hot loop's stack frame minimal
+        int hn = snprintf(hb, sizeof(hb), "[hb] up=%lus  node=%08lX  nbrs=%u routes=%u txq=%u stk=%u",
                  (unsigned long)((millis() - boot_ms) / 1000u), (unsigned long)my_id,
                  (unsigned)(router ? router->neighbors().count() : 0),
                  (unsigned)(router ? router->routes().count() : 0),
                  (unsigned)txq_count,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));  // words of stack never yet used
+        if (batt_last_mv && hn > 0 && hn < (int)sizeof(hb))
+            snprintf(hb + hn, sizeof(hb) - hn, " batt=%umV/%u%%",
+                     (unsigned)batt_last_mv, (unsigned)batt_pct(batt_last_mv));
         Serial.println(hb);
 #ifdef AGN_BLE
         static char bl[104];  // static: this +32B over the old [72] was THE stack tipper
-        snprintf(bl, sizeof(bl), "[ble] adv=%d connected=%d rx=%lu tx=%lu frames=%lu fmax=%u PIN=%s",
+        // No PIN here: the pairing PIN appears ON DEMAND only (`ble`, `blepin`) —
+        // a secret has no business in 3-second telemetry that lands in every log.
+        snprintf(bl, sizeof(bl), "[ble] adv=%d connected=%d rx=%lu tx=%lu frames=%lu fmax=%u",
                  (int)ble_advertising, (int)ble_connected,
                  (unsigned long)ble_rxb, (unsigned long)ble_txb,
-                 (unsigned long)ble_frames, (unsigned)ble_open_max, ble_pin);
+                 (unsigned long)ble_frames, (unsigned)ble_open_max);
         Serial.println(bl);   // watch this stay connected=1 through the LoRa beacons above
 #endif
 #ifdef LED_BUILTIN
@@ -1707,7 +1975,8 @@ static void agn_loop_once() {
 
     // 5) Age out neighbours/routes we've stopped hearing.
     if (router && (int32_t)(millis() - next_tick_ms) >= 0) {
-        router->tick(millis());
+        // Timeouts derive from the configured beacon period (see net_cfg).
+        router->tick(millis(), neighbor_timeout_ms(), route_timeout_ms());
         next_tick_ms = millis() + TICK_PERIOD_MS;
     }
 

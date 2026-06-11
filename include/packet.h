@@ -89,9 +89,10 @@ static const uint16_t MAX_PAYLOAD = 200;  // conservative cap under the LoRa fra
 // extend this with the per-neighbour bidirectional link metrics and DV updates
 // that piggyback on beacons (§6).
 struct AGN_PACKED BeaconPayload {
-    uint8_t  hw_class;     // sender hardware class (0 = RAK4631) — for per-class power caps
-    uint8_t  reserved;     // alignment / future flags
-    uint16_t uptime_s;     // sender uptime in seconds (wraps; rough liveness only)
+    uint8_t  hw_class;       // sender hardware class (0 = RAK4631) — for per-class power caps
+    uint8_t  batt_pct_plus1; // battery: 0 = unknown/uncalibrated, 1..101 = 0..100 %
+                             // (was `reserved`; old nodes send 0 — mixed-version safe)
+    uint16_t uptime_s;       // sender uptime in seconds (wraps; rough liveness only)
 };
 
 // Convenience: assembled header size, asserted to stay in the low double digits.
