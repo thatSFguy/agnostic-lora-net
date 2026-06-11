@@ -414,6 +414,18 @@ static uint16_t  sar_rx_last_xfer = 0xFFFF;
 static uint8_t   sar_nack_rounds = 0;
 static const uint32_t SAR_NACK_TIMEOUT_MS = 6000;   // sender quiet this long => ask for missing
 static const uint8_t  SAR_MAX_NACK_ROUNDS = 6;
+// Outbound tunnel ingest queue (BR-6): a host frame needing SAR while a transfer is
+// already airing used to be DROPPED busy — the app's RNS retry redelivered it ~70 s
+// later, which reads as a "stuck in sending" message. Queue it instead and start it
+// once the active transfer ends. The drain waits out the receiver's NACK window first:
+// NACKs only match the live sar_xfer_id, so starting the next transfer too early
+// forfeits resend recovery for the previous one.
+struct TunPending { node_id_t dst; uint16_t len; uint8_t buf[TUN_HOST_MAX]; };
+static const uint8_t  TQ_CAP = 4;
+static TunPending tq[TQ_CAP];
+static uint8_t   tq_head = 0, tq_count = 0;
+static uint32_t  sar_tx_done_ms = 0;                 // when the last outbound pass finished
+static const uint32_t TQ_DRAIN_GRACE_MS = SAR_NACK_TIMEOUT_MS + 4000;
 
 // Cadence for ageing out dead neighbours/routes.
 static const uint32_t TICK_PERIOD_MS = 5000;
@@ -1086,6 +1098,12 @@ static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen) {
 }
 
 // Handle a frame from the host: [addr_type][addr_len][addr][payload] -> send into the mesh.
+static void sar_start(node_id_t dst, const uint8_t* payload, uint16_t plen) {
+    memcpy(sar_buf, payload, plen);
+    sar_len = plen; sar_crc = mesh::sar_crc32(sar_buf, plen); sar_xfer_id++;
+    sar_tx_dst = dst; sar_tx_count = mesh::sar_frag_count(plen); sar_tx_idx = 0; sar_tx_active = true;
+}
+
 static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
     if (n < 2) return;
     uint8_t addr_type = f[0];
@@ -1113,15 +1131,21 @@ static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
     if (plen <= MAX_PAYLOAD - HEADER_BYTES) {
         send_data_bytes(dst, payload, plen, false);   // fits one frame
         snprintf(m, sizeof(m), "[tun] >%08lX %uB 1-frame", (unsigned long)dst, (unsigned)plen);
-    } else if (!sar_tx_active && !sar_resend_active && plen <= mesh::SAR_MAX_FILE) {
-        memcpy(sar_buf, payload, plen);                // larger: segment over the mesh
-        sar_len = plen; sar_crc = mesh::sar_crc32(sar_buf, plen); sar_xfer_id++;
-        sar_tx_dst = dst; sar_tx_count = mesh::sar_frag_count(plen); sar_tx_idx = 0; sar_tx_active = true;
+    } else if (!sar_tx_active && !sar_resend_active && tq_count == 0 && plen <= mesh::SAR_MAX_FILE) {
+        sar_start(dst, payload, plen);                 // larger: segment over the mesh
         snprintf(m, sizeof(m), "[tun] >%08lX %uB sar=%u", (unsigned long)dst, (unsigned)plen,
                  (unsigned)sar_tx_count);
+    } else if (tq_count < TQ_CAP && plen <= TUN_HOST_MAX) {
+        // big packet while a transfer is busy — hold it; tun_queue_tick starts it
+        // after the active transfer (and its NACK window) ends
+        uint8_t tail = (uint8_t)((tq_head + tq_count) % TQ_CAP);
+        tq[tail].dst = dst; tq[tail].len = plen;
+        memcpy(tq[tail].buf, payload, plen);
+        tq_count++;
+        snprintf(m, sizeof(m), "[tun] >%08lX %uB queued=%u", (unsigned long)dst, (unsigned)plen,
+                 (unsigned)tq_count);
     } else {
-        // big packet while a transfer is busy — dropped; the app layer retries
-        snprintf(m, sizeof(m), "[tun] >%08lX %uB DROPPED busy", (unsigned long)dst, (unsigned)plen);
+        snprintf(m, sizeof(m), "[tun] >%08lX %uB DROPPED qfull", (unsigned long)dst, (unsigned)plen);
     }
     Serial.println(m);
 }
@@ -1165,16 +1189,31 @@ static void sar_tx_tick() {
                                  (unsigned)sar_tx_idx, (unsigned)sar_tx_count);
             Serial.println(l);
         }
-        if (sar_tx_idx >= sar_tx_count) sar_tx_active = false;
+        if (sar_tx_idx >= sar_tx_count) { sar_tx_active = false; sar_tx_done_ms = millis(); }
     } else {                                   // resending NACKed fragments
         idx = sar_resend[sar_resend_idx++];
-        if (sar_resend_idx >= sar_resend_n) sar_resend_active = false;
+        if (sar_resend_idx >= sar_resend_n) { sar_resend_active = false; sar_tx_done_ms = millis(); }
     }
 
     uint8_t  frag[1 + mesh::SAR_HDR_BYTES + mesh::SAR_CHUNK];
     uint16_t flen = mesh::sar_build_fragment(sar_buf, sar_len, sar_xfer_id, sar_crc,
                                              idx, frag, sizeof(frag));
     if (flen) send_data_bytes(sar_tx_dst, frag, flen, false);
+}
+
+// Start the next queued tunnel frame (BR-6) once the slot is free AND the receiver's
+// NACK window for the previous transfer has lapsed — a NACK arriving after sar_xfer_id
+// moves on is ignored, so draining early would forfeit the previous transfer's resends.
+static void tun_queue_tick() {
+    if (tq_count == 0 || sar_tx_active || sar_resend_active) return;
+    if ((int32_t)(millis() - sar_tx_done_ms) < (int32_t)TQ_DRAIN_GRACE_MS) return;
+    TunPending& p = tq[tq_head];
+    sar_start(p.dst, p.buf, p.len);
+    char m[56];
+    snprintf(m, sizeof(m), "[tun] >%08lX %uB sar=%u dequeued", (unsigned long)p.dst,
+             (unsigned)p.len, (unsigned)sar_tx_count);
+    Serial.println(m);
+    tq_head = (uint8_t)((tq_head + 1) % TQ_CAP); tq_count--;
 }
 
 // Receiver: if a transfer has stalled incomplete (sender went quiet), ask for the
@@ -1573,9 +1612,11 @@ static void agn_loop_once() {
         next_tick_ms = millis() + TICK_PERIOD_MS;
     }
 
-    // 6) Drive an in-progress SAR file transfer + the receiver's missing-frag requests.
+    // 6) Drive an in-progress SAR file transfer + the receiver's missing-frag requests,
+    //    then start the next queued tunnel frame once the slot truly frees.
     sar_tx_tick();
     sar_rx_tick();
+    tun_queue_tick();
 
     // 6b) Locator directory: expire timed-out resolutions, and re-register our own ids
     //     before their bindings lapse (keeps the distributed cache fresh).
