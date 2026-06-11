@@ -56,6 +56,19 @@ uint16_t sar_build_nack(uint16_t xfer_id, const uint16_t* missing, uint16_t n,
 uint16_t sar_parse_nack(const uint8_t* payload, uint16_t len, uint16_t* xfer_id,
                         uint16_t* out, uint16_t cap);
 
+// --- transfer-complete ACK (DONE) ---
+// The receiver confirms a verified (CRC-OK) reassembly so the sender can release
+// its transfer slot immediately instead of sitting out the NACK window — that
+// window dominates back-to-back transfer latency (~10 s per queued frame). A lost
+// DONE costs nothing: the sender just falls back to the timed window.
+// Message layout (inside a DATA payload): 'S''A''R''D' (4) | u16 xfer_id
+constexpr uint16_t SAR_DONE_BYTES = 6;
+
+bool     sar_is_done(const uint8_t* payload, uint16_t len);
+uint16_t sar_build_done(uint16_t xfer_id, uint8_t* out, uint16_t out_cap);
+// Returns the confirmed xfer_id, or 0xFFFF if `payload` is not a DONE.
+uint16_t sar_parse_done(const uint8_t* payload, uint16_t len);
+
 // Reassembles one transfer at a time into a fixed buffer.
 class SarReassembler {
 public:
