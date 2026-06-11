@@ -134,6 +134,23 @@ static void test_nack_recovery() {
     TEST_ASSERT_EQUAL_MEMORY(blob, r.data(), sizeof(blob));
 }
 
+static void test_done_roundtrip() {
+    // Receiver confirms a verified transfer; sender matches it to its xfer id.
+    uint8_t done[16];
+    uint16_t dl = sar_build_done(0xBEEF, done, sizeof(done));
+    TEST_ASSERT_EQUAL_UINT16(SAR_DONE_BYTES, dl);
+    TEST_ASSERT_TRUE(sar_is_done(done, dl));
+    TEST_ASSERT_EQUAL_UINT16(0xBEEF, sar_parse_done(done, dl));
+
+    // Not confusable with the other SAR control messages, or with junk.
+    TEST_ASSERT_FALSE(sar_is_nack(done, dl));
+    TEST_ASSERT_FALSE(sar_is_fragment(done, dl));
+    uint8_t junk[6] = {'S', 'A', 'R', 'X', 0, 0};
+    TEST_ASSERT_FALSE(sar_is_done(junk, sizeof(junk)));
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF, sar_parse_done(junk, sizeof(junk)));
+    TEST_ASSERT_FALSE(sar_is_done(done, 3));   // truncated
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -145,5 +162,6 @@ int main(int, char**) {
     RUN_TEST(test_missing_fragment);
     RUN_TEST(test_corruption_caught);
     RUN_TEST(test_nack_recovery);
+    RUN_TEST(test_done_roundtrip);
     return UNITY_END();
 }

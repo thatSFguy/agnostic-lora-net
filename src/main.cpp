@@ -443,6 +443,7 @@ static TunPending tq[TQ_CAP];
 static uint8_t   tq_head = 0, tq_count = 0;
 static uint32_t  sar_tx_done_ms = 0;                 // when the last outbound pass finished
 static const uint32_t TQ_DRAIN_GRACE_MS = SAR_NACK_TIMEOUT_MS + 4000;
+static const uint32_t TQ_DONE_GAP_MS    = 1500;   // post-DONE breathing room for the receiver's replies
 
 // Cadence for ageing out dead neighbours/routes.
 static const uint32_t TICK_PERIOD_MS = 5000;
@@ -676,6 +677,12 @@ static const uint8_t  LOC_FLOOD_TTL  = 4;      // hop budget for REGISTER/QUERY 
 static const uint16_t LOC_RESOLVE_MS = 8000;   // give up on a QUERY after this
 static const uint32_t LOC_REREG_MS   = 240000; // re-register cadence (< TTL, refresh)
 static uint32_t next_rereg_ms = 0;
+// A REGISTER flood is one unacked broadcast; if it's lost, peers wait the full
+// LOC_REREG_MS for the refresh (observed live: a phone invisible for exactly 240 s
+// after a reboot ate its flood). Fresh registrations therefore BURST: two extra
+// floods over the next ~15 s so a single RF loss can't stall discovery.
+static uint8_t  reg_burst_left = 0;
+static uint32_t reg_burst_ms   = 0;
 
 // Ids this node serves locally (a handful), re-registered periodically so they don't lapse.
 struct LocReg { uint8_t id[mesh::LOC_ID_MAX]; uint8_t id_len; bool used; };
@@ -948,6 +955,24 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                 const uint8_t* pay = buf + HEADER_BYTES;
                 uint16_t plen = len - HEADER_BYTES;
                 char line[96];
+                if (mesh::sar_is_done(pay, plen)) {
+                    // Receiver confirmed CRC-OK: no NACK can follow this transfer, so
+                    // collapse the drain grace — but NOT to zero. The receiver answers
+                    // each completed transfer with its own frames (part-request, proof),
+                    // and a back-to-back dequeue transmits straight into them: half-
+                    // duplex receiver is deaf while talking, and CAD only catches
+                    // preambles, not packets already mid-air. Releasing with a short
+                    // gap leaves the channel clear for those answers first (observed:
+                    // zero-gap drain lost a fragment on nearly every chunk and NACK
+                    // churn made it SLOWER than the full 10 s grace).
+                    uint16_t xid = mesh::sar_parse_done(pay, plen);
+                    if (xid == sar_xfer_id && !sar_tx_active && !sar_resend_active) {
+                        sar_tx_done_ms = millis() - (TQ_DRAIN_GRACE_MS - TQ_DONE_GAP_MS);
+                        snprintf(line, sizeof(line), "[SAR] done xfer=%u acked", (unsigned)xid);
+                        Serial.println(line);
+                    }
+                    break;
+                }
                 if (mesh::sar_is_nack(pay, plen)) {
                     // A receiver is asking us to resend the fragments it's missing.
                     uint16_t xid; uint16_t req[mesh::SAR_MAX_FRAGS];
@@ -974,6 +999,15 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                     if (sar_rx.verify()) {
                         if (host_tunnel_active())   // hand the reassembled app packet to the host
                             tunnel_emit(sar_rx_sender, sar_rx.data(), (uint16_t)sar_rx.total_len());
+                        // Confirm CRC-OK to the sender so it can free its slot now
+                        // (once per xfer — late duplicate fragments re-verify too).
+                        static uint16_t sar_done_sent_xfer = 0xFFFF;
+                        if (sar_rx.xfer_id() != sar_done_sent_xfer) {
+                            uint8_t done[mesh::SAR_DONE_BYTES];
+                            uint16_t dl = mesh::sar_build_done(sar_rx.xfer_id(), done, sizeof(done));
+                            if (dl) send_data_bytes(sar_rx_sender, done, dl, false);
+                            sar_done_sent_xfer = sar_rx.xfer_id();
+                        }
                         snprintf(line, sizeof(line), "[SAR] complete xfer=%u len=%lu frags=%u crc=OK",
                                  (unsigned)sar_rx.xfer_id(), (unsigned long)sar_rx.total_len(),
                                  (unsigned)sar_rx.frag_count());
@@ -1461,6 +1495,8 @@ static void handle_command(char* line) {
         if (n == 0) { Serial.println("usage: register <idhex> (1..16 bytes)"); }
         else {
             loc_register(id, (uint8_t)n);
+            reg_burst_left = 2;
+            reg_burst_ms   = millis() + 2000 + (uint32_t)random(0, 2000);
             char l[56]; snprintf(l, sizeof(l), "registered %u-byte id at %08lX",
                                  (unsigned)n, (unsigned long)my_id); Serial.println(l);
         }
@@ -1682,6 +1718,13 @@ static void agn_loop_once() {
     if ((int32_t)(millis() - next_rereg_ms) >= 0) {
         for (auto& r : my_regs) if (r.used) loc_register(r.id, r.id_len);
         next_rereg_ms = millis() + LOC_REREG_MS;
+    }
+    // Fresh-registration burst (see reg_burst_left): re-flood early so a lost
+    // broadcast costs seconds, not the LOC_REREG_MS refresh period.
+    if (reg_burst_left && (int32_t)(millis() - reg_burst_ms) >= 0) {
+        for (auto& r : my_regs) if (r.used) loc_register(r.id, r.id_len);
+        reg_burst_left--;
+        reg_burst_ms = millis() + 5000 + (uint32_t)random(0, 5000);
     }
 
 #ifdef AGN_BLE

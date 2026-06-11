@@ -122,6 +122,25 @@ uint16_t sar_parse_nack(const uint8_t* payload, uint16_t len, uint16_t* xfer_id,
     return n;
 }
 
+// --- DONE message ---
+static const uint8_t DMAGIC[4] = {'S', 'A', 'R', 'D'};
+
+bool sar_is_done(const uint8_t* payload, uint16_t len) {
+    return len >= SAR_DONE_BYTES && memcmp(payload, DMAGIC, 4) == 0;
+}
+
+uint16_t sar_build_done(uint16_t xfer_id, uint8_t* out, uint16_t out_cap) {
+    if (out_cap < SAR_DONE_BYTES) return 0;
+    memcpy(out, DMAGIC, 4);
+    put_u16(out + 4, xfer_id);
+    return SAR_DONE_BYTES;
+}
+
+uint16_t sar_parse_done(const uint8_t* payload, uint16_t len) {
+    if (!sar_is_done(payload, len)) return 0xFFFF;
+    return get_u16(payload + 4);
+}
+
 bool SarReassembler::verify() const {
     return complete() && sar_crc32(buf_, total_len_) == total_crc_;
 }
