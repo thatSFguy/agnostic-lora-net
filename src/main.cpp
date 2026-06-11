@@ -22,6 +22,7 @@
 #include "announce_codec.h"
 #include "forwarder.h"
 #include "link_arq.h"
+#include "telemetry.h"
 #include "sar.h"
 #include "locator_dir.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
@@ -867,12 +868,13 @@ static void loc_id_hex(const uint8_t* id, uint8_t n, char* out) {
 }
 
 // Broadcast a REGISTER/QUERY into the mesh (multi-hop flood, TTL-bounded).
-static void send_loc_flood(const uint8_t* msg, uint16_t mlen, uint8_t ttl) {
+static void send_loc_flood(const uint8_t* msg, uint16_t mlen, uint8_t ttl,
+                           PacketType pt = PKT_LOC) {
     uint8_t frame[1 + MAX_PAYLOAD];
     if ((uint16_t)(HEADER_BYTES + mlen) > sizeof(frame)) return;
     LinkHeader link; link.prev_hop = LINK_ADDR_NONE; link.next_hop = LINK_ADDR_BROADCAST;
     link.link_seq = (uint8_t)loc_pktid; link.flags = 0;
-    NetHeader net; net.ver_type = net_ver_type(PKT_LOC); net.flags = 0; net.ttl = ttl;
+    NetHeader net; net.ver_type = net_ver_type(pt); net.flags = 0; net.ttl = ttl;
     net.dst = NODE_ID_BROADCAST; net.src = my_id; net.pkt_id = loc_pktid;
     memcpy(frame, &link, sizeof(link));
     memcpy(frame + sizeof(link), &net, sizeof(net));
@@ -896,7 +898,8 @@ static void loc_reflood(const uint8_t* buf, uint16_t len, uint8_t out_ttl) {
 }
 
 // Send a REPLY back to the asker — DV-routed unicast, exactly like DATA.
-static void send_loc_unicast(node_id_t dst, const uint8_t* msg, uint16_t mlen) {
+static void send_loc_unicast(node_id_t dst, const uint8_t* msg, uint16_t mlen,
+                             PacketType pt = PKT_LOC) {
     uint8_t frame[1 + MAX_PAYLOAD];
     if (mlen > MAX_PAYLOAD - HEADER_BYTES) return;
     node_id_t   nh = router ? router->next_hop(dst) : 0;
@@ -905,7 +908,7 @@ static void send_loc_unicast(node_id_t dst, const uint8_t* msg, uint16_t mlen) {
     link.prev_hop = (router && nh) ? router->my_alias_for(nh) : LINK_ADDR_NONE;
     link.next_hop = (na != LINK_ADDR_NONE) ? na : LINK_ADDR_BROADCAST;
     link.link_seq = (uint8_t)loc_pktid; link.flags = 0;
-    NetHeader net; net.ver_type = net_ver_type(PKT_LOC); net.flags = 0; net.ttl = DEFAULT_TTL;
+    NetHeader net; net.ver_type = net_ver_type(pt); net.flags = 0; net.ttl = DEFAULT_TTL;
     net.dst = dst; net.src = my_id; net.pkt_id = loc_pktid;
     memcpy(frame, &link, sizeof(link));
     memcpy(frame + sizeof(link), &net, sizeof(net));
@@ -999,6 +1002,101 @@ static void loc_dump_to_client() {
 }
 
 // Handle a received PKT_LOC frame (REGISTER/QUERY flood, or REPLY unicast).
+// --- sparse telemetry: BATT flood + STATUS query/reply (lib/mesh/telemetry) ----
+static mesh::TelemCache telem_cache;
+static uint32_t next_batt_flood_ms = 0;     // ~6 h jittered; first report ~2 min after boot
+static uint32_t last_status_reply_ms = 0;   // rate limit BY TARGET: one reply / 30 s, any asker
+static const uint32_t TELEM_BATT_PERIOD_MS  = 6UL * 3600UL * 1000UL;
+static const uint32_t STATUS_REPLY_COOLDOWN_MS = 30000;
+
+static void telem_flood_batt() {
+    if (batt_scale <= 0.0f) return;          // nothing honest to report
+    uint8_t m[8];
+    uint16_t n = mesh::telem_build_batt(batt_last_mv,
+                                        (uint8_t)(batt_pct(batt_last_mv) + 1), m, sizeof(m));
+    if (n) send_loc_flood(m, n, DEFAULT_TTL, PKT_TELEM);
+    telem_cache.upsert(my_id, batt_last_mv, (uint8_t)(batt_pct(batt_last_mv) + 1), millis());
+}
+
+static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
+    char line[96];
+    if (m.pct_plus1)
+        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin batt=%umV/%u%%",
+                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min,
+                 (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1));
+    else
+        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin batt=?",
+                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min);
+#ifdef AGN_BLE
+    if (ble_connected) bleuart.println(line);
+#endif
+    Serial.println(line);
+    for (uint8_t i = 0; i < m.n_nbrs; i++) {
+        snprintf(line, sizeof(line), "  nbr %08lX q_rx=%u q_tx=%u",
+                 (unsigned long)m.nbrs[i].id, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx);
+#ifdef AGN_BLE
+        if (ble_connected) bleuart.println(line);
+#endif
+        Serial.println(line);
+    }
+}
+
+static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, const LinkHeader& lh) {
+    const uint8_t* pay = buf + HEADER_BYTES;
+    uint16_t plen = (uint16_t)(len - HEADER_BYTES);
+    mesh::TelemMsg m;
+    if (!mesh::telem_parse(pay, plen, &m)) return;
+
+    if (net.dst == NODE_ID_BROADCAST) {                  // BATT / QUERY flood
+        if (loc_flood_seen(net.src, net.pkt_id)) return; // shared flood-dedup ring
+        loc_flood_mark(net.src, net.pkt_id);
+        if (m.kind == mesh::TELEM_BATT) {
+            telem_cache.upsert(net.src, m.mv, m.pct_plus1, millis());
+        } else if (m.kind == mesh::TELEM_QUERY && m.target == my_id) {
+            // Rate-limited by US, not by asker (asker ids are spoofable): bounds the
+            // airtime a query flood can extract from this node, per the plan's
+            // security posture.
+            if ((int32_t)(millis() - last_status_reply_ms) >= (int32_t)STATUS_REPLY_COOLDOWN_MS) {
+                last_status_reply_ms = millis();
+                mesh::TelemNbr nbrs[mesh::TELEM_NBR_MAX];
+                uint8_t nn = 0;
+                if (router) {
+                    const mesh::NeighborTable& nt = router->neighbors();
+                    for (uint8_t i = 0; i < mesh::MAX_NEIGHBORS && nn < mesh::TELEM_NBR_MAX; i++) {
+                        const mesh::Neighbor* nb = nt.at(i);
+                        if (!nb->used) continue;
+                        nbrs[nn].id   = nb->id;
+                        nbrs[nn].q_rx = (uint8_t)(nb->q_rx > 0 ? nb->q_rx * 100 : 0);
+                        nbrs[nn].q_tx = (uint8_t)(nb->q_tx > 0 ? nb->q_tx * 100 : 0);
+                        nn++;
+                    }
+                }
+                uint8_t r[8 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 6];
+                uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
+                uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
+                        (uint16_t)((millis() - boot_ms) / 60000u), AGN_FW_VERSION,
+                        nbrs, nn, r, sizeof(r));
+                if (rlen) send_loc_unicast(net.src, r, rlen, PKT_TELEM);
+            }
+        }
+        if (net.ttl > 1) loc_reflood(buf, len, (uint8_t)(net.ttl - 1));
+        return;
+    }
+
+    // REPLY: DV-routed unicast — deliver to us, or forward onward.
+    if (!forwarder) return;
+    mesh::PacketRef p{ net.src, net.dst, net.pkt_id, net.ttl };
+    mesh::Decision d = forwarder->decide(p);
+    if (d.action == mesh::Action::DELIVER) {
+        if (m.kind == mesh::TELEM_REPLY) {
+            telem_cache.upsert(net.src, m.mv, m.pct_plus1, millis());
+            telem_print_status(net.src, m);
+        }
+    } else if (d.action == mesh::Action::FORWARD && lh.next_hop != LINK_ADDR_BROADCAST) {
+        forward_frame(buf, len, d.next_hop, d.out_ttl);
+    }
+}
+
 static void on_loc_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, const LinkHeader& lh) {
     const uint8_t* pay = buf + HEADER_BYTES;
     uint16_t plen = (uint16_t)(len - HEADER_BYTES);
@@ -1116,6 +1214,12 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     // --- LOC: distributed locator directory (REGISTER/QUERY flood, REPLY unicast) ---
     if (type == PKT_LOC) {
         on_loc_rx(buf, len, net, lh);
+        return;
+    }
+
+    // --- TELEM: sparse battery floods + on-demand status query/reply ---
+    if (type == PKT_TELEM) {
+        on_telem_rx(buf, len, net, lh);
         return;
     }
 
@@ -1680,6 +1784,29 @@ static void handle_command(char* line) {
         }
         Serial.println(l);
 #endif
+    } else if (!strcmp(cmd, "status")) {       // status <node8hex> — on-demand remote telemetry
+        char* a = strtok(nullptr, " ");
+        node_id_t t = a ? parse_id(a) : 0;
+        if (!t) { Serial.println("usage: status <node id, 8 hex>"); return; }
+        if (t == my_id) { Serial.println("that's this node — see `info`"); return; }
+        uint8_t q[8];
+        uint16_t n = mesh::telem_build_query(t, q, sizeof(q));
+        if (n) { send_loc_flood(q, n, DEFAULT_TTL, PKT_TELEM); Serial.println("status query sent"); }
+    } else if (!strcmp(cmd, "battdump")) {     // last-known battery for every node (cached)
+        mesh::TelemCache::View v[mesh::TELEM_CACHE_CAP];
+        uint16_t n = telem_cache.snapshot(v, mesh::TELEM_CACHE_CAP, millis());
+        char l[72];
+        for (uint16_t i = 0; i < n; i++) {
+            if (v[i].pct_plus1)
+                snprintf(l, sizeof(l), "[batt] %08lX mv=%u pct=%u age=%lus",
+                         (unsigned long)v[i].origin, (unsigned)v[i].mv,
+                         (unsigned)(v[i].pct_plus1 - 1), (unsigned long)(v[i].age_ms / 1000u));
+            else
+                snprintf(l, sizeof(l), "[batt] %08lX UNKNOWN age=%lus",
+                         (unsigned long)v[i].origin, (unsigned long)(v[i].age_ms / 1000u));
+            Serial.println(l);
+        }
+        if (!n) Serial.println("[batt] no reports cached yet");
     } else if (!strcmp(cmd, "nbrdump")) {      // announce-derived 1-hop topology (map app)
         char l[96];
         for (auto& c : ann_cache) {
@@ -1771,7 +1898,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off]");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | status <id> | battdump");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
@@ -1993,6 +2120,14 @@ static void agn_loop_once() {
         for (auto& r : my_regs) if (r.used) loc_register(r.id, r.id_len);
         next_rereg_ms = millis() + LOC_REREG_MS;
     }
+    // Sparse battery telemetry: first flood ~2 min after boot (fresh node reports
+    // soon), then every ~6 h with jitter — 4 tiny floods/day (plan §6).
+    if (next_batt_flood_ms == 0) next_batt_flood_ms = millis() + 120000;
+    if (batt_scale > 0.0f && (int32_t)(millis() - next_batt_flood_ms) >= 0) {
+        telem_flood_batt();
+        next_batt_flood_ms = millis() + TELEM_BATT_PERIOD_MS + (uint32_t)random(0, 1800000);
+    }
+
     // Fresh-registration burst (see reg_burst_left): re-flood early so a lost
     // broadcast costs seconds, not the LOC_REREG_MS refresh period.
     if (reg_burst_left && (int32_t)(millis() - reg_burst_ms) >= 0) {

@@ -42,6 +42,7 @@ enum PacketType : uint8_t {
     PKT_ACK     = 2,  // end-to-end acknowledgement
     PKT_BEACON  = 3,  // neighbour discovery + piggybacked link metrics / DV updates
     PKT_LOC     = 4,  // distributed locator directory (REGISTER flood / QUERY flood / REPLY unicast)
+    PKT_TELEM   = 5,  // sparse telemetry (BATT flood / STATUS query flood / STATUS reply unicast)
 };
 
 // NetHeader.flags bits.
