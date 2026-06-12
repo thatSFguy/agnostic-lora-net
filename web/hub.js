@@ -126,28 +126,43 @@ function makeConn() {
 }
 
 // ---------- provisioning ----------
-let prov = makeConn(), provNodeId = null;
+let prov = makeConn(), provNodeId = null, provConnected = false;
+function plog(m){ const el=$('provLog'); el.textContent=(el.textContent+m+'\n').split('\n').slice(-200).join('\n'); el.scrollTop=el.scrollHeight; }
+function mark(id, state, text){ const e=$(id); e.textContent=text; e.className='pill'+(state?' '+state:''); }
 prov.onLine = t => {
-  log('  '+t);
+  plog(t);
   let m;
   if ((m=t.match(/node[= ]([0-9A-F]{8})/i)) || (m=t.match(/AgnLoRa-([0-9A-F]{8})/i))) {
     provNodeId = m[1].toUpperCase(); $('provNode').textContent = provNodeId; $('provNode').className='pill ok';
   }
+  // node confirmations -> green checkmarks
+  if (/BLE PIN=\d{6}/.test(t) || /advertising=1/.test(t)) mark('ck-pin','ok','✓ PIN set, BLE on');
+  if (/ctrlkey set/i.test(t))   mark('ck-key','ok','✓ provisioned');
+  if (/ctrlkey [0-9A-F]{2}/i.test(t)) mark('ck-key','ok','✓ key present on node');
+  if (/REJECTED|none \(control/i.test(t)) mark('ck-key','bad','not set');
+  if (/\[rf\].*\(active\)/.test(t)) mark('ck-rf','ok','✓ applied');
 };
 async function provConnect(kind) {
+  $('provLog').textContent='';
   try { const label = await (kind==='usb'?prov.serial():prov.ble()); $('provNode').textContent=label;
-    setTimeout(()=>prov.send('info'), 400);
-  } catch(e){ log('connect: '+e); }
+    provConnected = true; plog('connected — reading node…'); setTimeout(()=>prov.send('info'), 400);
+  } catch(e){ plog('connect failed: '+e); }
 }
-function provDisconnect(){ prov.close(); provNodeId=null; }
+function provDisconnect(){ prov.close(); provNodeId=null; provConnected=false;
+  for (const id of ['ck-pin','ck-key']) mark(id,'','pending'); mark('ck-rf','','unchanged'); }
+function needConn(){ if(!provConnected){ plog('⚠ connect to the node first (USB or BLE)'); return false; } return true; }
 $('provConnectUsb').onclick=()=>provConnect('usb');
 $('provConnectBle').onclick=()=>provConnect('ble');
-$('setPin').onclick=async()=>{ const p=$('pin').value.trim(); if(!/^\d{6}$/.test(p)){log('PIN must be 6 digits');return;}
-  await prov.send('blepin '+p); await prov.send('ble on'); log('→ PIN set, BLE enabled'); };
-$('provKey').onclick=async()=>{ if(!ctrlKeys){log('no controller key');return;} await prov.send('ctrlkey '+ctrlKeys.pubHex);
-  log('→ controller key provisioned'); };
-$('applyRf').onclick=async()=>{ await prov.send('rf sf '+$('sf').value); await prov.send('rf power '+$('pwr').value);
-  await prov.send('rf apply'); log('→ radio applied (SF'+$('sf').value+' / '+$('pwr').value+' dBm)'); };
+$('setPin').onclick=async()=>{ if(!needConn())return; const p=$('pin').value.trim(); if(!/^\d{6}$/.test(p)){plog('PIN must be 6 digits');return;}
+  mark('ck-pin','warn','setting…'); await prov.send('blepin '+p); await prov.send('ble on'); plog('→ sent blepin + ble on'); };
+$('provKey').onclick=async()=>{ if(!needConn())return; if(!ctrlKeys){plog('no controller key');return;}
+  mark('ck-key','warn','setting…'); await prov.send('ctrlkey '+ctrlKeys.pubHex); plog('→ sent ctrlkey '+ctrlKeys.pubHex.slice(0,8)+'…'); };
+$('applyRf').onclick=async()=>{ if(!needConn())return; mark('ck-rf','warn','applying…');
+  await prov.send('rf sf '+$('sf').value); await prov.send('rf power '+$('pwr').value);
+  await prov.send('rf apply'); await prov.send('rf show'); plog('→ sent rf sf/power/apply'); };
+// Re-read the node and confirm what actually stuck.
+$('verifyProv').onclick=async()=>{ if(!needConn())return; plog('— verifying —');
+  await prov.send('ctrlkey'); await prov.send('ble'); await prov.send('rf show'); };
 
 // ---------- configure tab ----------
 let cfg = makeConn();

@@ -95,7 +95,10 @@
     </div>
     <p class="hint">Leave firmware source blank to fetch the latest GitHub release, or point it at a
       local folder (e.g. <code>./fw/</code>) for development.</p>
-    <button class="act primary" onclick="doFlash()">Connect &amp; flash →</button>
+    <div class="row">
+      <button class="act primary" onclick="doFlash()">Connect &amp; flash →</button>
+      <button class="act" onclick="setStep(3)">Skip — already flashed, just provision →</button>
+    </div>
   </div>
 
   <!-- step 2 progress -->
@@ -126,22 +129,25 @@
       <button class="act" id="provConnectBle">Connect (BLE)</button>
       <span id="provNode" class="pill">not connected</span>
     </div>
-    <h3>1 · BLE pairing PIN</h3>
+    <h3>1 · BLE pairing PIN <span id="ck-pin" class="pill">pending</span></h3>
     <div class="row">
       <input type="text" id="pin" maxlength="6" placeholder="6 digits" value="123456" style="width:8rem">
       <button class="act" id="setPin">Set PIN &amp; enable BLE</button>
     </div>
-    <h3>2 · Controller key (remote admin)</h3>
+    <h3>2 · Controller key (remote admin) <span id="ck-key" class="pill">pending</span></h3>
     <p class="hint">This browser’s Ed25519 public key. Provisioning it lets you change this node’s
       settings remotely (signed). <span class="mono" id="pubShort"></span></p>
     <button class="act" id="provKey">Provision controller key</button>
-    <h3>3 · Radio (optional)</h3>
+    <h3>3 · Radio (optional) <span id="ck-rf" class="pill">unchanged</span></h3>
     <div class="row">
       <label>SF <select id="sf"><option>7</option><option>8</option><option selected>9</option><option>10</option><option>11</option><option>12</option></select></label>
       <label>Power <input type="number" id="pwr" value="22" min="-9" max="22" style="width:5rem"> dBm</label>
       <button class="act" id="applyRf">Apply</button>
     </div>
+    <div id="provLog" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dim);
+         white-space:pre-wrap;background:#0b1118;border-radius:8px;padding:10px;max-height:160px;overflow:auto;margin-top:12px"></div>
     <div class="row" style="margin-top:14px">
+      <button class="act" id="verifyProv">Verify provisioning</button>
       <button class="act primary" onclick="markReady()">Done → mark ready</button>
     </div>
   </div>
