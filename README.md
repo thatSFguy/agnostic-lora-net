@@ -156,6 +156,21 @@ default, and a 6-digit pairing PIN is set per node. Management is **out-of-band 
 `ble on|off`, `blepin [random|<6 digits>]`. The PIN is shown **on demand only**
 (never in periodic output).
 
+## Commissioning hub & web apps (zero install)
+
+A hosted single-page **commissioning hub** ([`web/index.html`](web/index.html), served on
+GitHub Pages) flashes, provisions, and hands off nodes for remote administration:
+
+1. **Flash** — in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a faithful port of
+   adafruit-nrfutil's protocol, verified byte-for-byte) with **UF2 drag-drop fallback**.
+2. **Provision** — set the BLE PIN and bind the node to this browser's Ed25519
+   **controller key**, so it's ready for signed remote management.
+3. **Manage** — the live mesh map ([`web/map.html`](web/map.html)).
+
+Firmware is fetched from the latest GitHub release (UF2 + `.dfu.json` are published per
+board). Web Serial / Web Bluetooth need a secure context — GitHub Pages (HTTPS) or
+`localhost` both qualify.
+
 ## Web apps (zero install)
 
 Both are single files served from the repo — Web Serial / Web Bluetooth need a

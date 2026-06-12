@@ -47,9 +47,12 @@
          max-height:160px; overflow:auto; background:#0d131b; border-radius:6px; padding:6px; }
   .linkrow { padding:4px 6px; border-radius:5px; font-size:12.5px; cursor:pointer; }
   .linkrow:hover { background:#222c39; }
-  .nodelabel { background:#16202e; border:2px solid #555; border-radius:8px; padding:1px 6px;
-               font:600 11px ui-monospace,monospace; color:#dfe7f1; white-space:nowrap; box-shadow:0 1px 4px #0009; }
-  .nodelabel small { font-weight:400; color:#9fb4cc; }
+  .nodelabel { display:inline-flex; align-items:center; gap:5px; background:#0d1622f2;
+               border:2px solid #555; border-radius:999px; padding:3px 11px;
+               font:700 12.5px ui-monospace,monospace; color:#fff; white-space:nowrap;
+               box-shadow:0 2px 8px #000a; text-shadow:0 1px 2px #000; }
+  .nodelabel small { font-weight:500; color:#bcd2ea; }
+  .nodelabel .gw { color:var(--acc); }
   .leaflet-container { background:#0a0e13; }
   .hint { font-size:12px; color:var(--dim); }
   .asym-badge { font-size:14px; text-shadow:0 0 3px #000; }
@@ -255,6 +258,7 @@ function onLine(line) {
   if ((m = t.match(/^\[ctrl\] ack ([0-9A-F]{8}) cmd=(\d+) applied=(-?\d+) provisional=(\d)/i))) {
     const origin = m[1].toUpperCase(), applied = +m[3], prov = m[4] === '1';
     const n = node(origin); n.power = applied; n.lastSeen = now;
+    ctrlPending.delete(origin+'@');          // ack arrived — cancel the no-ack warning
     logLine(`✓ ${origin} power=${applied} dBm${prov ? ' (provisional — confirming…)' : ' (persisted)'}`);
     if (prov && ctrlPending.get(origin) === applied)
       ctrlSend(2, origin, applied);          // CONFIRM disarms the node's revert
@@ -267,10 +271,10 @@ function onLine(line) {
     if (!n.batt || (n.batt.at || 0) <= at) n.batt = { mv:+m[2], pct:+m[3], at };
     return;
   }
-  if ((m = t.match(/^\[status\] ([0-9A-F]{8}) fw=(\S+) up=(\d+)min batt=(?:(\d+)mV\/(\d+)%|\?)/i))) {
+  if ((m = t.match(/^\[status\] ([0-9A-F]{8}) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV\/(\d+)%|\?)/i))) {
     const n = node(m[1].toUpperCase());
-    n.lastSeen = now; n.fw = m[2];
-    if (m[4] !== undefined) n.batt = { mv:+m[4], pct:+m[5], at: now };
+    n.lastSeen = now; n.fw = m[2]; n.sf = +m[4]; n.power = +m[5];
+    if (m[6] !== undefined) n.batt = { mv:+m[6], pct:+m[7], at: now };
     nbrsCtx = m[1].toUpperCase();      // following 'nbr ID q_rx=N q_tx=N' lines belong to it
     statusCtx = true;
     render(); return;
@@ -314,12 +318,13 @@ function markerFor(id) {
   return mk;
 }
 function nodeIcon(n) {
-  const battTxt = n.batt && n.batt.pct !== undefined ? `<small> ${n.batt.pct}%</small>` : '';
-  const gwTxt = n.isGateway ? '<small> ⌂</small>' : '';
+  const battTxt = n.batt && n.batt.pct !== undefined ? `<small>${n.batt.pct}%</small>` : '';
+  const gwTxt = n.isGateway ? '<small class="gw">⌂</small>' : '';
   const border = n.isGateway ? 'var(--acc)' : freshColor(n);
+  const sel = (selected === n.id) ? ';outline:2px solid var(--acc);outline-offset:2px' : '';
   return L.divIcon({ className: '',
-    html: `<div class="nodelabel" style="border-color:${border}">${n.id.slice(-4)}${gwTxt}${battTxt}</div>`,
-    iconAnchor: [22, 10] });
+    html: `<div class="nodelabel" style="border-color:${border}${sel}">${n.id.slice(-4)}${gwTxt}${battTxt}</div>`,
+    iconAnchor: [30, 13] });
 }
 function savePos() { localStorage.setItem('agn-node-pos', JSON.stringify(positions)); }
 
@@ -459,6 +464,11 @@ function renderHealth() {
 
 function renderDetail() {
   const el = $('detail');
+  // Don't rebuild the panel out from under the user: if a control inside it has
+  // focus (typing a power value, etc.), the periodic refresh would wipe the
+  // input. Skip the rebuild while they're interacting; it resumes on blur.
+  if (el.contains(document.activeElement) &&
+      /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
   if (!selected || !nodes.has(selected)) { el.innerHTML = '<span class="hint">Click a node on the map or in the list.</span>'; return; }
   const n = nodes.get(selected);
   const isGw = n.isGateway;
@@ -472,7 +482,7 @@ function renderDetail() {
       <div>fw</div><div>${n.fw || '—'}</div>
       <div>last seen</div><div>${n.lastSeen ? Math.round((Date.now() - n.lastSeen) / 1000) + ' s ago' : '—'}</div>
       <div>battery</div><div>${batt}</div>
-      <div>SF / power</div><div>${n.sf ? 'SF' + n.sf + ' / ' + n.power + ' dBm' : '—'}</div>
+      <div>SF / power</div><div>${n.sf!=null ? 'SF' + n.sf : '—'}${n.power!=null ? ' / ' + n.power + ' dBm' : ''}</div>
       <div>links</div><div>${Object.keys(n.hears).length} inbound known</div>
     </div>
     <h2>Hears (inbound)</h2>
@@ -507,7 +517,7 @@ function renderDetail() {
        (<span class="mono">ctrlkey</span> at install). Power decreases auto-revert in 60 s
        unless confirmed — the map confirms automatically on the ack.</div>
        <div style="display:flex; gap:6px; margin-top:6px; align-items:center;">
-         <input type="number" id="pwrSet" min="-9" max="22" value="${n.power ?? 22}" style="width:6rem">
+         <input type="number" id="pwrSet" min="-9" max="22" value="${n.power ?? ''}" placeholder="${n.power==null?'unknown':''}" style="width:6rem">
          <span class="hint">dBm</span>
          <button id="pwrApply">Set power</button>
        </div>`}
@@ -517,6 +527,16 @@ function renderDetail() {
     const v = Math.max(-9, Math.min(22, +el.querySelector('#pwrSet').value));
     ctrlPending.set(n.id, v);
     ctrlSend(1, n.id, v);
+    // Surface silent rejection: a remote node logs accept/reject on ITS console,
+    // not the gateway's, so without an ack the operator is blind. If no ack lands
+    // in 8 s, warn (almost always: node not provisioned with this controller key,
+    // or — pre-fix — a replay-counter desync).
+    const askedAt = Date.now(); ctrlPending.set(n.id+'@', askedAt);
+    setTimeout(() => {
+      if (ctrlPending.get(n.id+'@') === askedAt) {   // still no ack
+        logLine('⚠ no ack from '+n.id+' — is it provisioned with this browser’s controller key? (ctrlkey on that node)');
+      }
+    }, 8000);
   };
   el.querySelectorAll('[data-nid]').forEach(r => r.onclick = () => {
     select(r.dataset.nid);
@@ -558,7 +578,11 @@ async function ctrlInit() {
 ctrlInit();
 
 function ctrlNextCounter() {
-  const c = (parseInt(localStorage.getItem('agn-ctrl-counter') || '0', 10) || 0) + 1;
+  // Wall-clock seconds, but strictly greater than the last value we used — so the
+  // counter can NEVER desync below a node's replay floor (the bug that silently
+  // rejected commands when localStorage reset). u32-safe until 2106.
+  const last = parseInt(localStorage.getItem('agn-ctrl-counter') || '0', 10) || 0;
+  const c = Math.max(last + 1, Math.floor(Date.now() / 1000));
   localStorage.setItem('agn-ctrl-counter', String(c));
   return c;
 }

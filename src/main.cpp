@@ -1197,12 +1197,12 @@ static void telem_flood_batt() {
 static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
     char line[96];
     if (m.pct_plus1)
-        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin batt=%umV/%u%%",
-                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min,
-                 (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1));
+        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%%",
+                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf,
+                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1));
     else
-        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin batt=?",
-                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min);
+        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=?",
+                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm);
 #ifdef AGN_BLE
     if (ble_connected) bleuart.println(line);
 #endif
@@ -1250,7 +1250,8 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                 uint8_t r[8 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 6];
                 uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
                 uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
-                        (uint16_t)((millis() - boot_ms) / 60000u), AGN_FW_VERSION,
+                        (uint16_t)((millis() - boot_ms) / 60000u),
+                        radio.config().power_dbm, radio.config().sf, AGN_FW_VERSION,
                         nbrs, nn, r, sizeof(r));
                 if (rlen) send_loc_unicast(net.src, r, rlen, PKT_TELEM);
             }

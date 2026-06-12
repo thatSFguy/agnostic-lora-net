@@ -13,3 +13,4 @@ reticulum/inst_*/
 
 # Test artifacts (received transfers); test_orig.png is kept as the input fixture
 test_recv*.png
+web/fw/

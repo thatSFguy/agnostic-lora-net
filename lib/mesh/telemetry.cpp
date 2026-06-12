@@ -20,18 +20,21 @@ uint16_t telem_build_query(node_id_t target, uint8_t* out, uint16_t cap) {
 }
 
 uint16_t telem_build_reply(uint16_t mv, uint8_t pct_plus1, uint16_t uptime_min,
+                           int8_t power_dbm, uint8_t sf,
                            const char* fw, const TelemNbr* nbrs, uint8_t n_nbrs,
                            uint8_t* out, uint16_t cap) {
     uint8_t fw_len = 0;
     while (fw && fw[fw_len] && fw_len < TELEM_FW_MAX) fw_len++;
     if (n_nbrs > TELEM_NBR_MAX) n_nbrs = TELEM_NBR_MAX;
-    uint16_t need = (uint16_t)(7 + fw_len + 1 + n_nbrs * 6);
+    uint16_t need = (uint16_t)(9 + fw_len + 1 + n_nbrs * 6);
     if (cap < need) return 0;
     uint8_t* p = out;
     *p++ = TELEM_REPLY;
     put_u16(p, mv); p += 2;
     *p++ = pct_plus1;
     put_u16(p, uptime_min); p += 2;
+    *p++ = (uint8_t)power_dbm;
+    *p++ = sf;
     *p++ = fw_len;
     memcpy(p, fw, fw_len); p += fw_len;
     *p++ = n_nbrs;
@@ -57,11 +60,13 @@ bool telem_parse(const uint8_t* msg, uint16_t len, TelemMsg* out) {
             out->target = (node_id_t)get_u32(msg + 1);
             return out->target != 0;
         case TELEM_REPLY: {
-            if (len < 8) return false;
+            if (len < 10) return false;
             const uint8_t* p = msg + 1;
             out->mv = get_u16(p); p += 2;
             out->pct_plus1 = *p++;
             out->uptime_min = get_u16(p); p += 2;
+            out->power_dbm = (int8_t)*p++;
+            out->sf = *p++;
             uint8_t fw_len = *p++;
             if (fw_len > TELEM_FW_MAX || (uint16_t)(p - msg) + fw_len + 1 > len) return false;
             memcpy(out->fw, p, fw_len); out->fw[fw_len] = 0; p += fw_len;

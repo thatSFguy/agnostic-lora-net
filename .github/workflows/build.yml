@@ -47,6 +47,12 @@ jobs:
           python "$UF2CONV" .pio/build/promicro/firmware.hex       -c -f 0xADA52840 -o agn-promicro.uf2
           ls -la agn-rak.uf2 agn-xiao.uf2 agn-promicro.uf2
 
+      - name: Package DFU JSON (for the in-browser web flasher)
+        run: |
+          python scripts/mk_dfu_json.py .pio/build/wiscore_rak4631/firmware.zip agn-rak.dfu.json
+          python scripts/mk_dfu_json.py .pio/build/xiao_nrf52/firmware.zip      agn-xiao.dfu.json
+          python scripts/mk_dfu_json.py .pio/build/promicro/firmware.zip        agn-promicro.dfu.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-uf2
@@ -54,6 +60,9 @@ jobs:
             agn-rak.uf2
             agn-xiao.uf2
             agn-promicro.uf2
+            agn-rak.dfu.json
+            agn-xiao.dfu.json
+            agn-promicro.dfu.json
 
       - name: Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -63,4 +72,7 @@ jobs:
             agn-rak.uf2
             agn-xiao.uf2
             agn-promicro.uf2
+            agn-rak.dfu.json
+            agn-xiao.dfu.json
+            agn-promicro.dfu.json
           generate_release_notes: true

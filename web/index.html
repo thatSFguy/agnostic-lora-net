@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<!-- index.html — AgnLoRa commissioning hub. Flash, provision, and hand off to
+     management, all in one page. Hosted on GitHub Pages (HTTPS = the secure
+     context Web Serial / Web Bluetooth require).
+
+     Flash:    in-browser nRF52 serial DFU (web/nrf-dfu.js), UF2 drag-drop fallback.
+     Provision: BLE PIN + controller pubkey (`ctrlkey`) -> node ready for remote admin.
+     Manage:   the live mesh map (map.html).                                          -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgnLoRa — node commissioning hub</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="nrf-dfu.js"></script>
+<style>
+  :root { --bg:#0f1620; --panel:#19222e; --line:#2b3645; --fg:#e6edf5; --dim:#8b98aa;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { background:linear-gradient(90deg,#13233b,#19222e); border-bottom:1px solid var(--line);
+           padding:14px 20px; display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:18px; margin:0; } header .sub { color:var(--dim); font-size:13px; }
+  nav { display:flex; gap:4px; margin-left:auto; }
+  nav button { background:transparent; border:1px solid transparent; color:var(--dim);
+               padding:7px 14px; border-radius:8px; cursor:pointer; font-size:14px; }
+  nav button.on { background:#21304a; color:var(--fg); border-color:var(--line); }
+  main { max-width:840px; margin:0 auto; padding:22px 20px 60px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+          padding:18px 20px; margin:0 0 18px; }
+  h2 { font-size:15px; margin:0 0 4px; } h3 { font-size:13px; color:var(--dim); text-transform:uppercase;
+       letter-spacing:.05em; margin:18px 0 8px; }
+  p.hint { color:var(--dim); font-size:13.5px; margin:4px 0 12px; }
+  button.act { background:#21304a; color:var(--fg); border:1px solid var(--line); border-radius:8px;
+               padding:9px 16px; font-size:14px; cursor:pointer; }
+  button.act:hover { background:#2a3d5e; } button.act:disabled { opacity:.4; cursor:default; }
+  button.primary { background:var(--acc); color:#06121f; border-color:var(--acc); font-weight:600; }
+  button.primary:hover { background:#7cb8ff; }
+  select, input[type=text], input[type=number], input[type=password] {
+    background:#0e1722; color:var(--fg); border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; font-size:14px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .steps { display:flex; gap:6px; margin:0 0 18px; }
+  .steps div { flex:1; text-align:center; font-size:12px; color:var(--dim); padding:6px 4px;
+               border-bottom:2px solid var(--line); }
+  .steps div.on { color:var(--acc); border-color:var(--acc); }
+  .steps div.done { color:var(--ok); border-color:var(--ok); }
+  .bar { height:10px; background:#0e1722; border-radius:6px; overflow:hidden; margin:10px 0; }
+  .bar > div { height:100%; width:0; background:var(--acc); transition:width .2s; }
+  #log { font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim); white-space:pre-wrap;
+         background:#0b1118; border-radius:8px; padding:10px; max-height:200px; overflow:auto; margin-top:10px; }
+  .pill { padding:2px 9px; border-radius:11px; font-size:12px; background:#26303d; color:var(--dim); }
+  .pill.ok { color:var(--ok); } .pill.bad { color:var(--bad); }
+  .mono { font-family:ui-monospace,monospace; }
+  code { background:#0e1722; padding:1px 6px; border-radius:5px; font-size:13px; }
+  a { color:var(--acc); }
+  .hide { display:none; }
+  .ok-box { background:#11261a; border:1px solid #2c5e3c; border-radius:10px; padding:14px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgnLoRa</h1><span class="sub">node commissioning hub</span>
+  <nav>
+    <button id="nav-flash" class="on" onclick="showTab('flash')">Flash &amp; Provision</button>
+    <button id="nav-config" onclick="showTab('config')">Configure</button>
+    <button id="nav-manage" onclick="location.href='map.html'">Monitor &amp; Manage ↗</button>
+  </nav>
+</header>
+<main>
+
+<!-- ============================ FLASH & PROVISION ============================ -->
+<section id="tab-flash">
+  <div class="steps">
+    <div id="st-1" class="on">1 · Board</div>
+    <div id="st-2">2 · Flash</div>
+    <div id="st-3">3 · Provision</div>
+    <div id="st-4">4 · Ready</div>
+  </div>
+
+  <!-- step 1 -->
+  <div class="card" id="step1">
+    <h2>What are you flashing?</h2>
+    <p class="hint">Pick the board, then connect it over USB. New boards arrive in their UF2
+      bootloader; a board already running our firmware is rebooted into it automatically.</p>
+    <div class="row">
+      <select id="board">
+        <option value="rak">RAK4631 (WisBlock)</option>
+        <option value="xiao">XIAO nRF52840 + Wio-SX1262</option>
+        <option value="promicro">Pro Micro nRF52840 (“faketec”)</option>
+      </select>
+      <label class="row" style="margin:0"><input type="checkbox" id="isBoot"> already in bootloader</label>
+    </div>
+    <div class="row">
+      <input type="text" id="fwBase" value="" placeholder="firmware source (blank = latest release)" style="flex:1">
+    </div>
+    <p class="hint">Leave firmware source blank to fetch the latest GitHub release, or point it at a
+      local folder (e.g. <code>./fw/</code>) for development.</p>
+    <button class="act primary" onclick="doFlash()">Connect &amp; flash →</button>
+  </div>
+
+  <!-- step 2 progress -->
+  <div class="card hide" id="step2">
+    <h2>Flashing <span id="flashBoard"></span></h2>
+    <div class="bar"><div id="prog"></div></div>
+    <div id="flashState" class="pill">starting…</div>
+    <div id="log"></div>
+    <div id="uf2Fallback" class="hide" style="margin-top:14px">
+      <h3>Couldn’t auto-flash — UF2 fallback</h3>
+      <p class="hint">Double-tap the board’s reset (or unplug/replug while pressing reset) to mount its
+        bootloader drive, then drag the firmware file onto it. Click Continue when the drive disappears.</p>
+      <div class="row">
+        <button class="act" id="dlUf2">Download firmware (.uf2)</button>
+        <button class="act primary" onclick="afterFlash()">Continue → provision</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- step 3 provision -->
+  <div class="card hide" id="step3">
+    <h2>Provision for remote administration</h2>
+    <p class="hint">Connect to the freshly-flashed node and set it up so you can manage it remotely:
+      a BLE pairing PIN and this browser’s controller key (which authorizes signed remote commands
+      like power changes).</p>
+    <div class="row">
+      <button class="act" id="provConnectUsb">Connect (USB)</button>
+      <button class="act" id="provConnectBle">Connect (BLE)</button>
+      <span id="provNode" class="pill">not connected</span>
+    </div>
+    <h3>1 · BLE pairing PIN</h3>
+    <div class="row">
+      <input type="text" id="pin" maxlength="6" placeholder="6 digits" value="123456" style="width:8rem">
+      <button class="act" id="setPin">Set PIN &amp; enable BLE</button>
+    </div>
+    <h3>2 · Controller key (remote admin)</h3>
+    <p class="hint">This browser’s Ed25519 public key. Provisioning it lets you change this node’s
+      settings remotely (signed). <span class="mono" id="pubShort"></span></p>
+    <button class="act" id="provKey">Provision controller key</button>
+    <h3>3 · Radio (optional)</h3>
+    <div class="row">
+      <label>SF <select id="sf"><option>7</option><option>8</option><option selected>9</option><option>10</option><option>11</option><option>12</option></select></label>
+      <label>Power <input type="number" id="pwr" value="22" min="-9" max="22" style="width:5rem"> dBm</label>
+      <button class="act" id="applyRf">Apply</button>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="act primary" onclick="markReady()">Done → mark ready</button>
+    </div>
+  </div>
+
+  <!-- step 4 ready -->
+  <div class="card hide" id="step4">
+    <div class="ok-box">
+      <h2>✓ <span id="readyNode"></span> is ready for remote administration</h2>
+      <p class="hint" style="margin-bottom:0">Flashed, BLE-paired, and bound to this controller key.
+        Deploy it, then place it on the <a href="map.html">map</a> to monitor and manage it remotely.</p>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="act primary" onclick="resetWizard()">Commission another node</button>
+      <button class="act" onclick="location.href='map.html'">Open the map ↗</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================================ CONFIGURE ================================ -->
+<section id="tab-config" class="hide">
+  <div class="card">
+    <h2>Configure a node</h2>
+    <p class="hint">Direct access to a single node over USB or BLE — the same controls as the
+      provisioning step, plus the raw console. For full monitoring use the
+      <a href="map.html">map</a>.</p>
+    <div class="row">
+      <button class="act" id="cfgUsb">Connect (USB)</button>
+      <button class="act" id="cfgBle">Connect (BLE)</button>
+      <span id="cfgNode" class="pill">not connected</span>
+    </div>
+    <div class="row">
+      <input type="text" id="cfgCmd" placeholder="console command (info, rf show, batt, help…)" style="flex:1" disabled>
+      <button class="act" id="cfgSend" disabled>Send</button>
+    </div>
+    <div id="cfgLog" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dim);
+         white-space:pre-wrap;background:#0b1118;border-radius:8px;padding:10px;max-height:280px;overflow:auto;margin-top:10px"></div>
+  </div>
+</section>
+
+</main>
+<script src="hub.js"></script>
+</body>
+</html>

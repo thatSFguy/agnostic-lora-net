@@ -43,6 +43,8 @@ struct TelemMsg {
     uint8_t   pct_plus1   = 0;     // BATT / REPLY
     node_id_t target      = 0;     // QUERY
     uint16_t  uptime_min  = 0;     // REPLY
+    int8_t    power_dbm   = 0;     // REPLY — current TX power
+    uint8_t   sf          = 0;     // REPLY — current spreading factor
     char      fw[TELEM_FW_MAX + 1] = {};
     uint8_t   n_nbrs      = 0;     // REPLY
     TelemNbr  nbrs[TELEM_NBR_MAX];
@@ -52,6 +54,7 @@ struct TelemMsg {
 uint16_t telem_build_batt(uint16_t mv, uint8_t pct_plus1, uint8_t* out, uint16_t cap);
 uint16_t telem_build_query(node_id_t target, uint8_t* out, uint16_t cap);
 uint16_t telem_build_reply(uint16_t mv, uint8_t pct_plus1, uint16_t uptime_min,
+                           int8_t power_dbm, uint8_t sf,
                            const char* fw, const TelemNbr* nbrs, uint8_t n_nbrs,
                            uint8_t* out, uint16_t cap);
 // Parse any TELEM message. Returns true only for a well-formed message.
