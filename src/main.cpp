@@ -107,6 +107,16 @@ static uint32_t        next_beacon_ms = 0;
 static uint32_t        next_tick_ms   = 0;
 static uint32_t        boot_ms        = 0;
 static uint32_t        led_off_ms     = 0;   // heartbeat-wink off deadline
+// LED polarity differs per board (XIAO is active-LOW, LED_STATE_ON=0; RAK/promicro
+// active-HIGH). Respect it, or the v0.7.2 wink inverts to "mostly on" — solid + a
+// power drain, the opposite of the diet (observed on XIAO).
+#ifndef LED_STATE_ON
+#define LED_STATE_ON 1
+#endif
+#ifdef LED_BUILTIN
+static inline void led_on()  { digitalWrite(LED_BUILTIN, LED_STATE_ON); }
+static inline void led_off() { digitalWrite(LED_BUILTIN, !LED_STATE_ON); }
+#endif
 
 // --- SAR file transfer state (the "app" riding on the backbone) ---
 static uint8_t   sar_buf[mesh::SAR_MAX_FILE];   // outbound load buffer
@@ -2236,7 +2246,7 @@ void setup() {
     boot_ms = millis();
     Serial.begin(115200);
 #ifdef LED_BUILTIN
-    pinMode(LED_BUILTIN, OUTPUT);   // heartbeat / radio-fault indicator (see loop & below)
+    pinMode(LED_BUILTIN, OUTPUT); led_off();   // heartbeat / radio-fault indicator (see loop & below)
 #endif
     // Brief wait for a USB host to attach, so the banner isn't lost — never spin
     // forever (headless nodes have no host).
@@ -2294,8 +2304,8 @@ void setup() {
         uint32_t lastp = 0;
         while (true) {
 #ifdef LED_BUILTIN
-            digitalWrite(LED_BUILTIN, HIGH); delay(100);
-            digitalWrite(LED_BUILTIN, LOW);  delay(100);
+            led_on();  delay(100);
+            led_off(); delay(100);
 #endif
             if (millis() - lastp > 1500) {
                 lastp = millis();
@@ -2348,14 +2358,14 @@ static void agn_loop_once() {
         // A 15 ms wink per heartbeat, not a 50%-duty blink: the old toggle left the
         // LED lit half of all time (~30 mAh/day — as much as the SF9 beacon budget).
         // Solar nodes can't pay mA for decoration. Fault patterns stay loud.
-        digitalWrite(LED_BUILTIN, HIGH);
+        led_on();
         led_off_ms = millis() + 15;
 #endif
         next_hb_ms = millis() + 3000;
     }
 #ifdef LED_BUILTIN
     if (led_off_ms && (int32_t)(millis() - led_off_ms) >= 0) {
-        digitalWrite(LED_BUILTIN, LOW);
+        led_off();
         led_off_ms = 0;
     }
 #endif

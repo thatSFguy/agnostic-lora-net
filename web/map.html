@@ -65,8 +65,8 @@
   <button id="btnBle">Connect gateway (BLE)</button>
   <span id="gwPill" class="pill">no gateway</span>
   <span style="flex:1"></span>
-  <button id="btnExport">Export positions</button>
-  <button id="btnImport">Import</button>
+  <button id="btnExport" title="Backup: positions + controller key (the key is secret!)">Export backup</button>
+  <button id="btnImport" title="Restore positions + controller key from a backup file">Import</button>
   <input type="file" id="impFile" accept=".json" style="display:none">
 </header>
 
@@ -617,14 +617,41 @@ $('btnSerial').onclick = () => connectSerial().catch(e => logLine('error: ' + e)
 $('btnBle').onclick    = () => connectBle().catch(e => logLine('error: ' + e));
 $('cmdSend').onclick   = () => { const v = $('cmd').value.trim(); if (v && gw) { gw.sendLine(v); $('cmd').value = ''; } };
 $('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') $('cmdSend').click(); });
+// Export the full controller identity, not just positions: the Ed25519 key is the
+// network's WRITE CREDENTIAL — without a backup, a cleared browser or dead machine
+// means re-provisioning every node by hand. The file therefore contains the PRIVATE
+// key; treat it like a password.
 $('btnExport').onclick = () => {
-  const blob = new Blob([JSON.stringify(positions, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'node-positions.json'; a.click();
+  const bundle = {
+    _warning: 'CONTAINS THE CONTROLLER PRIVATE KEY — keep this file secret.',
+    exported: new Date().toISOString(),
+    positions,
+    controllerKey: JSON.parse(localStorage.getItem('agn-ctrl-key') || 'null'),
+    controllerCounter: localStorage.getItem('agn-ctrl-counter') || '0',
+  };
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'agnlora-controller-backup.json'; a.click();
 };
 $('btnImport').onclick = () => $('impFile').click();
 $('impFile').onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
-  Object.assign(positions, JSON.parse(await f.text())); savePos(); render();
+  const data = JSON.parse(await f.text());
+  // Accept both the new bundle and the old positions-only file.
+  const pos = data.positions || data;
+  Object.assign(positions, pos); savePos();
+  if (data.controllerKey) {
+    if (localStorage.getItem('agn-ctrl-key') &&
+        !confirm('Replace this browser’s controller key with the imported one? '
+               + 'You manage provisioned nodes with this key — only import a backup of the SAME controller.')) {
+      render(); return;
+    }
+    localStorage.setItem('agn-ctrl-key', JSON.stringify(data.controllerKey));
+    if (data.controllerCounter) localStorage.setItem('agn-ctrl-counter', String(data.controllerCounter));
+    logLine('controller key imported — reload the page to use it.');
+    alert('Controller key imported. Reload the page so the new key takes effect.');
+  }
+  render();
 };
 const legend = L.control({ position: 'bottomright' });
 legend.onAdd = () => {
