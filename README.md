@@ -158,8 +158,15 @@ default, and a 6-digit pairing PIN is set per node. Management is **out-of-band 
 
 ## Commissioning hub & web apps (zero install)
 
-A hosted single-page **commissioning hub** ([`web/index.html`](web/index.html), served on
-GitHub Pages) flashes, provisions, and hands off nodes for remote administration:
+A single-page **commissioning hub** ([`web/index.html`](web/index.html)) flashes,
+provisions, and hands off nodes for remote administration. Run it locally
+(`localhost` is a secure context, so Web Serial / Web Bluetooth work):
+
+```bash
+bash scripts/refresh_web_fw.sh     # build firmware into web/fw/
+python3 -m http.server 8000        # then open http://localhost:8000/web/
+```
+Set the hub's firmware source to `./fw/`. The flow:
 
 1. **Flash** — in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a faithful port of
    adafruit-nrfutil's protocol, verified byte-for-byte) with **UF2 drag-drop fallback**.
@@ -167,9 +174,9 @@ GitHub Pages) flashes, provisions, and hands off nodes for remote administration
    **controller key**, so it's ready for signed remote management.
 3. **Manage** — the live mesh map ([`web/map.html`](web/map.html)).
 
-Firmware is fetched from the latest GitHub release (UF2 + `.dfu.json` are published per
-board). Web Serial / Web Bluetooth need a secure context — GitHub Pages (HTTPS) or
-`localhost` both qualify.
+Firmware comes from `web/fw/` (built by `refresh_web_fw.sh`) or, for a public deploy,
+the latest GitHub release (UF2 + `.dfu.json` are published per board). Web Serial /
+Web Bluetooth need a secure context — `localhost` qualifies.
 
 ## Web apps (zero install)
 
