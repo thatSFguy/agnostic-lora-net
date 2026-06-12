@@ -604,6 +604,8 @@ async function ctrlSend(cmd, targetHex, arg) {
   const hex = [...msg].map(b => b.toString(16).padStart(2,'0')).join('');
   await gw.sendLine('ctrlsend ' + hex);
   logLine(`→ ctrl cmd=${cmd} ${targetHex} arg=${arg} counter=${counter}`);
+  logLine(`   key=${ctrlKeys.pubHex}`);   // so it can be checked against the node's stored key
+  logLine(`   blob=${hex}`);              // copy this + key to verify the signature host-side
   return counter;
 }
 

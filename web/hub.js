@@ -135,17 +135,31 @@ prov.onLine = t => {
   if ((m=t.match(/node[= ]([0-9A-F]{8})/i)) || (m=t.match(/AgnLoRa-([0-9A-F]{8})/i))) {
     provNodeId = m[1].toUpperCase(); $('provNode').textContent = provNodeId; $('provNode').className='pill ok';
   }
-  // node confirmations -> green checkmarks
+  // pre-fill the radio fields from the node's actual settings (was always 22)
+  if ((m=t.match(/\[rf\].*sf=(\d+).*power_dbm=(-?\d+).*\(active\)/))) {
+    $('sf').value = m[1]; $('pwr').value = m[2]; mark('ck-rf','ok','current: SF'+m[1]+' / '+m[2]+' dBm');
+  }
+  // PIN / BLE
   if (/BLE PIN=\d{6}/.test(t) || /advertising=1/.test(t)) mark('ck-pin','ok','✓ PIN set, BLE on');
-  if (/ctrlkey set/i.test(t))   mark('ck-key','ok','✓ provisioned');
-  if (/ctrlkey [0-9A-F]{2}/i.test(t)) mark('ck-key','ok','✓ key present on node');
-  if (/REJECTED|none \(control/i.test(t)) mark('ck-key','bad','not set');
-  if (/\[rf\].*\(active\)/.test(t)) mark('ck-rf','ok','✓ applied');
+  // controller-key confirmations
+  if (/ctrlkey set/i.test(t)) mark('ck-key','ok','✓ provisioned');
+  if (/none \(control/i.test(t)) mark('ck-key','bad','no key on node');
+  // read-back: `ctrlkey AABB..YYZZ counter=N` — compare to THIS browser's key
+  if ((m=t.match(/^ctrlkey ([0-9A-F]{2})([0-9A-F]{2})\.\.([0-9A-F]{2})([0-9A-F]{2}) counter=(\d+)/i)) && ctrlKeys) {
+    const pk = ctrlKeys.pubHex;
+    const match = (m[1]+m[2]).toUpperCase()===pk.slice(0,4) && (m[3]+m[4]).toUpperCase()===pk.slice(-4);
+    mark('ck-key', match?'ok':'bad', match ? '✓ matches this browser (counter '+m[5]+')' : '✗ DIFFERENT key — re-provision');
+    plog(match ? 'verified: node holds THIS browser’s controller key.'
+               : 'MISMATCH: node holds a different key — click “Provision controller key” again.');
+  }
 };
 async function provConnect(kind) {
   $('provLog').textContent='';
   try { const label = await (kind==='usb'?prov.serial():prov.ble()); $('provNode').textContent=label;
-    provConnected = true; plog('connected — reading node…'); setTimeout(()=>prov.send('info'), 400);
+    provConnected = true; plog('connected — reading node…');
+    setTimeout(()=>prov.send('info'), 400);
+    setTimeout(()=>prov.send('rf show'), 800);     // pre-fill radio fields
+    setTimeout(()=>prov.send('ctrlkey'), 1200);    // show whether a key is already present
   } catch(e){ plog('connect failed: '+e); }
 }
 function provDisconnect(){ prov.close(); provNodeId=null; provConnected=false;
@@ -156,7 +170,10 @@ $('provConnectBle').onclick=()=>provConnect('ble');
 $('setPin').onclick=async()=>{ if(!needConn())return; const p=$('pin').value.trim(); if(!/^\d{6}$/.test(p)){plog('PIN must be 6 digits');return;}
   mark('ck-pin','warn','setting…'); await prov.send('blepin '+p); await prov.send('ble on'); plog('→ sent blepin + ble on'); };
 $('provKey').onclick=async()=>{ if(!needConn())return; if(!ctrlKeys){plog('no controller key');return;}
-  mark('ck-key','warn','setting…'); await prov.send('ctrlkey '+ctrlKeys.pubHex); plog('→ sent ctrlkey '+ctrlKeys.pubHex.slice(0,8)+'…'); };
+  mark('ck-key','warn','setting…'); await prov.send('ctrlkey '+ctrlKeys.pubHex);
+  plog('→ sent ctrlkey '+ctrlKeys.pubHex.slice(0,8)+'… (verifying)');
+  setTimeout(()=>prov.send('ctrlkey'), 600);   // read it back -> match/mismatch shown above
+};
 $('applyRf').onclick=async()=>{ if(!needConn())return; mark('ck-rf','warn','applying…');
   await prov.send('rf sf '+$('sf').value); await prov.send('rf power '+$('pwr').value);
   await prov.send('rf apply'); await prov.send('rf show'); plog('→ sent rf sf/power/apply'); };
