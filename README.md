@@ -206,11 +206,12 @@ integration surface for everything:
 
 ## What's left
 
-- **Tier-1 controller** — an RPi driving `block`/`rf` (radio retune)/power/route APIs via
-  signed control packets (the console is its stand-in today). The remote-config design and
-  the **network-wide retune safety protocol** (open a fixed-PIN BLE rescue channel before a
-  critical freq/SF/BW change, field-fix stragglers, then disable BLE remotely) are specified
-  in [`docs/remote-config.md`](docs/remote-config.md).
+- **Tier-1 controller** — signed remote control is **live for TX power** (Ed25519, fw
+  ≥ 0.8.0): the controller key lives in the map app, gets provisioned per node
+  (`ctrlkey`), and commands carry a replay counter; power *decreases* apply
+  provisionally and auto-revert in 60 s unless confirmed, so a remote command can never
+  strand a node. `block`/route/full-rf-retune over the same signed path are next. The
+  network-wide retune safety protocol is in [`docs/remote-config.md`](docs/remote-config.md).
 - **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
   an RNode-compatible BLE front-end backed by the mesh).
 - Polish: pub-key-derived node IDs + signed control plane (§3/§5), FCC handling for the
