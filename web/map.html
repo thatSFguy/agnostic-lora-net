@@ -252,6 +252,15 @@ function onLine(line) {
     node(gatewayId).routes.push({ dst:m[1].toUpperCase(), via:m[2].toUpperCase(), cost:+m[3]/16, hops:+m[4] });
     return;
   }
+  if ((m = t.match(/^\[ctrl\] ack ([0-9A-F]{8}) cmd=(\d+) applied=(-?\d+) provisional=(\d)/i))) {
+    const origin = m[1].toUpperCase(), applied = +m[3], prov = m[4] === '1';
+    const n = node(origin); n.power = applied; n.lastSeen = now;
+    logLine(`✓ ${origin} power=${applied} dBm${prov ? ' (provisional — confirming…)' : ' (persisted)'}`);
+    if (prov && ctrlPending.get(origin) === applied)
+      ctrlSend(2, origin, applied);          // CONFIRM disarms the node's revert
+    if (!prov) ctrlPending.delete(origin);
+    renderDetail(); return;
+  }
   if ((m = t.match(/^\[batt\] ([0-9A-F]{8}) mv=(\d+) pct=(\d+) age=(\d+)s/i))) {
     const n = node(m[1].toUpperCase());
     const at = now - (+m[4]) * 1000;
@@ -486,20 +495,96 @@ function renderDetail() {
       <button id="calBtn">batt cal</button>
     </div>
     <div style="margin-top:6px"><button id="battBtn">read batt now</button></div>
+    <h2>Controller key</h2>
+    <div class="hint">This browser's Ed25519 public key. Provision it on each node
+    (<span class="mono">ctrlkey &lt;key&gt;</span>) to enable signed remote control.</div>
+    <div class="mono" style="word-break:break-all; font-size:11px; margin:4px 0">${ctrlKeys ? ctrlKeys.pubHex : 'generating…'}</div>
+    <button id="provGw">Provision THIS gateway</button>
     <h2>Actions</h2>
-    <div class="hint">rf / ble / block via the console box (left) — gateway only until the signed control plane.</div>`
-    : `<h2 style="margin-top:12px">Remote node</h2>
-       <div class="hint">Telemetry via gateway announces. Management requires walking up (BLE) or Phase C.</div>`}
+    <div class="hint">rf / ble / block via the console box (left). Remote nodes: signed power control on their panel.</div>`
+    : `<h2 style="margin-top:12px">Remote control (signed)</h2>
+       <div class="hint">Requires this browser's controller key provisioned on the node
+       (<span class="mono">ctrlkey</span> at install). Power decreases auto-revert in 60 s
+       unless confirmed — the map confirms automatically on the ack.</div>
+       <div style="display:flex; gap:6px; margin-top:6px; align-items:center;">
+         <input type="number" id="pwrSet" min="-9" max="22" value="${n.power ?? 22}" style="width:6rem">
+         <span class="hint">dBm</span>
+         <button id="pwrApply">Set power</button>
+       </div>`}
   `;
+  const pa = el.querySelector('#pwrApply');
+  if (pa) pa.onclick = () => {
+    const v = Math.max(-9, Math.min(22, +el.querySelector('#pwrSet').value));
+    ctrlPending.set(n.id, v);
+    ctrlSend(1, n.id, v);
+  };
   el.querySelectorAll('[data-nid]').forEach(r => r.onclick = () => {
     select(r.dataset.nid);
     if (positions[r.dataset.nid]) map.panTo(positions[r.dataset.nid]);
   });
+  if (isGw && $('provGw')) $('provGw').onclick = () =>
+    ctrlKeys && gw && gw.sendLine('ctrlkey ' + ctrlKeys.pubHex);
   if (isGw) {
     $('calBtn').onclick = () => { let v = +$('calMv').value; if (v > 0 && v < 10) v = Math.round(v * 1000); if (v >= 1000 && v <= 6000 && gw) gw.sendLine('batt cal ' + v); };
     $('battBtn').onclick = () => gw && gw.sendLine('batt');
   }
 }
+
+// ---------- Tier-1 controller (Ed25519 via WebCrypto) ----------
+// The private key lives in THIS browser (localStorage, PKCS8) — it IS the
+// network's write credential. The pubkey gets provisioned into each node
+// (`ctrlkey <hex>`). Commands carry a strictly-increasing counter (replay
+// floor, persisted both ends).
+const CTRL_DOMAIN = new TextEncoder().encode('AGN-CTRL-1');
+let ctrlKeys = null;     // {priv: CryptoKey, pubHex: string}
+
+async function ctrlInit() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('agn-ctrl-key') || 'null');
+    if (saved) {
+      const priv = await crypto.subtle.importKey('pkcs8',
+        Uint8Array.from(atob(saved.priv), c => c.charCodeAt(0)), {name:'Ed25519'}, true, ['sign']);
+      ctrlKeys = { priv, pubHex: saved.pub };
+    } else {
+      const kp = await crypto.subtle.generateKey({name:'Ed25519'}, true, ['sign','verify']);
+      const priv = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey))));
+      const pub = [...new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))]
+                  .map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase();
+      localStorage.setItem('agn-ctrl-key', JSON.stringify({priv, pub}));
+      ctrlKeys = { priv: kp.privateKey, pubHex: pub };
+    }
+  } catch (e) { logLine('controller crypto unavailable: ' + e); }
+}
+ctrlInit();
+
+function ctrlNextCounter() {
+  const c = (parseInt(localStorage.getItem('agn-ctrl-counter') || '0', 10) || 0) + 1;
+  localStorage.setItem('agn-ctrl-counter', String(c));
+  return c;
+}
+
+// Build + sign + flood one command via the gateway. cmd: 1=POWER, 2=CONFIRM.
+async function ctrlSend(cmd, targetHex, arg) {
+  if (!ctrlKeys || !gw) { logLine('no controller key or gateway'); return null; }
+  const counter = ctrlNextCounter();
+  const u = new Uint8Array(11);
+  u[0] = 1; u[1] = cmd;
+  const t = parseInt(targetHex, 16);
+  u[2]=t&255; u[3]=(t>>8)&255; u[4]=(t>>16)&255; u[5]=(t>>>24)&255;
+  u[6] = arg & 0xFF;
+  u[7]=counter&255; u[8]=(counter>>8)&255; u[9]=(counter>>16)&255; u[10]=(counter>>>24)&255;
+  const view = new Uint8Array(CTRL_DOMAIN.length + 11);
+  view.set(CTRL_DOMAIN); view.set(u, CTRL_DOMAIN.length);
+  const sig = new Uint8Array(await crypto.subtle.sign({name:'Ed25519'}, ctrlKeys.priv, view));
+  const msg = new Uint8Array(75); msg.set(u); msg.set(sig, 11);
+  const hex = [...msg].map(b => b.toString(16).padStart(2,'0')).join('');
+  await gw.sendLine('ctrlsend ' + hex);
+  logLine(`→ ctrl cmd=${cmd} ${targetHex} arg=${arg} counter=${counter}`);
+  return counter;
+}
+
+// Pending provisional power changes awaiting their ack -> auto-CONFIRM.
+const ctrlPending = new Map();   // origin id -> dBm we asked for
 
 // ---------- wire up ----------
 $('btnSerial').onclick = () => connectSerial().catch(e => logLine('error: ' + e));

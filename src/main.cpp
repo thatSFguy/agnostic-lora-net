@@ -24,6 +24,7 @@
 #include "link_arq.h"
 #include "telemetry.h"
 #include "kiss.h"
+#include "control.h"
 #include "sar.h"
 #include "locator_dir.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
@@ -1038,6 +1039,145 @@ static void loc_dump_to_client() {
 }
 
 // Handle a received PKT_LOC frame (REGISTER/QUERY flood, or REPLY unicast).
+// --- Tier-1 signed control plane (lib/mesh/control), power-first --------------
+// The controller's Ed25519 public key is PROVISIONED per node (`ctrlkey <64hex>`,
+// at install over USB/BLE) and persisted with the replay counter. No key = no
+// control surface at all. Power DECREASES apply provisionally and auto-revert in
+// 60 s unless a signed CONFIRM lands — a remote command must never be able to
+// strand the node it talks to.
+static const char     CTRL_PATH[]  = "/agn_ctrl.cfg";
+static const uint32_t CTRL_MAGIC   = 0x4C434741;   // "AGCL"
+struct __attribute__((packed)) CtrlStore { uint32_t magic; uint8_t pubkey[32]; uint32_t counter; };
+static bool     ctrl_have_key = false;
+static uint8_t  ctrl_pubkey[32];
+static uint32_t ctrl_counter = 0;          // replay floor (persisted)
+static int8_t   ctrl_revert_dbm = 0;       // dead-man: power to restore
+static int8_t   ctrl_pending_dbm = 0;      // the provisional value awaiting CONFIRM
+static uint32_t ctrl_revert_ms = 0;        // 0 = disarmed
+static const uint32_t CTRL_REVERT_WINDOW_MS = 60000;
+
+static void ctrl_cfg_load() {
+    InternalFS.begin();
+    CtrlStore rec;
+    File f(InternalFS);
+    if (!f.open(CTRL_PATH, FILE_O_READ)) return;
+    int n = f.read((void*)&rec, sizeof(rec));
+    f.close();
+    if (n == (int)sizeof(rec) && rec.magic == CTRL_MAGIC) {
+        memcpy(ctrl_pubkey, rec.pubkey, 32);
+        ctrl_counter = rec.counter;
+        ctrl_have_key = true;
+    }
+}
+static void ctrl_cfg_save() {
+    CtrlStore want; want.magic = CTRL_MAGIC;
+    memcpy(want.pubkey, ctrl_pubkey, 32); want.counter = ctrl_counter;
+    InternalFS.remove(CTRL_PATH);
+    File f(InternalFS);
+    if (f.open(CTRL_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+static void ctrl_apply_power(int8_t dbm, bool persist) {
+    RadioCfg c = radio.config();
+    c.power_dbm = dbm;
+    if (radio.apply_config(c) == RADIOLIB_ERR_NONE) {
+        rf_work = c;
+        if (persist) rf_save(c);
+    }
+}
+
+// Apply a signature-verified command and ack the controller. reply_to==my_id
+// means a local self-loopback (ack goes to the console, not the air).
+static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
+    char line[96];
+    ctrl_counter = m.counter; ctrl_cfg_save();   // advance the replay floor
+    bool local = (reply_to == my_id);
+    auto ack = [&](int8_t applied, uint8_t prov) {
+        if (local) return;                       // self-loopback: console line below suffices
+        uint8_t a[mesh::CTRL_ACK_BYTES];
+        uint16_t an = mesh::ctrl_build_ack(m.cmd, my_id, applied, prov, m.counter, a, sizeof(a));
+        if (an) send_loc_unicast(reply_to, a, an, PKT_CONTROL);
+    };
+    if (m.cmd == mesh::CTRL_POWER) {
+        int8_t cur = radio.config().power_dbm;
+        int8_t want = m.arg;
+        if (want > LORA_MAX_TX_POWER_DBM) want = LORA_MAX_TX_POWER_DBM;
+        uint8_t prov = 0;
+        if (want < cur) {                        // dead-man: lowering can strand us
+            ctrl_revert_dbm = cur; ctrl_pending_dbm = want;
+            ctrl_revert_ms = millis() + CTRL_REVERT_WINDOW_MS;
+            ctrl_apply_power(want, false);
+            prov = 1;
+        } else {
+            ctrl_apply_power(want, true);
+            ctrl_revert_ms = 0;
+        }
+        snprintf(line, sizeof(line), "[ctrl] POWER %d dBm applied%s (counter=%lu)",
+                 (int)want, prov ? " PROVISIONALLY (60s revert)" : "", (unsigned long)m.counter);
+        Serial.println(line);
+        ack(want, prov);
+    } else if (m.cmd == mesh::CTRL_CONFIRM) {
+        if (ctrl_revert_ms && m.arg == ctrl_pending_dbm) {
+            ctrl_revert_ms = 0;
+            ctrl_apply_power(ctrl_pending_dbm, true);
+            Serial.println("[ctrl] CONFIRM — provisional power persisted");
+            ack(ctrl_pending_dbm, 0);
+        }
+    }
+}
+
+static void on_control_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, const LinkHeader& lh) {
+    const uint8_t* pay = buf + HEADER_BYTES;
+    uint16_t plen = (uint16_t)(len - HEADER_BYTES);
+    char line[96];
+
+    if (net.dst == NODE_ID_BROADCAST) {                  // signed COMMAND flood
+        if (loc_flood_seen(net.src, net.pkt_id)) return;
+        loc_flood_mark(net.src, net.pkt_id);
+        mesh::CtrlMsg m;
+        // Parse cheaply for the target BEFORE the (expensive) signature check so
+        // bystander nodes don't burn ~100 ms of Ed25519 per flooded command —
+        // the TARGET verifies; everyone else just refloods.
+        bool for_me = plen >= mesh::CTRL_MSG_BYTES && ctrl_have_key;
+        if (for_me) {
+            node_id_t tgt; memcpy(&tgt, pay + 2, sizeof(tgt));
+            for_me = (tgt == my_id);
+        }
+        if (for_me) {
+            mesh::CtrlVerdict v = mesh::ctrl_verify(pay, plen, ctrl_pubkey, ctrl_counter, &m);
+            if (v != mesh::CTRL_OK) {
+                // Log locally, NEVER ack a failure (no auth oracle on the air).
+                snprintf(line, sizeof(line), "[ctrl] REJECTED verdict=%u from flood id=%u",
+                         (unsigned)v, (unsigned)net.pkt_id);
+                Serial.println(line);
+            } else {
+                ctrl_apply_verified(m, net.src);     // advances counter, applies, acks
+            }
+        }
+        if (net.ttl > 1) loc_reflood(buf, len, (uint8_t)(net.ttl - 1));
+        return;
+    }
+
+    // Unicast: an ACK coming back to the controller's gateway — deliver or forward.
+    if (!forwarder) return;
+    mesh::PacketRef p{ net.src, net.dst, net.pkt_id, net.ttl };
+    mesh::Decision d = forwarder->decide(p);
+    if (d.action == mesh::Action::DELIVER) {
+        mesh::CtrlAck a;
+        if (mesh::ctrl_parse_ack(pay, plen, &a)) {
+            snprintf(line, sizeof(line), "[ctrl] ack %08lX cmd=%u applied=%d provisional=%u counter=%lu",
+                     (unsigned long)a.origin, (unsigned)a.cmd, (int)a.applied,
+                     (unsigned)a.provisional, (unsigned long)a.counter);
+#ifdef AGN_BLE
+            if (ble_connected) bleuart.println(line);
+#endif
+            Serial.println(line);
+        }
+    } else if (d.action == mesh::Action::FORWARD && lh.next_hop != LINK_ADDR_BROADCAST) {
+        forward_frame(buf, len, d.next_hop, d.out_ttl);
+    }
+}
+
 // --- sparse telemetry: BATT flood + STATUS query/reply (lib/mesh/telemetry) ----
 static mesh::TelemCache telem_cache;
 static uint32_t next_batt_flood_ms = 0;     // ~6 h jittered; first report ~2 min after boot
@@ -1256,6 +1396,12 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     // --- TELEM: sparse battery floods + on-demand status query/reply ---
     if (type == PKT_TELEM) {
         on_telem_rx(buf, len, net, lh);
+        return;
+    }
+
+    // --- CONTROL: signed write path (power-first) ---
+    if (type == PKT_CONTROL) {
+        on_control_rx(buf, len, net, lh);
         return;
     }
 
@@ -1837,6 +1983,43 @@ static void handle_command(char* line) {
         }
         Serial.println(l);
 #endif
+    } else if (!strcmp(cmd, "ctrlkey")) {      // ctrlkey <64hex>|clear — controller pubkey
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "clear")) {
+            ctrl_have_key = false; ctrl_counter = 0;
+            InternalFS.remove(CTRL_PATH);
+            Serial.println("ctrlkey cleared — control surface disabled");
+        } else if (a) {
+            uint8_t k[32];
+            if (hex_decode(a, k, 32) != 32) { Serial.println("usage: ctrlkey <64 hex chars>|clear"); return; }
+            if (!ctrl_have_key || memcmp(k, ctrl_pubkey, 32) != 0) ctrl_counter = 0;  // new key, new floor
+            memcpy(ctrl_pubkey, k, 32); ctrl_have_key = true; ctrl_cfg_save();
+            Serial.println("ctrlkey set (persisted) — signed control enabled");
+        } else if (ctrl_have_key) {
+            char l[64];
+            snprintf(l, sizeof(l), "ctrlkey %02X%02X..%02X%02X counter=%lu",
+                     ctrl_pubkey[0], ctrl_pubkey[1], ctrl_pubkey[30], ctrl_pubkey[31],
+                     (unsigned long)ctrl_counter);
+            Serial.println(l);
+        } else Serial.println("ctrlkey: none (control surface disabled)");
+    } else if (!strcmp(cmd, "ctrlsend")) {     // ctrlsend <hexblob> — flood a signed command
+        char* a = strtok(nullptr, " ");
+        static uint8_t blob[mesh::CTRL_MSG_BYTES];
+        uint16_t n = a ? hex_decode(a, blob, sizeof(blob)) : 0;
+        if (n != mesh::CTRL_MSG_BYTES) { Serial.println("usage: ctrlsend <150 hex chars>"); return; }
+        node_id_t tgt; memcpy(&tgt, blob + 2, sizeof(tgt));
+        if (tgt == my_id) {
+            // self-targeted: verify + apply locally (bench self-test / securing the
+            // gateway node itself) — it would otherwise be lost to the own-echo filter.
+            if (!ctrl_have_key) { Serial.println("[ctrl] no ctrlkey set"); return; }
+            mesh::CtrlMsg m;
+            mesh::CtrlVerdict v = mesh::ctrl_verify(blob, n, ctrl_pubkey, ctrl_counter, &m);
+            if (v != mesh::CTRL_OK) { char l[48]; snprintf(l, sizeof(l), "[ctrl] REJECTED verdict=%u", (unsigned)v); Serial.println(l); }
+            else ctrl_apply_verified(m, my_id);
+        } else {
+            send_loc_flood(blob, n, DEFAULT_TTL, PKT_CONTROL);
+            Serial.println("[ctrl] command flooded");
+        }
     } else if (!strcmp(cmd, "kiss")) {         // kiss <node8hex> | kiss off — USB KISS TNC mode
         char* a = strtok(nullptr, " ");
         if (a && !strcmp(a, "off")) {
@@ -1971,7 +2154,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | status <id> | battdump | kiss [<id>|off]");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | status <id> | battdump | kiss [<id>|off] | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
@@ -2085,6 +2268,7 @@ void setup() {
     batt_refresh();
     net_cfg_load();    // restore the beacon-period setting (0 = auto-by-SF)
     kiss_cfg_load();   // restore KISS TNC mode (the node can boot as a TNC appliance)
+    ctrl_cfg_load();   // restore the controller pubkey + replay counter
 
 #ifdef AGN_BLE
     cfg_load();    // restore the persisted PIN + BLE-enabled state from flash (no SoftDevice needed)
@@ -2226,6 +2410,14 @@ static void agn_loop_once() {
     if (batt_scale > 0.0f && (int32_t)(millis() - next_batt_flood_ms) >= 0) {
         telem_flood_batt();
         next_batt_flood_ms = millis() + TELEM_BATT_PERIOD_MS + (uint32_t)random(0, 1800000);
+    }
+
+    // Dead-man: a provisional (lowered) power that was never CONFIRMed reverts —
+    // a remote command must not be able to strand this node.
+    if (ctrl_revert_ms && (int32_t)(millis() - ctrl_revert_ms) >= 0) {
+        ctrl_revert_ms = 0;
+        ctrl_apply_power(ctrl_revert_dbm, false);
+        Serial.println("[ctrl] no CONFIRM — provisional power REVERTED");
     }
 
     // Fresh-registration burst (see reg_burst_left): re-flood early so a lost
