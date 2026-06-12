@@ -105,6 +105,7 @@ static uint16_t        data_seq       = 0;
 static uint32_t        next_beacon_ms = 0;
 static uint32_t        next_tick_ms   = 0;
 static uint32_t        boot_ms        = 0;
+static uint32_t        led_off_ms     = 0;   // heartbeat-wink off deadline
 
 // --- SAR file transfer state (the "app" riding on the backbone) ---
 static uint8_t   sar_buf[mesh::SAR_MAX_FILE];   // outbound load buffer
@@ -202,6 +203,8 @@ static void rf_save(const RadioCfg& c) {
   #define AGN_VBAT_EN  VBAT_ENABLE        // drive LOW to connect the divider
 #elif defined(AGN_BOARD_RAK4631)
   #define AGN_VBAT_PIN PIN_A0             // WisBlock base routes VBAT/divider to A0
+#elif defined(AGN_BOARD_PROMICRO)
+  #define AGN_VBAT_PIN BATTERY_PIN        // faketec variant names it BATTERY_PIN (17)
 #elif defined(PIN_VBAT)
   #define AGN_VBAT_PIN PIN_VBAT
 #endif
@@ -488,6 +491,7 @@ static void ble_setup() {
     ble_inited = true;
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
     Bluefruit.begin();                              // start the SoftDevice (before radio.begin)
+    Bluefruit.autoConnLed(false);                   // no blinking conn LED — solar power budget
     Bluefruit.setTxPower(4);
     char nm[24]; snprintf(nm, sizeof(nm), "AgnLoRa-%08lX", (unsigned long)my_id);
     Bluefruit.setName(nm);
@@ -2156,10 +2160,20 @@ static void agn_loop_once() {
         Serial.println(bl);   // watch this stay connected=1 through the LoRa beacons above
 #endif
 #ifdef LED_BUILTIN
-        static bool led = false; led = !led; digitalWrite(LED_BUILTIN, led);  // slow blink = alive & radio up
+        // A 15 ms wink per heartbeat, not a 50%-duty blink: the old toggle left the
+        // LED lit half of all time (~30 mAh/day — as much as the SF9 beacon budget).
+        // Solar nodes can't pay mA for decoration. Fault patterns stay loud.
+        digitalWrite(LED_BUILTIN, HIGH);
+        led_off_ms = millis() + 15;
 #endif
         next_hb_ms = millis() + 3000;
     }
+#ifdef LED_BUILTIN
+    if (led_off_ms && (int32_t)(millis() - led_off_ms) >= 0) {
+        digitalWrite(LED_BUILTIN, LOW);
+        led_off_ms = 0;
+    }
+#endif
 
     // 1) Service the radio (TX-done / RX-done). Cheap when nothing is pending; this
     //    is the only place SPI work happens, keeping the radio core non-blocking.
