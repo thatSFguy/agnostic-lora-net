@@ -114,6 +114,10 @@ const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',
 const nodes = new Map();
 let gatewayId = null, selected = null, placing = null;
 const positions = JSON.parse(localStorage.getItem('agn-node-pos') || '{}');
+const aliases = JSON.parse(localStorage.getItem('agn-node-alias') || '{}');   // id -> friendly name
+function saveAlias() { localStorage.setItem('agn-node-alias', JSON.stringify(aliases)); }
+const shortId = id => id.slice(-4);
+const nodeName = id => aliases[id] || shortId(id);          // alias if set, else last-4
 
 const $ = id => document.getElementById(id);
 function node(id) {
@@ -323,7 +327,7 @@ function nodeIcon(n) {
   const border = n.isGateway ? 'var(--acc)' : freshColor(n);
   const sel = (selected === n.id) ? ';outline:2px solid var(--acc);outline-offset:2px' : '';
   return L.divIcon({ className: '',
-    html: `<div class="nodelabel" style="border-color:${border}${sel}">${n.id.slice(-4)}${gwTxt}${battTxt}</div>`,
+    html: `<div class="nodelabel" style="border-color:${border}${sel}">${nodeName(n.id)}${gwTxt}${battTxt}</div>`,
     iconAnchor: [30, 13] });
 }
 function savePos() { localStorage.setItem('agn-node-pos', JSON.stringify(positions)); }
@@ -425,7 +429,8 @@ function render() {
     const row = document.createElement('div');
     row.className = 'node-row' + (selected === id ? ' sel' : '');
     row.innerHTML = `<span class="dot" style="background:${freshColor(n)}"></span>
-      <span class="mono">${id}</span>${n.isGateway ? '<span class="pill ok">GW</span>' : ''}
+      <span>${aliases[id] ? `<b>${aliases[id]}</b> <span class="mono" style="color:var(--dim);font-size:11px">${shortId(id)}</span>` : `<span class="mono">${id}</span>`}</span>
+      ${n.isGateway ? '<span class="pill ok">GW</span>' : ''}
       ${positions[id] ? '' : '<span class="pill">place ▸</span>'}`;
     row.onclick = () => {
       if (!positions[id]) { placing = id; $('placeId').textContent = id; $('placeHint').style.display = 'block'; }
@@ -453,13 +458,24 @@ function renderHealth() {
     const ab = nodes.get(bid)?.hears[aid], ba = nodes.get(aid)?.hears[bid];
     const worst = Math.min(ab?.q ?? 1.01, ba?.q ?? 1.01);
     const asym = ab && ba && Math.abs(ab.q - ba.q) > ASYM_THRESHOLD;
-    rows.push({ key, aid, bid, worst, asym, oneway: !(ab?.q > 0) || !(ba?.q > 0) });
+    // best-known RF for the pair (either direction the gateway measured directly)
+    const rf = [ab, ba].filter(d => d && d.rssi != null).sort((x, y) => x.snr - y.snr)[0];
+    rows.push({ key, aid, bid, worst, asym, oneway: !(ab?.q > 0) || !(ba?.q > 0), rf });
   }
   rows.sort((x, y) => x.worst - y.worst);
-  $('healthList').innerHTML = rows.map(r =>
-    `<div class="linkrow" style="color:${qColor(r.worst > 1 ? 1 : r.worst)}">
-       ${r.aid.slice(-4)} ⇄ ${r.bid.slice(-4)} q=${r.worst > 1 ? '?' : r.worst.toFixed(2)}
-       ${r.asym ? ' ⚠asym' : ''}${r.oneway ? ' ⇢one-way' : ''}</div>`).join('') || '<span class="hint">no links yet</span>';
+  $('healthList').innerHTML = rows.map(r => {
+    const rf = r.rf ? ` <span style="color:var(--dim)">${r.rf.rssi}dBm/${r.rf.snr}dB ${marginShort(r.rf.snr)}</span>` : '';
+    return `<div class="linkrow" style="color:${qColor(r.worst > 1 ? 1 : r.worst)}">
+       ${nodeName(r.aid)} ⇄ ${nodeName(r.bid)} q=${r.worst > 1 ? '?' : r.worst.toFixed(2)}${rf}
+       ${r.asym ? ' ⚠asym' : ''}${r.oneway ? ' ⇢one-way' : ''}</div>`;
+  }).join('') || '<span class="hint">no links yet</span>';
+}
+// SNR margin above the SF's demod floor — the honest "how close to dropping" number.
+function marginShort(snr) {
+  const sf = (gatewayId && nodes.get(gatewayId)?.sf) || 7;
+  const m = snr - (SNR_LIMIT[sf] ?? -7.5);
+  const c = m >= 10 ? 'var(--ok)' : m >= 5 ? 'var(--warn)' : 'var(--bad)';
+  return `<b style="color:${c}">${m >= 0 ? '+' : ''}${m.toFixed(0)}dB</b>`;
 }
 
 function renderDetail() {
@@ -477,7 +493,12 @@ function renderDetail() {
     : n.batt.mv !== undefined ? `${n.batt.mv} mV — ${n.batt.pct}%`
     : `${n.batt.pct}% (via beacon — mV arrives with battdump/status)`;
   el.innerHTML = `
-    <div class="mono" style="font-size:15px">${n.id} ${isGw ? '<span class="pill ok">gateway</span>' : '<span class="pill">remote</span>'}</div>
+    <div style="font-size:16px;font-weight:600">${aliases[n.id] || shortId(n.id)} ${isGw ? '<span class="pill ok">gateway</span>' : '<span class="pill">remote</span>'}</div>
+    <div class="mono" style="font-size:11.5px;color:var(--dim)">${n.id}</div>
+    <div class="row" style="display:flex;gap:6px;margin:8px 0">
+      <input type="text" id="aliasIn" placeholder="alias (friendly name)" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" style="flex:1">
+      <button id="aliasSave">Save</button>
+    </div>
     <div class="kv" style="margin-top:8px">
       <div>fw</div><div>${n.fw || '—'}</div>
       <div>last seen</div><div>${n.lastSeen ? Math.round((Date.now() - n.lastSeen) / 1000) + ' s ago' : '—'}</div>
@@ -485,10 +506,10 @@ function renderDetail() {
       <div>SF / power</div><div>${n.sf!=null ? 'SF' + n.sf : '—'}${n.power!=null ? ' / ' + n.power + ' dBm' : ''}</div>
       <div>links</div><div>${Object.keys(n.hears).length} inbound known</div>
     </div>
-    <h2>Hears (inbound)</h2>
+    <h2>Hears (inbound) — RSSI / SNR</h2>
     <div id="hearsList">${Object.entries(n.hears).map(([fid, d]) =>
       `<div class="linkrow" data-nid="${fid}" style="color:${qColor(d.q || 0)}">
-         ${fid} &nbsp;q=${(d.q ?? 0).toFixed(2)}${d.rssi != null ? ` rssi=${d.rssi} snr=${d.snr}` : ''}
+         ${nodeName(fid)} &nbsp;q=${(d.q ?? 0).toFixed(2)}${d.rssi != null ? ` &nbsp;<span style="color:var(--dim)">${d.rssi} dBm / ${d.snr} dB SNR ${marginShort(d.snr)}</span>` : ''}
          <i style="color:var(--dim)">(${d.src})</i></div>`).join('')
       || '<span class="hint">nothing heard yet</span>'}</div>
     <h2>Heard by (outbound)</h2>
@@ -522,6 +543,13 @@ function renderDetail() {
          <button id="pwrApply">Set power</button>
        </div>`}
   `;
+  const aliasSave = () => {
+    const v = el.querySelector('#aliasIn').value.trim();
+    if (v) aliases[n.id] = v; else delete aliases[n.id];
+    saveAlias(); render();
+  };
+  el.querySelector('#aliasSave').onclick = aliasSave;
+  el.querySelector('#aliasIn').addEventListener('keydown', ev => { if (ev.key === 'Enter') aliasSave(); });
   const pa = el.querySelector('#pwrApply');
   if (pa) pa.onclick = () => {
     const v = Math.max(-9, Math.min(22, +el.querySelector('#pwrSet').value));
@@ -626,6 +654,7 @@ $('btnExport').onclick = () => {
     _warning: 'CONTAINS THE CONTROLLER PRIVATE KEY — keep this file secret.',
     exported: new Date().toISOString(),
     positions,
+    aliases,
     controllerKey: JSON.parse(localStorage.getItem('agn-ctrl-key') || 'null'),
     controllerCounter: localStorage.getItem('agn-ctrl-counter') || '0',
   };
@@ -640,6 +669,7 @@ $('impFile').onchange = async e => {
   // Accept both the new bundle and the old positions-only file.
   const pos = data.positions || data;
   Object.assign(positions, pos); savePos();
+  if (data.aliases) { Object.assign(aliases, data.aliases); saveAlias(); }
   if (data.controllerKey) {
     if (localStorage.getItem('agn-ctrl-key') &&
         !confirm('Replace this browser’s controller key with the imported one? '
