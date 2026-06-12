@@ -270,7 +270,7 @@ function onLine(line) {
     nbrsCtx = m[1].toUpperCase();
     const n = node(nbrsCtx);
     n.lastSeen = Math.max(n.lastSeen, now - (+m[2]) * 1000);
-    if (m[5] !== undefined) n.batt = { pct: +m[5], at: now };
+    if (m[5] !== undefined) n.batt = { pct: +m[5], at: now, mv: n.batt?.mv };
     if (gatewayId) {      // the gateway heard this announce directly
       const h = node(gatewayId).hears[nbrsCtx] || {};
       h.rssi = +m[3]; h.snr = +m[4]; h.at = now;
@@ -453,9 +453,10 @@ function renderDetail() {
   if (!selected || !nodes.has(selected)) { el.innerHTML = '<span class="hint">Click a node on the map or in the list.</span>'; return; }
   const n = nodes.get(selected);
   const isGw = n.isGateway;
-  const batt = n.batt
-    ? (n.batt.pct !== undefined ? `${n.batt.mv} mV — ${n.batt.pct}%` : `raw=${n.batt.raw} (uncalibrated)`)
-    : '—';
+  const batt = !n.batt ? '—'
+    : n.batt.pct === undefined ? `raw=${n.batt.raw} (uncalibrated)`
+    : n.batt.mv !== undefined ? `${n.batt.mv} mV — ${n.batt.pct}%`
+    : `${n.batt.pct}% (via beacon — mV arrives with battdump/status)`;
   el.innerHTML = `
     <div class="mono" style="font-size:15px">${n.id} ${isGw ? '<span class="pill ok">gateway</span>' : '<span class="pill">remote</span>'}</div>
     <div class="kv" style="margin-top:8px">
