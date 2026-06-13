@@ -34,7 +34,13 @@
   #console { display:flex; flex-direction:column; } #conout { flex:1; overflow:auto; } #conin{ display:flex; gap:5px; margin-top:6px; } #conin input{flex:1}
   #toast { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:7px 14px; opacity:0; transition:opacity .2s; pointer-events:none; }
   #toast.show{opacity:1;}
-  svg text { fill:var(--txt); font-size:13px; } .maphint{ position:absolute; bottom:10px; left:14px; color:var(--dim); }
+  svg text { fill:var(--txt); font-size:13px; } .maphint{ position:absolute; bottom:10px; left:14px; right:14px; color:var(--dim); }
+  svg .lv { font-size:10px; } svg .deg { font-size:10px; font-weight:700; fill:#fff; }
+  .mapinfo{ position:absolute; top:10px; right:14px; width:280px; max-height:calc(100% - 40px); overflow:auto;
+            background:#161b22f2; border:1px solid var(--line); border-radius:8px; padding:9px 11px; }
+  .mapinfo h3{ margin:0 0 6px; font-size:13px; } .mapinfo .x{ float:right; cursor:pointer; color:var(--dim); }
+  .mapinfo table{ width:100%; border-collapse:collapse; font-size:11.5px; } .mapinfo td{ padding:2px 3px; border-top:1px solid var(--line); }
+  .mapinfo .dim{ color:var(--dim); } .mapinfo .sees{ color:var(--raise); } .mapinfo .heard{ color:var(--acc); }
 </style>
 </head>
 <body>
@@ -60,7 +66,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
-let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null;
+let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null, selected = null;
 const nm = id => aliases[id] || id;
 const clamp01 = v => Math.max(0, Math.min(1, v));
 const ASYM = 0.35;                                  // mirrors lib/mesh ASYM_THRESHOLD
@@ -110,12 +116,24 @@ function renderNodes(state){
 const W=1000,H=620;
 function mapXY(n,i,N){ const p=positions[n.id]; if(p)return[p[0]*W,p[1]*H];
   if(n.is_gateway)return[W/2,H/2]; const a=i/Math.max(1,N)*2*Math.PI; return[W/2+Math.cos(a)*W*0.34,H/2+Math.sin(a)*H*0.36]; }
+// lval is the compact label drawn on a link: measured links show SNR (what the optimiser
+// tunes on), quality-only links show q. Tooltips carry the full detail.
+const lval = d => d.rssi ? `${d.snr}` : `.${Math.round(d.q*100)}`;
+let mapNodes=[], mapPeers={};   // last render's data, for the neighbour panel
+
 function renderMap(state){
   if(dragging) return;
   const snap=state.snapshot||{}, nodes=snap.nodes||[], links=snap.links||[];
   const xy={}; nodes.forEach((n,i)=>xy[n.id]=mapXY(n,i,nodes.length));
   const sf={}; nodes.forEach(n=>sf[n.id]=n.sf);
   const dir={}; for(const l of links) dir[l.from+'>'+l.to]=l;      // directed lookup
+  // Per-node neighbour map: out = this node heard by peer (governs its TX), in = this node
+  // hears peer. (link from->to means `to` hears `from`.)
+  const peers={}; const reg=(a,b)=>{ (peers[a]=peers[a]||{})[b]=peers[a][b]||{}; };
+  for(const l of links){ if(!(l.q>0||l.rssi)) continue; reg(l.from,l.to); reg(l.to,l.from);
+    peers[l.from][l.to].out=l; peers[l.to][l.from].in=l; }
+  const deg=id=>Object.keys(peers[id]||{}).length;   // distinct neighbours = relay value
+  mapNodes=nodes; mapPeers=peers;
   const seen={}, pairs=[];                                         // unordered adjacencies
   for(const l of links){ const k=[l.from,l.to].sort().join('|'); if(seen[k])continue; seen[k]=1; pairs.push(k.split('|')); }
   let s=`<svg id="svg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">`;
@@ -123,38 +141,70 @@ function renderMap(state){
   for(const [a,b] of pairs){
     if(!xy[a]||!xy[b]) continue;
     const A=xy[a], B=xy[b], ab=dir[a+'>'+b], ba=dir[b+'>'+a];
+    const touch = !selected || selected===a || selected===b;       // selection highlight
+    const fade = selected && !touch;
     for(const [from,to,d] of [[a,b,ab],[b,a,ba]]){
       const P=xy[from], T=xy[to], dx=T[0]-P[0], dy=T[1]-P[1], len=Math.hypot(dx,dy)||1;
       const ox=-dy/len*5, oy=dx/len*5;                             // perpendicular offset
       const x1=P[0]+ox, y1=P[1]+oy, x2=T[0]+ox, y2=T[1]+oy;
       if(d&&d.q>0){
-        const col=qcol(d.q), tip=`${nm(from)} → ${nm(to)}\nq=${d.q.toFixed(2)} rssi=${d.rssi} snr=${d.snr} → ${snrMarginTxt(d.snr,sf[to])}${d.src?'  ('+d.src+')':''}`;
-        s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="${(1+3*d.q).toFixed(1)}" opacity="0.85"><title>${esc(tip)}</title></line>`;
-        const t=0.62, ax=x1+(x2-x1)*t, ay=y1+(y2-y1)*t, ang=(Math.atan2(y2-y1,x2-x1)*180/Math.PI).toFixed(1);
-        s+=`<text x="${ax.toFixed(1)}" y="${ay.toFixed(1)}" fill="${col}" font-size="13" text-anchor="middle" dominant-baseline="middle" transform="rotate(${ang} ${ax.toFixed(1)} ${ay.toFixed(1)})" style="pointer-events:none">➤</text>`;
-      } else {
+        const col=qcol(d.q), op=fade?0.12:0.85;
+        const tip=`${nm(from)} → ${nm(to)}\nq=${d.q.toFixed(2)} rssi=${d.rssi} snr=${d.snr} → ${snrMarginTxt(d.snr,sf[to])}${d.src?'  ('+d.src+')':''}`;
+        s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="${(1+3*d.q).toFixed(1)}" opacity="${op}"><title>${esc(tip)}</title></line>`;
+        if(!fade){
+          const t=0.64, ax=x1+(x2-x1)*t, ay=y1+(y2-y1)*t, ang=(Math.atan2(y2-y1,x2-x1)*180/Math.PI).toFixed(1);
+          s+=`<text x="${ax.toFixed(1)}" y="${ay.toFixed(1)}" fill="${col}" font-size="13" text-anchor="middle" dominant-baseline="middle" transform="rotate(${ang} ${ax.toFixed(1)} ${ay.toFixed(1)})" style="pointer-events:none">➤</text>`;
+          // link value label at 38% (away from the arrow), nudged off the line
+          const lx=x1+(x2-x1)*0.38+ox*1.4, ly=y1+(y2-y1)*0.38+oy*1.4;
+          s+=`<text class="lv" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${col}" text-anchor="middle" dominant-baseline="middle" style="pointer-events:none">${lval(d)}</text>`;
+        }
+      } else if(!fade){
         s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#666" stroke-width="1" stroke-dasharray="4 6" opacity="0.55"><title>${esc(nm(from)+' → '+nm(to)+'  (no link heard)')}</title></line>`;
       }
     }
-    if(ab&&ba&&ab.q>0&&ba.q>0&&Math.abs(ab.q-ba.q)>ASYM){        // asymmetry badge
+    if(!fade && ab&&ba&&ab.q>0&&ba.q>0&&Math.abs(ab.q-ba.q)>ASYM){ // asymmetry badge
       const mx=((A[0]+B[0])/2).toFixed(1), my=((A[1]+B[1])/2).toFixed(1);
       s+=`<text x="${mx}" y="${my}" font-size="14" text-anchor="middle" dominant-baseline="middle" style="pointer-events:none"><title>asymmetric: ${nm(a)}→${nm(b)} q=${ab.q.toFixed(2)} vs ${nm(b)}→${nm(a)} q=${ba.q.toFixed(2)}</title>⚠️</text>`;
     }
   }
-  nodes.forEach((n,i)=>{ const [x,y]=xy[n.id]; const fill=n.is_gateway?'var(--acc)':(n.blocked?'var(--revert)':'#2a3340');
-    s+=`<g class="mnode" data-id="${n.id}" transform="translate(${x},${y})" style="cursor:grab">
-      <circle r="10" fill="${fill}" stroke="var(--line)" stroke-width="2"/>
-      <text y="-15" text-anchor="middle">${nm(n.id)}</text></g>`; });
-  s+=`</svg><div class="maphint">per-direction links · colour=quality (green ≥.9 · amber ≥.6 · red) · width=quality · ➤ direction · dashed=one-way · ⚠️ asymmetric · hover a line for q/rssi/snr · drag nodes to lay out · positions save automatically</div>`;
+  nodes.forEach((n,i)=>{ const [x,y]=xy[n.id]; const k=deg(n.id);
+    const fill=n.is_gateway?'var(--acc)':(n.blocked?'var(--revert)':'#2a3340');
+    const r=9+Math.min(k,8); const sel=selected===n.id?'var(--acc)':'var(--line)';
+    const fade=selected&&selected!==n.id&&!(mapPeers[selected]||{})[n.id];   // dim unrelated nodes
+    s+=`<g class="mnode" data-id="${n.id}" transform="translate(${x},${y})" style="cursor:grab;opacity:${fade?0.3:1}">
+      <circle r="${r}" fill="${fill}" stroke="${sel}" stroke-width="${selected===n.id?3:2}"/>
+      ${k?`<text class="deg" text-anchor="middle" dominant-baseline="central"><title>${k} neighbour(s)</title>${k}</text>`:''}
+      <text y="${-r-5}" text-anchor="middle">${nm(n.id)}</text></g>`; });
+  s+=`</svg>`;
+  if(selected) s+=neighbourPanel(selected);
+  s+=`<div class="maphint">numbers on links = SNR (measured) or q×100 (telemetry) · node number/size = neighbours it sees · <b>click a node</b> to focus its links + list neighbours · colour=quality · ➤ direction · dashed=one-way · ⚠️ asymmetric · drag to lay out</div>`;
   $('#mapview').innerHTML=s;
+  const svg=$('#svg');
+  svg.addEventListener('mousedown',ev=>{ if(ev.target===svg){ selected=null; renderMap(state); } });
   $('#mapview').querySelectorAll('.mnode').forEach(g=>{
-    g.addEventListener('mousedown',ev=>{ ev.preventDefault(); dragging=g.dataset.id; const svg=$('#svg');
-      const move=e=>{ const r=svg.getBoundingClientRect(); const fx=clamp01((e.clientX-r.left)/r.width), fy=clamp01((e.clientY-r.top)/r.height);
-        positions[dragging]=[fx,fy]; g.setAttribute('transform',`translate(${fx*W},${fy*H})`); };
-      const up=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up);
-        const p=positions[dragging]; uiPost({type:'pos',id:dragging,x:p[0],y:p[1]}); dragging=null; };
-      document.addEventListener('mousemove',move); document.addEventListener('mouseup',up); });
+    g.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation();
+      const id=g.dataset.id; let moved=false;
+      const move=e=>{ moved=true; dragging=id; const r=svg.getBoundingClientRect();
+        const fx=clamp01((e.clientX-r.left)/r.width), fy=clamp01((e.clientY-r.top)/r.height);
+        positions[id]=[fx,fy]; g.setAttribute('transform',`translate(${fx*W},${fy*H})`); };
+      const upH=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',upH);
+        if(moved){ const p=positions[id]; uiPost({type:'pos',id,x:p[0],y:p[1]}); dragging=null; renderMap(state); }
+        else { selected=selected===id?null:id; renderMap(state); } };   // click (no drag) = select
+      document.addEventListener('mousemove',move); document.addEventListener('mouseup',upH); });
   });
+  $('#mapview').querySelectorAll('[data-close]').forEach(el=>el.onclick=()=>{ selected=null; renderMap(state); });
+}
+
+// neighbourPanel lists what the selected node can SEE (it hears) and who can hear IT, with
+// the link values — the per-link feedback for tuning the algorithm.
+function neighbourPanel(id){
+  const ps=mapPeers[id]||{}, keys=Object.keys(ps);
+  const cell=d=> d ? `<span style="color:${qcol(d.q)}">${d.rssi?`${d.snr}dB`:`q.${Math.round(d.q*100)}`}</span>` : '<span class="dim">—</span>';
+  keys.sort((a,b)=>((ps[b].out?.q||ps[b].in?.q||0)-(ps[a].out?.q||ps[a].in?.q||0)));
+  const rows=keys.map(k=>`<tr><td>${nm(k)}</td><td class="sees">${cell(ps[k].in)}</td><td class="heard">${cell(ps[k].out)}</td></tr>`).join('')
+    || '<tr><td class="dim" colspan="3">no neighbours observed</td></tr>';
+  return `<div class="mapinfo"><span class="x" data-close>✕</span><h3>${nm(id)} — ${keys.length} neighbour(s)</h3>
+    <table><tr><td class="dim">peer</td><td class="dim sees" title="this node hears peer">sees ▸</td><td class="dim heard" title="peer hears this node (governs its TX power)">◂ heard</td></tr>${rows}</table></div>`;
 }
 
 function renderFeed(events){
