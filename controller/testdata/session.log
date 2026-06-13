@@ -1,0 +1,19 @@
+fw 0.8.2  built Jun 12 2026
+node 1A2B3C4D  neighbors=2 routes=3 blocked=1
+[blocked] 0BADC0DE
+[rf] freq_hz=904375000 bw_hz=250000 sf=9 cr=5 power_dbm=14 sync=0x4D preamble=16 (active)
+net beacon=10s
+  nbr 8EA09546  q_rx=97 q_tx=99 (x100)  myAlias=12 theirAlias=7 rssi=-42 snr=9
+  nbr 1FAE0DBD  q_rx=88 q_tx=72 (x100)  myAlias=13 theirAlias=4 rssi=-95 snr=-4
+route dst=1FAE0DBD via=8EA09546 cost=120 hops=2
+[TX] beacon seq=5 from 1A2B3C4D  +announce 24B
+[RX] beacon  src=8EA09546 seq=3 up=1200s  rssi=-42.0 snr=9.0
+[RX] beacon  src=1FAE0DBD seq=7 up=880s  rssi=-95.0 snr=-4.0
+[RX] type=4  src=8EA09546 seq=2 len=37  rssi=-50.0 snr=8.0
+[nbrs] 8EA09546 age=4s rssi=-42 snr=9 batt=91%
+[nbrs] 1FAE0DBD age=9s rssi=-95 snr=-4 batt=63%
+[status] 1FAE0DBD fw=0.8.2 up=42min sf=9 pwr=14 batt=3850mV/60%
+[ctrl] ack 1FAE0DBD cmd=1 applied=14 provisional=1
+[TX] beacon seq=6 from 1A2B3C4D  +announce 24B
+[RX] beacon  src=8EA09546 seq=4 up=1210s  rssi=-43.0 snr=8.0
+some unmodelled debug line that should be ignored

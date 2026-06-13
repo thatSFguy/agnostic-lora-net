@@ -28,10 +28,9 @@
 #include "sar.h"
 #include "locator_dir.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
-// compiled in (radio config is not BLE-specific).
-#include <Adafruit_LittleFS.h>
-#include <InternalFileSystem.h>
-using namespace Adafruit_LittleFS_Namespace;
+// compiled in (radio config is not BLE-specific). fs_compat.h gives us the same
+// InternalFS/File surface on nRF52 (Adafruit LittleFS) and ESP32 (core LittleFS).
+#include "fs_compat.h"
 #ifdef AGN_BLE
 #include <bluefruit.h>     // nRF52 SoftDevice BLE — Req 1 coexistence experiment
 #endif
@@ -665,8 +664,13 @@ static node_id_t derive_node_id() {
     if ((uint32_t)AGN_NODE_ID != 0u) return (node_id_t)AGN_NODE_ID;
 #if defined(NRF_FICR)
     return (node_id_t)(NRF_FICR->DEVICEID[0] ^ NRF_FICR->DEVICEID[1]);
+#elif defined(ESP32)
+    // No FICR on ESP32; fold the 48-bit factory eFuse MAC down to 32 bits (same
+    // "stable per-chip, non-authenticating" role as the nRF52 DEVICEID, §3).
+    uint64_t mac = ESP.getEfuseMac();
+    return (node_id_t)((uint32_t)mac ^ (uint32_t)(mac >> 32));
 #else
-    return 0xDEADBEEFu;  // non-nRF target (e.g. host tooling) — fixed placeholder
+    return 0xDEADBEEFu;  // non-nRF/ESP target (e.g. host tooling) — fixed placeholder
 #endif
 }
 
@@ -1066,6 +1070,47 @@ static int8_t   ctrl_pending_dbm = 0;      // the provisional value awaiting CON
 static uint32_t ctrl_revert_ms = 0;        // 0 = disarmed
 static const uint32_t CTRL_REVERT_WINDOW_MS = 60000;
 
+// Block dead-man: a signed BLOCK auto-expires unless renewed, so a stale block can never
+// permanently partition the mesh (mirrors the power revert rail). The controller renews
+// by re-sending BLOCK before expiry; UNBLOCK clears immediately. Parallel to the router's
+// blocked list (same MAX_BLOCKED capacity), keyed by victim id.
+static const uint8_t CTRL_BLOCK_TTL_DEFAULT_MIN = 30;
+static const uint8_t CTRL_BLOCK_TTL_MAX_MIN     = 120;
+struct BlockTtl { node_id_t victim; uint32_t expiry_ms; };
+static BlockTtl ctrl_blk[mesh::MAX_BLOCKED];   // zero-initialised: victim 0 / expiry 0 = free
+
+static void ctrl_blk_set(node_id_t victim, uint8_t ttl_min) {
+    uint32_t exp = millis() + (uint32_t)ttl_min * 60000u;
+    if (!exp) exp = 1;                         // 0 means "free" — never store it
+    int free = -1;
+    for (uint8_t i = 0; i < mesh::MAX_BLOCKED; i++) {
+        if (ctrl_blk[i].expiry_ms && ctrl_blk[i].victim == victim) { ctrl_blk[i].expiry_ms = exp; return; }
+        if (!ctrl_blk[i].expiry_ms && free < 0) free = i;
+    }
+    if (free >= 0) { ctrl_blk[free].victim = victim; ctrl_blk[free].expiry_ms = exp; }
+}
+
+static void ctrl_blk_clear(node_id_t victim) {
+    for (uint8_t i = 0; i < mesh::MAX_BLOCKED; i++)
+        if (ctrl_blk[i].victim == victim) { ctrl_blk[i].victim = 0; ctrl_blk[i].expiry_ms = 0; }
+}
+
+// Called each loop: drop blocks whose TTL elapsed (the dead-man firing).
+static void ctrl_blk_sweep() {
+    if (!router) return;
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < mesh::MAX_BLOCKED; i++) {
+        if (ctrl_blk[i].expiry_ms && (int32_t)(now - ctrl_blk[i].expiry_ms) >= 0) {
+            router->unblock(ctrl_blk[i].victim);
+            char l[64];
+            snprintf(l, sizeof(l), "[ctrl] BLOCK ttl expired -> unblocked %08lX",
+                     (unsigned long)ctrl_blk[i].victim);
+            g_con->println(l);
+            ctrl_blk[i].victim = 0; ctrl_blk[i].expiry_ms = 0;
+        }
+    }
+}
+
 static void ctrl_cfg_load() {
     InternalFS.begin();
     CtrlStore rec;
@@ -1132,6 +1177,30 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
             ctrl_apply_power(ctrl_pending_dbm, true);
             Serial.println("[ctrl] CONFIRM — provisional power persisted");
             ack(ctrl_pending_dbm, 0);
+        }
+    } else if (m.cmd == mesh::CTRL_BLOCK) {
+        // Block the recipient's link to the victim (m.aux), TTL-bounded so a stale block
+        // can never permanently partition the mesh. Renewed by re-BLOCK; cleared by
+        // UNBLOCK or expiry (ctrl_blk_sweep). provisional=1 advertises the auto-revert.
+        if (router && m.aux && m.aux != my_id) {
+            uint8_t ttl = m.arg > 0 ? (uint8_t)m.arg : CTRL_BLOCK_TTL_DEFAULT_MIN;
+            if (ttl > CTRL_BLOCK_TTL_MAX_MIN) ttl = CTRL_BLOCK_TTL_MAX_MIN;
+            bool ok = router->block(m.aux);
+            if (ok) ctrl_blk_set(m.aux, ttl);
+            snprintf(line, sizeof(line), "[ctrl] BLOCK %08lX %s (ttl %um, counter=%lu)",
+                     (unsigned long)m.aux, ok ? "applied" : "FAILED(full)",
+                     (unsigned)ttl, (unsigned long)m.counter);
+            Serial.println(line);
+            ack(ok ? 1 : 0, 1);
+        }
+    } else if (m.cmd == mesh::CTRL_UNBLOCK) {
+        if (router && m.aux) {
+            router->unblock(m.aux);
+            ctrl_blk_clear(m.aux);
+            snprintf(line, sizeof(line), "[ctrl] UNBLOCK %08lX (counter=%lu)",
+                     (unsigned long)m.aux, (unsigned long)m.counter);
+            Serial.println(line);
+            ack(0, 0);
         }
     }
 }
@@ -1814,6 +1883,14 @@ static void print_info() {
              (unsigned long)my_id, (unsigned)router->neighbors().count(),
              (unsigned)router->routes().count(), (unsigned)router->blocked_count());
     Serial.println(l);
+    // Authoritative block list (always printed, even when empty) so the map can sync
+    // exactly which links this node is blocking. MAX_BLOCKED (8) ids fit one line.
+    {
+        char b[100]; int o = snprintf(b, sizeof(b), "[blocked]");
+        for (uint8_t i = 0; i < router->blocked_count() && o < (int)sizeof(b) - 10; i++)
+            o += snprintf(b + o, sizeof(b) - o, " %08lX", (unsigned long)router->blocked_at(i));
+        Serial.println(b);
+    }
     snprintf(l, sizeof(l), "cad %s  busy=%lu forced=%lu",
              radio.cad_enabled() ? "on" : "off",
              (unsigned long)radio.cad_busy_count(), (unsigned long)radio.cad_forced_count());
@@ -2015,9 +2092,12 @@ static void handle_command(char* line) {
         } else Serial.println("ctrlkey: none (control surface disabled)");
     } else if (!strcmp(cmd, "ctrlsend")) {     // ctrlsend <hexblob> — flood a signed command
         char* a = strtok(nullptr, " ");
-        static uint8_t blob[mesh::CTRL_MSG_BYTES];
+        static uint8_t blob[mesh::CTRL_MAX_BYTES];
         uint16_t n = a ? hex_decode(a, blob, sizeof(blob)) : 0;
-        if (n != mesh::CTRL_MSG_BYTES) { Serial.println("usage: ctrlsend <150 hex chars>"); return; }
+        // POWER/CONFIRM are 75 B; BLOCK/UNBLOCK 79 B. Accept either valid length.
+        if (n != mesh::CTRL_MSG_BYTES && n != mesh::CTRL_BLK_BYTES) {
+            Serial.println("usage: ctrlsend <150 or 158 hex chars>"); return;
+        }
         node_id_t tgt; memcpy(&tgt, blob + 2, sizeof(tgt));
         if (tgt == my_id) {
             // self-targeted: verify + apply locally (bench self-test / securing the
@@ -2430,6 +2510,7 @@ static void agn_loop_once() {
         ctrl_apply_power(ctrl_revert_dbm, false);
         Serial.println("[ctrl] no CONFIRM — provisional power REVERTED");
     }
+    ctrl_blk_sweep();   // expire TTL-bounded signed blocks (dead-man rail)
 
     // Fresh-registration burst (see reg_burst_left): re-flood early so a lost
     // broadcast costs seconds, not the LOC_REREG_MS refresh period.
@@ -2449,6 +2530,13 @@ static void agn_loop_once() {
     poll_console();
 }
 
+#if defined(ESP32)
+// On ESP32 the Arduino loopTask already runs with an 8 KB stack
+// (CONFIG_ARDUINO_LOOP_STACK_SIZE) — ample for the deepest paths below — so the real
+// loop runs inline with no extra task. (Contrast the nRF52 path: its core gives
+// loop() only a 4 KB stack, forcing the dedicated task spawned below.)
+void loop() { agn_loop_once(); }
+#else
 // The Adafruit core hard-codes loop()'s stack at LOOP_STACK_SZ = 1024 words (4 KB,
 // cores/nRF5/main.cpp) with no override. This firmware's deepest paths (radio service +
 // SAR + console snprintf) ran that to within a few WORDS of the cliff: adding one 32-byte
@@ -2468,3 +2556,4 @@ void loop() {
     }
     vTaskDelay(portMAX_DELAY);     // park the core's thin-stacked loop task
 }
+#endif

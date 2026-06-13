@@ -70,6 +70,10 @@ public:
     void unblock(node_id_t id);
     bool is_blocked(node_id_t id) const;
     uint8_t blocked_count() const { return n_blocked_; }
+    // Enumerate the blocked ids (i in 0..blocked_count()). Lets the console/map report
+    // the authoritative block list — a blocked neighbour is dropped from the neighbour
+    // table, so "blocked" can't be inferred from the `nbr` lines.
+    node_id_t blocked_at(uint8_t i) const { return i < n_blocked_ ? blocked_[i] : 0; }
 
     // Link addressing (Agent.md §5): resolve aliases for directed sends.
     link_addr_t link_addr_for(node_id_t dst) const { return neighbors_.their_alias_for(dst); }

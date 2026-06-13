@@ -65,11 +65,12 @@ nRF52.
 ## Layout
 
 ```
-platformio.ini            envs: wiscore_rak4631 [_ble] · xiao_nrf52 · promicro · compile_check · native
-boards/ · variants/       project-local board defs + vendored pin-map variants (RAK / XIAO / Pro Micro)
-include/board_config.h    per-board SX1262 wiring + network-wide PHY (904.375 MHz, BW250, SF9, 22 dBm, sync 0x4D)
+platformio.ini            envs: wiscore_rak4631 · xiao_nrf52 · promicro · tracker_t1000_e · heltec_v4 · compile_check · native
+boards/ · variants/       project-local board defs + vendored pin-map variants (RAK / XIAO / Pro Micro / T1000-E / Heltec V4)
+include/board_config.h    per-board SX1262/LR1110 wiring + network-wide PHY (904.375 MHz, BW250, SF9, 22 dBm, sync 0x4D)
+include/fs_compat.h       persistence shim: Adafruit LittleFS (nRF52) / core LittleFS (ESP32)
 include/packet.h          on-air frame format (link + network headers)
-radio_hal.*               non-blocking SX1262 transport (default SPI + setPins, per-board TCXO/RXEN)
+radio_hal.*               non-blocking SX1262/LR1110 transport (default SPI, per-board TCXO/RXEN/FEM)
 lib/mesh/                 PORTABLE core (no Arduino — builds for nRF52 + host):
     link_metric · neighbor_table · routing_table · router      link quality + per-direction DV
     announce_codec · forwarder · link_arq · sar                wire codec · relay · ARQ · file transfer
@@ -96,19 +97,34 @@ PlatformIO (`nordicnrf52` + Adafruit nRF52 core + RadioLib 7.x; host `g++` for t
 
 ```bash
 pio test -e native               # 46 host unit tests for lib/mesh (no hardware)
+pio test -e native               # 61 host unit tests for lib/mesh (no hardware)
 pio run  -e wiscore_rak4631      # RAK4631 mesh firmware (BLE compiled in, off by default)
 pio run  -e xiao_nrf52           # Seeed XIAO nRF52840 + Wio-SX1262 (SoftDevice s140 v7)
 pio run  -e promicro             # Pro Micro nRF52840 + SX1262
+pio run  -e tracker_t1000_e      # Seeed SenseCAP T1000-E (nRF52840 + Semtech LR1110)
+pio run  -e heltec_v4 -t upload  # Heltec WiFi LoRa 32 V4 (ESP32-S3 + SX1262, flash over USB serial)
 pio run  -e compile_check        # host compile-verify on a stock Feather nRF52840
 ```
 
-All boards carry an SX1262, so one firmware covers them; per-board pins, TCXO voltage,
-RXEN RF-switch and power-enable live in `include/board_config.h` (values from MeshCore).
-The SX1262 sits on the default `SPI` remapped to the LoRa pins (`SPI.setPins`) with a
+Most boards carry an SX1262, so one firmware covers them; the **T1000-E** carries a
+Semtech **LR1110** instead (the radio HAL selects RadioLib's LR1110 class via
+`AGN_RADIO_LR1110`, the only chip-specific seam — RF-switch setup). Per-board pins, TCXO
+voltage, RXEN/FEM RF-switch and power-enable live in `include/board_config.h` (values
+from MeshCore / Meshtastic). The radio sits on the default `SPI` remapped to the LoRa
+pins (`SPI.setPins` on nRF52, `SPI.begin(sck,miso,mosi,ss)` on ESP32) with a
 crystal-mode fallback — matching MeshCore's working RAK4631 init.
 
+The **Heltec V4** is the first ESP32 target: no SoftDevice (BLE is left out for now —
+its console is over USB serial), persistence on the ESP32 LittleFS
+(`include/fs_compat.h`), and the node ID folded from the eFuse MAC. Its SX1262 sits
+behind a GC1109/KCT8103L front-end module driven in lockstep with TX/RX; **that FEM/VEXT
+control is board-revision-specific — verify on first flash** (see the note in
+`include/board_config.h`). It flashes over USB serial (esptool), not the nRF52 UF2/DFU
+path used by the hub.
+
 **Flashing + bring-up: [`docs/hardware-bringup.md`](docs/hardware-bringup.md).** Node
-IDs auto-derive from each chip's FICR, so boards differ without configuration.
+IDs auto-derive from each chip's FICR (nRF52) or eFuse MAC (ESP32), so boards differ
+without configuration.
 
 ## The stack
 

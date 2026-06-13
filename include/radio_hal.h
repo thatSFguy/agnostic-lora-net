@@ -18,6 +18,16 @@
 #include <Arduino.h>
 #include <RadioLib.h>
 #include "packet.h"
+#include "board_config.h"
+
+// The radio chip is selected per-board in board_config.h. RadioLib's LR1110 and
+// SX1262 expose the same LoRa begin()/config/CAD surface, so the HAL targets one
+// `AgnRadio` type and branches only for chip-specific RF-switch setup (radio_hal.cpp).
+#if defined(AGN_RADIO_LR1110)
+typedef LR1110 AgnRadio;
+#else
+typedef SX1262 AgnRadio;   // default: RAK4631 / XIAO / Pro Micro / Heltec V4
+#endif
 
 // ISR placement attribute: ESP32/ESP8266 want the handler in IRAM; nRF52 et al.
 // have no such requirement, so this collapses to nothing there.
@@ -112,7 +122,7 @@ private:
     void start_pending_tx();         // air the pending frame now
     static void AGN_ISR_ATTR isr();  // DIO1 handler — sets the flag only
 
-    SX1262          radio_;
+    AgnRadio        radio_;
     RadioRxCallback on_rx_;
     RadioCfg        cfg_;             // PHY parameters currently applied
     volatile State  state_;

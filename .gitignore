@@ -14,3 +14,16 @@ reticulum/inst_*/
 # Test artifacts (received transfers); test_orig.png is kept as the input fixture
 test_recv*.png
 web/fw/
+
+# Controller key backup (SECRET — the network WRITE credential; never commit)
+agnlora-controller-backup.json
+*controller-backup*.json
+
+# Go controller (Phase 4) generated outputs
+controller/capture.csv
+controller/*.csv
+controller/topo.json
+controller/policy.jsonl
+controller/*.jsonl
+controller/state/
+controller/cmd/agnctl/state/

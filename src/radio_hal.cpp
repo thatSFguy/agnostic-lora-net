@@ -13,6 +13,38 @@ static Module* make_lora_module() {
     return new Module(LORA_SPI_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
 }
 
+// ---- Board power rails: VEXT + front-end module (Heltec V4) -----------------
+// On most boards these are no-ops. The Heltec V4 gates the LoRa antenna boost on
+// an active-low VEXT line, and feeds the SX1262 through an external PA/LNA (FEM)
+// that must be powered and switched between full-PA (TX) and bypass/LNA (RX).
+// *** The FEM control is board-revision-specific — verify on first flash (see the
+// note in board_config.h). ***
+#if defined(LORA_VEXT_EN)
+static inline void board_vext_power_up() {
+    pinMode(LORA_VEXT_EN, OUTPUT);
+    digitalWrite(LORA_VEXT_EN, LORA_VEXT_ON_LEVEL);
+}
+#else
+static inline void board_vext_power_up() {}
+#endif
+
+#if defined(LORA_FEM_EN)
+static inline void fem_power_up() {
+#  if defined(LORA_FEM_POWER)
+    pinMode(LORA_FEM_POWER, OUTPUT);
+    digitalWrite(LORA_FEM_POWER, HIGH);   // power the FEM LDO
+#  endif
+    pinMode(LORA_FEM_EN, OUTPUT);
+    digitalWrite(LORA_FEM_EN, HIGH);      // chip-enable (CSD)
+    pinMode(LORA_FEM_TX_EN, OUTPUT);
+    digitalWrite(LORA_FEM_TX_EN, LOW);    // idle in RX/bypass
+}
+static inline void fem_set_tx(bool tx) { digitalWrite(LORA_FEM_TX_EN, tx ? HIGH : LOW); }
+#else
+static inline void fem_power_up() {}
+static inline void fem_set_tx(bool) {}
+#endif
+
 // The compile-time network defaults (board_config.h §"Network-wide PHY").
 RadioCfg radio_default_config() {
     RadioCfg c;
@@ -53,19 +85,29 @@ int16_t RadioHal::begin(RadioRxCallback on_rx, const RadioCfg& cfg) {
     on_rx_    = on_rx;
     cfg_      = cfg;
 
-#if defined(LORA_POWER_EN)
-    // Some modules (Pro Micro) gate the radio's supply on a GPIO — power it up and
-    // let it settle before talking to it. One-time, at init: safe to delay here.
+    // Bring up board power rails before talking to the radio. No-ops on boards that
+    // don't gate the radio supply / antenna boost / FEM (RAK, XIAO, T1000).
+    board_vext_power_up();
+    fem_power_up();
+#if defined(LORA_VEXT_EN) || defined(LORA_FEM_EN) || defined(LORA_POWER_EN)
+#  if defined(LORA_POWER_EN)
+    // Some modules (Pro Micro) gate the radio's supply on a GPIO — drive it high.
     pinMode(LORA_POWER_EN, OUTPUT);
     digitalWrite(LORA_POWER_EN, HIGH);
-    delay(10);
+#  endif
+    delay(10);   // let the rail(s) settle before the first SPI command
 #endif
 
-    // Remap the default SPI bus to the SX1262's LoRa pins, then start it. This is
-    // what MeshCore does on nRF52 (SPI.setPins + SPI.begin) — reusing the global
-    // SPI rather than constructing a second SPIM instance (which wedges begin()).
+    // Remap the default SPI bus to the radio's LoRa pins, then start it. On nRF52
+    // this is the MeshCore approach (SPI.setPins + SPI.begin) — reuse the global SPI
+    // rather than spin up a second SPIM instance (which wedges begin()). ESP32's
+    // SPIClass has no setPins(), so pass the pins straight to begin().
+#if defined(ESP32)
+    SPI.begin(LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI, LORA_SPI_NSS);
+#else
     SPI.setPins(LORA_SPI_MISO, LORA_SPI_SCK, LORA_SPI_MOSI);
     SPI.begin();
+#endif
 
     // Range-check the configured TX power against the hardware ceiling.
     int8_t power = cfg_.power_dbm;
@@ -99,9 +141,25 @@ int16_t RadioHal::begin(RadioRxCallback on_rx, const RadioCfg& cfg) {
     st = radio_.setCRC(true);
     if (st != RADIOLIB_ERR_NONE) return st;
 
-    // All three boards route the antenna switch through the SX1262's DIO2.
+#if defined(AGN_RADIO_LR1110)
+    // LR1110 (T1000-E): the RX/TX path is switched internally by the radio. Tell
+    // RadioLib that no external GPIOs drive the switch (matches Meshtastic's
+    // tracker-t1000-e config), then enable the boosted-RX LNA gain. Both are
+    // non-fatal — a setup hiccup must not block the radio coming up.
+    static const uint32_t rfsw_pins[] = {
+        RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC };
+    static const Module::RfSwitchMode_t rfsw_table[] = {
+        { LR11x0::MODE_STBY,  {} }, { LR11x0::MODE_RX,    {} },
+        { LR11x0::MODE_TX,    {} }, { LR11x0::MODE_TX_HP, {} },
+        { LR11x0::MODE_TX_HF, {} }, { LR11x0::MODE_GNSS,  {} },
+        { LR11x0::MODE_WIFI,  {} }, END_OF_MODE_TABLE };
+    radio_.setRfSwitchTable(rfsw_pins, rfsw_table);
+    (void)radio_.setRxBoostedGainMode(true);
+#else
+    // SX1262 boards route the antenna switch through DIO2.
     st = radio_.setDio2AsRfSwitch(true);
     if (st != RADIOLIB_ERR_NONE) return st;
+#endif
 
 #if defined(LORA_RXEN)
     // Boards with an external RXEN line (XIAO Wio-SX1262, Pro Micro) have RadioLib
@@ -111,8 +169,13 @@ int16_t RadioHal::begin(RadioRxCallback on_rx, const RadioCfg& cfg) {
     radio_.setRfSwitchPins(LORA_RXEN, RADIOLIB_NC);
 #endif
 
-    // Wire DIO1 -> our ISR, then arm continuous receive.
+    // Wire the radio's IRQ line -> our ISR, then arm continuous receive. (SX126x
+    // raises it on DIO1; the LR1110 names the same hook setIrqAction.)
+#if defined(AGN_RADIO_LR1110)
+    radio_.setIrqAction(RadioHal::isr);
+#else
     radio_.setDio1Action(RadioHal::isr);
+#endif
     arm_rx();
     return RADIOLIB_ERR_NONE;
 }
@@ -143,6 +206,7 @@ int16_t RadioHal::apply_config(const RadioCfg& c) {
 
 void RadioHal::arm_rx() {
     state_ = RX;
+    fem_set_tx(false);   // FEM to RX/bypass (no-op without a FEM)
     radio_.startReceive();
 }
 
@@ -176,6 +240,9 @@ void RadioHal::start_cad() {
 }
 
 void RadioHal::start_pending_tx() {
+    // FEM to full-PA before keying up (no-op without a FEM). arm_rx() returns it to
+    // RX once the transmission completes (or on the failure path below).
+    fem_set_tx(true);
     // startTransmit copies the frame into the radio FIFO synchronously, so the
     // pending slot frees as soon as the call returns.
     int16_t st = radio_.startTransmit(pend_buf_, pend_len_);

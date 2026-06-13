@@ -112,6 +112,9 @@ const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e',
 //                hears: {fromId: {q, rssi, snr, age, src}},  // directed: fromId -> this node
 //                routes: [{dst, via, cost, hops}], isGateway }
 const nodes = new Map();
+// Ids the connected gateway is currently blocking (authoritative — rebuilt from the
+// gateway's `[blocked]` line each info poll). A blocked link is gateway -> id.
+let blocked = new Set();
 let gatewayId = null, selected = null, placing = null;
 const positions = JSON.parse(localStorage.getItem('agn-node-pos') || '{}');
 const aliases = JSON.parse(localStorage.getItem('agn-node-alias') || '{}');   // id -> friendly name
@@ -222,6 +225,11 @@ function onLine(line) {
     const n = node(gatewayId); n.isGateway = true; n.lastSeen = now; n.routes = [];
     nbrsCtx = null; render(); return;
   }
+  // Authoritative block list from the gateway (one line per info poll, may be empty).
+  if ((m = t.match(/^\[blocked\]((?:\s+[0-9A-F]{8})*)\s*$/i))) {
+    blocked = new Set((m[1].match(/[0-9A-F]{8}/gi) || []).map(s => s.toUpperCase()));
+    render(); return;
+  }
   if ((m = t.match(/^fw (\S+)/)) && gatewayId) { node(gatewayId).fw = m[1]; return; }
   if ((m = t.match(/^batt .*mv=(\d+) pct=(\d+)/)) && gatewayId) {
     node(gatewayId).batt = { mv:+m[1], pct:+m[2], at:now }; renderDetail(); return;
@@ -324,10 +332,12 @@ function markerFor(id) {
 function nodeIcon(n) {
   const battTxt = n.batt && n.batt.pct !== undefined ? `<small>${n.batt.pct}%</small>` : '';
   const gwTxt = n.isGateway ? '<small class="gw">⌂</small>' : '';
-  const border = n.isGateway ? 'var(--acc)' : freshColor(n);
+  const blk = blocked.has(n.id);
+  const blkTxt = blk ? '<small title="blocked by gateway">🚫</small>' : '';
+  const border = blk ? 'var(--bad, #c0392b)' : n.isGateway ? 'var(--acc)' : freshColor(n);
   const sel = (selected === n.id) ? ';outline:2px solid var(--acc);outline-offset:2px' : '';
   return L.divIcon({ className: '',
-    html: `<div class="nodelabel" style="border-color:${border}${sel}">${nodeName(n.id)}${gwTxt}${battTxt}</div>`,
+    html: `<div class="nodelabel" style="border-color:${border}${sel}">${nodeName(n.id)}${gwTxt}${blkTxt}${battTxt}</div>`,
     iconAnchor: [30, 13] });
 }
 function savePos() { localStorage.setItem('agn-node-pos', JSON.stringify(positions)); }
@@ -516,7 +526,7 @@ function renderDetail() {
     <div id="heardByList">${[...nodes.entries()]
       .filter(([oid, o]) => oid !== n.id && o.hears[n.id])
       .map(([oid, o]) => `<div class="linkrow" data-nid="${oid}" style="color:${qColor(o.hears[n.id].q || 0)}">
-         ${oid} &nbsp;q=${(o.hears[n.id].q ?? 0).toFixed(2)}</div>`).join('')
+         ${nodeName(oid)} &nbsp;q=${(o.hears[n.id].q ?? 0).toFixed(2)}</div>`).join('')
       || '<span class="hint">no node reports hearing it yet</span>'}</div>
     ${isGw ? `
     <h2>Battery calibration</h2>
@@ -533,7 +543,15 @@ function renderDetail() {
     <button id="provGw">Provision THIS gateway</button>
     <h2>Actions</h2>
     <div class="hint">rf / ble / block via the console box (left). Remote nodes: signed power control on their panel.</div>`
-    : `<h2 style="margin-top:12px">Remote control (signed)</h2>
+    : `<h2 style="margin-top:12px">Link from gateway ${blocked.has(n.id) ? '<span class="pill" style="background:#c0392b;color:#fff">blocked</span>' : ''}</h2>
+       <div class="hint">Block the connected gateway's link to this node. Local + unsigned —
+       it applies on the gateway you're connected to (not the remote node), so it's the
+       Tier-0 testing hook for forcing a multi-hop path. Authoritative state comes back
+       from the gateway's block list.</div>
+       <div style="margin-top:6px">
+         <button id="blkBtn">${blocked.has(n.id) ? 'Unblock link' : 'Block link'}</button>
+       </div>
+       <h2 style="margin-top:12px">Remote control (signed)</h2>
        <div class="hint">Requires this browser's controller key provisioned on the node
        (<span class="mono">ctrlkey</span> at install). Power decreases auto-revert in 60 s
        unless confirmed — the map confirms automatically on the ack.</div>
@@ -550,6 +568,15 @@ function renderDetail() {
   };
   el.querySelector('#aliasSave').onclick = aliasSave;
   el.querySelector('#aliasIn').addEventListener('keydown', ev => { if (ev.key === 'Enter') aliasSave(); });
+  const blk = el.querySelector('#blkBtn');
+  if (blk) blk.onclick = async () => {
+    if (!gw) return;
+    const willBlock = !blocked.has(n.id);
+    await gw.sendLine((willBlock ? 'block ' : 'unblock ') + n.id);
+    if (willBlock) blocked.add(n.id); else blocked.delete(n.id);   // optimistic…
+    render(); renderDetail();
+    setTimeout(() => gw && gw.sendLine('info').catch(()=>{}), 300); // …confirmed by [blocked]
+  };
   const pa = el.querySelector('#pwrApply');
   if (pa) pa.onclick = () => {
     const v = Math.max(-9, Math.min(22, +el.querySelector('#pwrSet').value));

@@ -29,17 +29,24 @@
 
 namespace mesh {
 
-enum CtrlCmd : uint8_t { CTRL_POWER = 1, CTRL_CONFIRM = 2 };
+enum CtrlCmd : uint8_t { CTRL_POWER = 1, CTRL_CONFIRM = 2, CTRL_BLOCK = 3, CTRL_UNBLOCK = 4 };
 enum CtrlVerdict : uint8_t { CTRL_OK = 0, CTRL_MALFORMED, CTRL_BAD_SIG, CTRL_REPLAY };
 
 constexpr uint8_t  CTRL_VER       = 1;
-constexpr uint16_t CTRL_MSG_BYTES = 11 + 64;   // unsigned part + signature
+// POWER/CONFIRM keep the original 11-byte unsigned header (ver|cmd|target|arg|counter).
+// BLOCK/UNBLOCK insert a 4-byte `aux` (the victim id) before the counter, so they carry
+// BOTH the recipient (target) and the link to drop (aux). Layouts branch on cmd so the
+// POWER wire format — and every already-provisioned signer — is untouched.
+constexpr uint16_t CTRL_MSG_BYTES = 11 + 64;   // POWER/CONFIRM: unsigned + signature
+constexpr uint16_t CTRL_BLK_BYTES = 15 + 64;   // BLOCK/UNBLOCK: + 4-byte victim id
+constexpr uint16_t CTRL_MAX_BYTES = CTRL_BLK_BYTES;   // size any command buffer with this
 constexpr uint16_t CTRL_ACK_BYTES = 12;
 
 struct CtrlMsg {
     uint8_t   cmd     = 0;
-    node_id_t target  = 0;
-    int8_t    arg     = 0;
+    node_id_t target  = 0;     // recipient: the node that applies the command
+    int8_t    arg     = 0;     // POWER: dBm. BLOCK: TTL minutes (0 = firmware default)
+    node_id_t aux     = 0;     // BLOCK/UNBLOCK: the victim id to block/unblock (else 0)
     uint32_t  counter = 0;
 };
 
@@ -51,10 +58,17 @@ struct CtrlAck {
     uint32_t  counter     = 0;
 };
 
-// Build a signed command. `seckey` is the 64-byte Ed25519 secret key
-// (monocypher layout). Returns bytes written, or 0 on bad args/cap.
+// Build a signed POWER/CONFIRM command (11-byte layout). `seckey` is the 64-byte
+// Ed25519 secret key (monocypher layout). Returns bytes written, or 0 on bad args/cap.
 uint16_t ctrl_build(uint8_t cmd, node_id_t target, int8_t arg, uint32_t counter,
                     const uint8_t seckey[64], uint8_t* out, uint16_t cap);
+
+// Build a signed BLOCK/UNBLOCK command (15-byte layout). `target` is the recipient that
+// will apply the block; `victim` is the link/node it should drop; `ttl_min` (BLOCK only)
+// is the auto-expiry the node enforces unless renewed (0 = firmware default). Returns
+// bytes written (CTRL_BLK_BYTES), or 0 on bad args/cap.
+uint16_t ctrl_build_block(uint8_t cmd, node_id_t target, node_id_t victim, int8_t ttl_min,
+                          uint32_t counter, const uint8_t seckey[64], uint8_t* out, uint16_t cap);
 
 // Parse + verify a command against `pubkey` and the replay floor `min_counter`
 // (accepts only counter > min_counter). On CTRL_OK, `out` is filled.

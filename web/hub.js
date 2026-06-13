@@ -2,7 +2,10 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const RELEASE_BASE = 'https://github.com/thatSFguy/agnostic-lora-net/releases/latest/download/';
-const BOARD_FILE = { rak:'agn-rak', xiao:'agn-xiao', promicro:'agn-promicro' };
+const BOARD_FILE = { rak:'agn-rak', xiao:'agn-xiao', promicro:'agn-promicro', t1000:'agn-t1000' };
+// ESP32 boards don't use the nRF52 serial-DFU path below — they flash with esptool /
+// ESP Web Tools. The hub can't drive that, so selecting one shows guidance instead.
+const ESP32_BOARD_FILE = { 'heltec-v4':'agn-heltec-v4' };
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e', NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e', NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 function showTab(t) {
@@ -49,6 +52,17 @@ function setStep(n) {
 async function doFlash() {
   const board = $('board').value;
   $('flashBoard').textContent = $('board').selectedOptions[0].text;
+
+  // ESP32 boards (Heltec V4): no in-browser flashing here — point at the CLI route.
+  if (board in ESP32_BOARD_FILE) {
+    setStep(2); $('uf2Fallback').classList.add('hide'); $('prog').style.width='0';
+    $('flashState').textContent='ESP32 — flash over USB serial'; $('flashState').className='pill';
+    log('Heltec V4 is an ESP32-S3 board; the nRF52 serial-DFU path does not apply.');
+    log('Flash it from the repo with:  pio run -e heltec_v4 -t upload');
+    log('(app image also staged at '+fwBaseUrl()+ESP32_BOARD_FILE[board]+'.bin for esptool / ESP Web Tools)');
+    return;
+  }
+
   setStep(2); $('uf2Fallback').classList.add('hide'); $('prog').style.width='0';
   $('dlUf2').onclick = () => window.open(fwBaseUrl()+BOARD_FILE[board]+'.uf2', '_blank');
 

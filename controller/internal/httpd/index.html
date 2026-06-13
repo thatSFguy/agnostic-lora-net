@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AGN Controller — live</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --line:#283040; --dim:#8b97a7; --txt:#d7dee8;
+          --acc:#4ea1ff; --lower:#e0a030; --raise:#2fd4c6; --confirm:#3fcf6a;
+          --revert:#e0556a; --ack:#5aa9ff; --seed:#b58cff; --hold:#6b7686; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header b { color:var(--acc); }
+  #grid { display:grid; grid-template-columns:minmax(320px,1fr) minmax(360px,1.2fr); gap:0; height:calc(100vh - 46px); }
+  #nodes, #feed { overflow:auto; padding:12px 16px; }
+  #nodes { border-right:1px solid var(--line); }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:0 0 8px; }
+  .node { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  .node .id { font-weight:600; }
+  .gw { color:var(--acc); }
+  .kv { color:var(--dim); }
+  .bar { height:6px; background:#222a36; border-radius:3px; margin-top:6px; overflow:hidden; }
+  .bar > span { display:block; height:100%; background:var(--raise); }
+  .ev { white-space:pre-wrap; word-break:break-word; padding:1px 0; }
+  .ev .t { color:var(--dim); }
+  .lower{color:var(--lower)} .raise{color:var(--raise)} .hold{color:var(--hold)} .skip{color:var(--hold)}
+  .confirm{color:var(--confirm)} .revert{color:var(--revert)} .ack{color:var(--ack)} .seed{color:var(--seed)}
+  .pill { font-size:10px; padding:1px 6px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
+  #stale { color:var(--revert); }
+</style>
+</head>
+<body>
+<header>
+  <div><b>AGN Controller</b> — live</div>
+  <div>gateway <span id="gw" class="gw">—</span></div>
+  <div id="count" class="kv"></div>
+  <div id="upd" class="kv"></div>
+  <div id="stale"></div>
+</header>
+<div id="grid">
+  <section id="nodes"><h2>Nodes</h2><div id="nodelist"></div></section>
+  <section id="feed"><h2>Decision feed (newest first)</h2><div id="evlist"></div></section>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
+let lastOk = 0;
+
+function fmtAgo(ms){ const s=Math.round((Date.now()-ms)/1000); return s<2?'now':s+'s ago'; }
+
+function render(state){
+  lastOk = Date.now();
+  const snap = state.snapshot || {}, nodes = snap.nodes || [], links = snap.links || [], events = state.events || [];
+  $('#gw').textContent = snap.gateway || '—';
+  $('#count').textContent = nodes.length + ' nodes · ' + links.length + ' links';
+  $('#upd').textContent = 'updated ' + new Date().toLocaleTimeString();
+  $('#stale').textContent = '';
+
+  // latest decision per node (for margin/action overlay)
+  const lastDec = {};
+  for (const e of events) if (e.kind==='decision') lastDec[e.node] = e;
+  // gateway RSSI/SNR per node (link node->gateway)
+  const heard = {};
+  for (const l of links) if (l.to===snap.gateway) heard[l.from] = l;
+
+  $('#nodelist').innerHTML = nodes.slice().sort((a,b)=> (b.is_gateway?1:0)-(a.is_gateway?1:0)).map(n=>{
+    const d = lastDec[n.id]; const h = heard[n.id];
+    const pwr = d ? (d.action==='lower'||d.action==='raise' ? d.new_target : d.cur_target) : (n.power_dbm ?? '—');
+    const margin = d && d.has_snr ? d.margin : (h ? (h.snr - (SNR_LIMIT[n.sf||9]??-12.5)) : null);
+    const act = d ? d.action : '';
+    const pct = margin==null ? 0 : Math.max(0, Math.min(100, (margin)/24*100)); // 0..24 dB scale
+    return `<div class="node">
+      <div><span class="id ${n.is_gateway?'gw':''}">${n.id}</span> ${n.is_gateway?'<span class="pill">gateway</span>':''} ${act?`<span class="pill ${act}">${act}</span>`:''}</div>
+      <div class="kv">SF${n.sf||'?'} · ${typeof pwr==='number'?pwr+' dBm':pwr}${n.batt_pct?` · ${n.batt_pct}%`:''}${h?` · gw hears ${h.rssi}dBm/${h.snr}dB`:''}</div>
+      ${margin!=null?`<div class="kv">margin ${margin.toFixed(1)} dB</div><div class="bar"><span style="width:${pct}%"></span></div>`:`<div class="kv">no SNR yet</div>`}
+    </div>`;
+  }).join('') || '<div class="kv">waiting for the node…</div>';
+
+  $('#evlist').innerHTML = events.slice(-120).reverse().map(e=>{
+    const t = new Date(e.ts_unix_ms).toLocaleTimeString();
+    let msg;
+    if (e.kind==='decision'){
+      if (e.action==='hold') msg = `${e.node} margin ${e.margin?.toFixed(1)} → HOLD @${e.cur_target}dBm`;
+      else if (e.action==='skip') msg = `${e.node} SKIP — ${e.reason}`;
+      else msg = `${e.node} margin ${e.margin?.toFixed(1)} → ${e.action.toUpperCase()} ${e.cur_target}→${e.new_target}dBm${e.applied?` [sent ctr=${e.counter}]`:' [dry]'}`;
+    } else msg = `${e.node||''} [${e.kind}] ${e.msg||''}`;
+    const cls = e.kind==='decision' ? (e.action||'hold') : e.kind;
+    return `<div class="ev"><span class="t">${t}</span> <span class="${cls}">${msg}</span></div>`;
+  }).join('') || '<div class="kv">no decisions yet — start with -optimize</div>';
+}
+
+async function tick(){
+  try { const r = await fetch('/api/state'); if(r.ok) render(await r.json()); }
+  catch(e){}
+  if (Date.now()-lastOk > 6000) $('#stale').textContent = '● controller not responding';
+}
+tick(); setInterval(tick, 1500);
+</script>
+</body>
+</html>
