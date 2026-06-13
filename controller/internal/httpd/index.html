@@ -7,95 +7,154 @@
 <style>
   :root { --bg:#0e1116; --panel:#161b22; --line:#283040; --dim:#8b97a7; --txt:#d7dee8;
           --acc:#4ea1ff; --lower:#e0a030; --raise:#2fd4c6; --confirm:#3fcf6a;
-          --revert:#e0556a; --ack:#5aa9ff; --seed:#b58cff; --hold:#6b7686; }
+          --revert:#e0556a; --ack:#5aa9ff; --seed:#b58cff; --hold:#6b7686; --heartbeat:#7a8aa0; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--txt); font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
-  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
-  header b { color:var(--acc); }
-  #grid { display:grid; grid-template-columns:minmax(320px,1fr) minmax(360px,1.2fr); gap:0; height:calc(100vh - 46px); }
-  #nodes, #feed { overflow:auto; padding:12px 16px; }
-  #nodes { border-right:1px solid var(--line); }
+  header { padding:8px 16px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header b { color:var(--acc); } .kv { color:var(--dim); } #stale { color:var(--revert); }
+  .tab { padding:3px 10px; border:1px solid var(--line); border-radius:6px; cursor:pointer; color:var(--dim); }
+  .tab.on { color:var(--acc); border-color:var(--acc); }
+  #grid { display:grid; grid-template-columns:minmax(330px,1.1fr) minmax(290px,1fr) minmax(290px,1fr); height:calc(100vh - 43px); }
+  #mapview { height:calc(100vh - 43px); }
+  .hide { display:none!important; }
+  section { overflow:auto; padding:10px 14px; border-right:1px solid var(--line); }
   h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:0 0 8px; }
   .node { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
-  .node .id { font-weight:600; }
-  .gw { color:var(--acc); }
-  .kv { color:var(--dim); }
-  .bar { height:6px; background:#222a36; border-radius:3px; margin-top:6px; overflow:hidden; }
-  .bar > span { display:block; height:100%; background:var(--raise); }
-  .ev { white-space:pre-wrap; word-break:break-word; padding:1px 0; }
-  .ev .t { color:var(--dim); }
-  .lower{color:var(--lower)} .raise{color:var(--raise)} .hold{color:var(--hold)} .skip{color:var(--hold)}
-  .confirm{color:var(--confirm)} .revert{color:var(--revert)} .ack{color:var(--ack)} .seed{color:var(--seed)}
+  .node .id { font-weight:600; } .gw { color:var(--acc); }
+  .bar { height:5px; background:#222a36; border-radius:3px; margin:5px 0; overflow:hidden; } .bar>span{display:block;height:100%;background:var(--raise);}
+  .row { display:flex; gap:5px; align-items:center; margin-top:6px; flex-wrap:wrap; }
+  input,button { background:#0d1117; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:3px 7px; font:inherit; }
+  input.alias{flex:1} input.pw{width:3.6rem}
+  button { cursor:pointer; } button:hover{border-color:var(--acc);} button.danger:hover{border-color:var(--revert);color:var(--revert);}
   .pill { font-size:10px; padding:1px 6px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
-  #stale { color:var(--revert); }
+  .blocked { border-color:var(--revert)!important; } .blk{color:var(--revert)}
+  .ev,.cl { white-space:pre-wrap; word-break:break-word; padding:1px 0; } .ev .t,.cl .t{color:var(--dim)}
+  .lower{color:var(--lower)} .raise{color:var(--raise)} .hold{color:var(--hold)} .skip{color:var(--hold)}
+  .confirm{color:var(--confirm)} .revert{color:var(--revert)} .ack{color:var(--ack)} .seed{color:var(--seed)} .heartbeat{color:var(--heartbeat)}
+  #console { display:flex; flex-direction:column; } #conout { flex:1; overflow:auto; } #conin{ display:flex; gap:5px; margin-top:6px; } #conin input{flex:1}
+  #toast { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:7px 14px; opacity:0; transition:opacity .2s; pointer-events:none; }
+  #toast.show{opacity:1;}
+  svg text { fill:var(--txt); font-size:13px; } .maphint{ position:absolute; bottom:10px; left:14px; color:var(--dim); }
 </style>
 </head>
 <body>
 <header>
-  <div><b>AGN Controller</b> — live</div>
-  <div>gateway <span id="gw" class="gw">—</span></div>
+  <div><b>AGN Controller</b></div>
+  <div class="tab on" id="tab-dash">Dashboard</div>
+  <div class="tab" id="tab-map">Map</div>
+  <div>gw <span id="gw" class="gw">—</span></div>
   <div id="count" class="kv"></div>
+  <div id="key" class="kv"></div>
   <div id="upd" class="kv"></div>
   <div id="stale"></div>
 </header>
 <div id="grid">
-  <section id="nodes"><h2>Nodes</h2><div id="nodelist"></div></section>
-  <section id="feed"><h2>Decision feed (newest first)</h2><div id="evlist"></div></section>
+  <section id="nodes"><h2>Nodes &amp; control</h2><div id="nodelist"></div></section>
+  <section id="feed"><h2>Decision feed</h2><div id="evlist"></div></section>
+  <section id="console"><h2>Gateway console</h2><div id="conout"></div>
+    <div id="conin"><input id="conline" placeholder="console command (info, rf show, nbrdump, trace on/off…)" autocomplete="off"><button id="consend">Send</button></div>
+  </section>
 </div>
+<div id="mapview" class="hide" style="position:relative"></div>
+<div id="toast"></div>
 <script>
 const $ = s => document.querySelector(s);
 const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
-let lastOk = 0;
+let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null;
+const nm = id => aliases[id] || id;
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const qcol = q => `hsl(${Math.round((q||0)*120)},60%,55%)`;
 
-function fmtAgo(ms){ const s=Math.round((Date.now()-ms)/1000); return s<2?'now':s+'s ago'; }
+function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...p})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); return j.ok; }catch(e){ toast('✗ '+e); } }
+function uiPost(b){ fetch('/api/ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
+function setAlias(id,name){ if(name)aliases[id]=name; else delete aliases[id]; uiPost({type:'alias',id,name}); }
 
-function render(state){
-  lastOk = Date.now();
-  const snap = state.snapshot || {}, nodes = snap.nodes || [], links = snap.links || [], events = state.events || [];
-  $('#gw').textContent = snap.gateway || '—';
-  $('#count').textContent = nodes.length + ' nodes · ' + links.length + ' links';
-  $('#upd').textContent = 'updated ' + new Date().toLocaleTimeString();
-  $('#stale').textContent = '';
+function setView(v){ view=v; $('#tab-dash').classList.toggle('on',v==='dash'); $('#tab-map').classList.toggle('on',v==='map');
+  $('#grid').classList.toggle('hide',v!=='dash'); $('#mapview').classList.toggle('hide',v!=='map'); if(state) render(state); }
+$('#tab-dash').onclick=()=>setView('dash'); $('#tab-map').onclick=()=>setView('map');
 
-  // latest decision per node (for margin/action overlay)
-  const lastDec = {};
-  for (const e of events) if (e.kind==='decision') lastDec[e.node] = e;
-  // gateway RSSI/SNR per node (link node->gateway)
-  const heard = {};
-  for (const l of links) if (l.to===snap.gateway) heard[l.from] = l;
+function editingNodes(){ const a=document.activeElement; return a&&a.tagName==='INPUT'&&$('#nodelist').contains(a); }
 
-  $('#nodelist').innerHTML = nodes.slice().sort((a,b)=> (b.is_gateway?1:0)-(a.is_gateway?1:0)).map(n=>{
-    const d = lastDec[n.id]; const h = heard[n.id];
-    const pwr = d ? (d.action==='lower'||d.action==='raise' ? d.new_target : d.cur_target) : (n.power_dbm ?? '—');
-    const margin = d && d.has_snr ? d.margin : (h ? (h.snr - (SNR_LIMIT[n.sf||9]??-12.5)) : null);
-    const act = d ? d.action : '';
-    const pct = margin==null ? 0 : Math.max(0, Math.min(100, (margin)/24*100)); // 0..24 dB scale
-    return `<div class="node">
-      <div><span class="id ${n.is_gateway?'gw':''}">${n.id}</span> ${n.is_gateway?'<span class="pill">gateway</span>':''} ${act?`<span class="pill ${act}">${act}</span>`:''}</div>
-      <div class="kv">SF${n.sf||'?'} · ${typeof pwr==='number'?pwr+' dBm':pwr}${n.batt_pct?` · ${n.batt_pct}%`:''}${h?` · gw hears ${h.rssi}dBm/${h.snr}dB`:''}</div>
-      ${margin!=null?`<div class="kv">margin ${margin.toFixed(1)} dB</div><div class="bar"><span style="width:${pct}%"></span></div>`:`<div class="kv">no SNR yet</div>`}
-    </div>`;
+function renderNodes(state){
+  if(editingNodes()) return;
+  const snap=state.snapshot||{}, nodes=snap.nodes||[], links=snap.links||[], events=state.events||[];
+  const lastDec={}; for(const e of events) if(e.kind==='decision') lastDec[e.node]=e;
+  const heard={}; for(const l of links) if(l.to===gateway) heard[l.from]=l;
+  $('#nodelist').innerHTML = nodes.slice().sort((a,b)=>(b.is_gateway?1:0)-(a.is_gateway?1:0)).map(n=>{
+    const d=lastDec[n.id], h=heard[n.id], isGw=n.is_gateway;
+    const pwr=d?(d.action==='lower'||d.action==='raise'?d.new_target:d.cur_target):(n.power_dbm??'');
+    const margin=d&&d.has_snr?d.margin:(h?(h.snr-(SNR_LIMIT[n.sf||9]??-12.5)):null);
+    const pct=margin==null?0:Math.max(0,Math.min(100,margin/24*100)); const act=d?d.action:'';
+    const ctrls=isGw?'':`<div class="row">
+        <input class="pw" type="number" value="${typeof pwr==='number'?pwr:''}" data-pw="${n.id}" title="dBm">
+        <button data-pwset="${n.id}">Set</button><button data-pwkeep="${n.id}">Keep</button>
+        ${n.blocked?`<button class="danger" data-unblock="${n.id}">Unblock</button>`:`<button class="danger" data-block="${n.id}">Block</button>`}</div>`;
+    return `<div class="node ${n.blocked?'blocked':''}">
+      <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${isGw?'<span class="pill">gateway</span>':''}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
+      <div class="kv">${n.id} · SF${n.sf||'?'}${typeof pwr==='number'?' · '+pwr+'dBm':''}${n.batt_pct?' · '+n.batt_pct+'%':''}${h?' · gw hears '+h.rssi+'/'+h.snr+'dB':''}</div>
+      ${margin!=null?`<div class="kv">margin ${margin.toFixed(1)} dB</div><div class="bar"><span style="width:${pct}%"></span></div>`:'<div class="kv">no SNR yet</div>'}
+      <div class="row"><input class="alias" placeholder="alias" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" data-alias="${n.id}"></div>${ctrls}</div>`;
   }).join('') || '<div class="kv">waiting for the node…</div>';
-
-  $('#evlist').innerHTML = events.slice(-120).reverse().map(e=>{
-    const t = new Date(e.ts_unix_ms).toLocaleTimeString();
-    let msg;
-    if (e.kind==='decision'){
-      if (e.action==='hold') msg = `${e.node} margin ${e.margin?.toFixed(1)} → HOLD @${e.cur_target}dBm`;
-      else if (e.action==='skip') msg = `${e.node} SKIP — ${e.reason}`;
-      else msg = `${e.node} margin ${e.margin?.toFixed(1)} → ${e.action.toUpperCase()} ${e.cur_target}→${e.new_target}dBm${e.applied?` [sent ctr=${e.counter}]`:' [dry]'}`;
-    } else msg = `${e.node||''} [${e.kind}] ${e.msg||''}`;
-    const cls = e.kind==='decision' ? (e.action||'hold') : e.kind;
-    return `<div class="ev"><span class="t">${t}</span> <span class="${cls}">${msg}</span></div>`;
-  }).join('') || '<div class="kv">no decisions yet — start with -optimize</div>';
+  $('#nodelist').querySelectorAll('[data-alias]').forEach(el=>el.onchange=()=>setAlias(el.dataset.alias,el.value.trim()));
+  const pw=id=>{const el=$(`[data-pw="${id}"]`);return el?+el.value:NaN;};
+  $('#nodelist').querySelectorAll('[data-pwset]').forEach(b=>b.onclick=()=>{const v=pw(b.dataset.pwset);if(!isNaN(v))api('power',{node:b.dataset.pwset,dbm:v});});
+  $('#nodelist').querySelectorAll('[data-pwkeep]').forEach(b=>b.onclick=()=>{const v=pw(b.dataset.pwkeep);if(!isNaN(v))api('confirm',{node:b.dataset.pwkeep,dbm:v});});
+  $('#nodelist').querySelectorAll('[data-block]').forEach(b=>b.onclick=()=>api('block',{node:gateway,victim:b.dataset.block,ttl:30}));
+  $('#nodelist').querySelectorAll('[data-unblock]').forEach(b=>b.onclick=()=>api('unblock',{node:gateway,victim:b.dataset.unblock}));
 }
 
-async function tick(){
-  try { const r = await fetch('/api/state'); if(r.ok) render(await r.json()); }
-  catch(e){}
-  if (Date.now()-lastOk > 6000) $('#stale').textContent = '● controller not responding';
+const W=1000,H=620;
+function mapXY(n,i,N){ const p=positions[n.id]; if(p)return[p[0]*W,p[1]*H];
+  if(n.is_gateway)return[W/2,H/2]; const a=i/Math.max(1,N)*2*Math.PI; return[W/2+Math.cos(a)*W*0.34,H/2+Math.sin(a)*H*0.36]; }
+function renderMap(state){
+  if(dragging) return;
+  const snap=state.snapshot||{}, nodes=snap.nodes||[], links=snap.links||[];
+  const xy={}; nodes.forEach((n,i)=>xy[n.id]=mapXY(n,i,nodes.length));
+  const pair={}; for(const l of links){ if(xy[l.from]&&xy[l.to]){ const k=[l.from,l.to].sort().join('|'); if(!pair[k]||l.q>pair[k].q) pair[k]={...l}; } }
+  let s=`<svg id="svg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">`;
+  for(const k in pair){ const l=pair[k],a=xy[l.from],b=xy[l.to]; s+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${qcol(l.q)}" stroke-width="2" opacity="0.65"/>`; }
+  nodes.forEach((n,i)=>{ const [x,y]=xy[n.id]; const fill=n.is_gateway?'var(--acc)':(n.blocked?'var(--revert)':'#2a3340');
+    s+=`<g class="mnode" data-id="${n.id}" transform="translate(${x},${y})" style="cursor:grab">
+      <circle r="10" fill="${fill}" stroke="var(--line)" stroke-width="2"/>
+      <text y="-15" text-anchor="middle">${nm(n.id)}</text></g>`; });
+  s+=`</svg><div class="maphint">drag nodes to lay out the mesh · line colour = link quality · positions save automatically</div>`;
+  $('#mapview').innerHTML=s;
+  $('#mapview').querySelectorAll('.mnode').forEach(g=>{
+    g.addEventListener('mousedown',ev=>{ ev.preventDefault(); dragging=g.dataset.id; const svg=$('#svg');
+      const move=e=>{ const r=svg.getBoundingClientRect(); const fx=clamp01((e.clientX-r.left)/r.width), fy=clamp01((e.clientY-r.top)/r.height);
+        positions[dragging]=[fx,fy]; g.setAttribute('transform',`translate(${fx*W},${fy*H})`); };
+      const up=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up);
+        const p=positions[dragging]; uiPost({type:'pos',id:dragging,x:p[0],y:p[1]}); dragging=null; };
+      document.addEventListener('mousemove',move); document.addEventListener('mouseup',up); });
+  });
 }
-tick(); setInterval(tick, 1500);
+
+function renderFeed(events){
+  $('#evlist').innerHTML=events.slice(-140).reverse().map(e=>{ const t=new Date(e.ts_unix_ms).toLocaleTimeString(); let msg;
+    if(e.kind==='decision'){ if(e.action==='hold')msg=`${nm(e.node)} margin ${e.margin?.toFixed(1)} → HOLD @${e.cur_target}dBm`;
+      else if(e.action==='skip')msg=`${nm(e.node)} SKIP`;
+      else msg=`${nm(e.node)} margin ${e.margin?.toFixed(1)} → ${e.action.toUpperCase()} ${e.cur_target}→${e.new_target}dBm${e.applied?' [sent]':' [dry]'}`;
+    } else msg=`${nm(e.node||'')} [${e.kind}] ${e.msg||''}`;
+    const cls=e.kind==='decision'?(e.action||'hold'):e.kind;
+    return `<div class="ev"><span class="t">${t}</span> <span class="${cls}">${msg}</span></div>`; }).join('')||'<div class="kv">no decisions yet</div>';
+}
+function renderConsole(lines){ const out=$('#conout'); const pinned=out.scrollHeight-out.scrollTop-out.clientHeight<30;
+  out.innerHTML=(lines||[]).slice(-200).map(l=>`<div class="cl">${l.replace(/[<&]/g,c=>({'<':'&lt;','&':'&amp;'}[c]))}</div>`).join(''); if(pinned)out.scrollTop=out.scrollHeight; }
+
+let state=null;
+function render(st){
+  state=st; lastOk=Date.now(); gateway=st.snapshot?.gateway||''; hasKey=st.has_key;
+  if(!dragging){ aliases=st.aliases||{}; positions=st.positions||{}; }
+  $('#gw').textContent=gateway?nm(gateway):'—'; $('#count').textContent=(st.snapshot?.nodes?.length||0)+' nodes';
+  $('#key').textContent=hasKey?'key '+(st.pub||'').slice(0,12)+'…':'⚠ no key (read-only)';
+  $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';
+  if(view==='map'){ renderMap(st); } else { renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
+}
+async function tick(){ try{ const r=await fetch('/api/state'); if(r.ok) render(await r.json()); }catch(e){} if(Date.now()-lastOk>6000)$('#stale').textContent='● controller not responding'; }
+$('#consend').onclick=()=>{ const v=$('#conline').value.trim(); if(v){api('raw',{line:v});$('#conline').value='';} };
+$('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').click(); });
+tick(); setInterval(tick,1500);
 </script>
 </body>
 </html>

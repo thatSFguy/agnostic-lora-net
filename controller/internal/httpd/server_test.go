@@ -16,7 +16,8 @@ func TestServe(t *testing.T) {
 	g := topo.New()
 	g.Apply(ingest.Event{Kind: ingest.KindInfoHeader, ID: "GW000001"}, time.Now())
 
-	s := New(g)
+	var sent []string
+	s := New(g, nil, func(line string) error { sent = append(sent, line); return nil }, "")
 	s.Sink(policy.Record{Kind: "decision", Node: "AAAA0001"})
 
 	h := s.Handler()
@@ -43,5 +44,29 @@ func TestServe(t *testing.T) {
 	}
 	if len(st.Events) != 1 || st.Events[0].Node != "AAAA0001" {
 		t.Fatalf("events=%v", st.Events)
+	}
+}
+
+func TestCmdAPI(t *testing.T) {
+	var sent []string
+	s := New(topo.New(), nil, func(l string) error { sent = append(sent, l); return nil }, "")
+	h := s.Handler()
+
+	// raw console line needs no key -> sent through.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST", "/api/cmd", strings.NewReader(`{"action":"raw","line":"info"}`)))
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["ok"] != true || len(sent) != 1 || sent[0] != "info" {
+		t.Fatalf("raw cmd: ok=%v sent=%v", resp["ok"], sent)
+	}
+
+	// block needs a key -> rejected cleanly when there's none.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("POST", "/api/cmd", strings.NewReader(`{"action":"block","node":"AABBCCDD","victim":"11223344"}`)))
+	var resp2 map[string]any
+	_ = json.Unmarshal(rr2.Body.Bytes(), &resp2)
+	if resp2["ok"] != false {
+		t.Fatalf("block without key should fail, got %v", resp2)
 	}
 }

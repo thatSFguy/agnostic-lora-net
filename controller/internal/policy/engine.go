@@ -15,23 +15,26 @@ import (
 // targets per node and managing the decrease->confirm safety dance. All I/O goes through
 // the injected send func + keystore so it stays testable.
 type Engine struct {
-	mu    sync.Mutex
-	cfg   Config
-	log   *Logger
-	ks    *keystore.Store
-	send  func(string) error
-	apply bool
-	fresh time.Duration
+	mu        sync.Mutex
+	cfg       Config
+	log       *Logger
+	ks        *keystore.Store
+	send      func(string) error
+	apply     bool
+	fresh     time.Duration
+	heartbeat time.Duration // re-assert a held node this often (keeps its #3 watchdog fresh)
 
-	targets map[string]int8 // power the controller currently targets per node
-	pending map[string]int8 // nodes whose decrease awaits a CONFIRM (value = power)
-	miss    map[string]int  // cycles a pending node has been unreachable
+	targets  map[string]int8      // power the controller currently targets per node
+	pending  map[string]int8      // nodes whose decrease awaits a CONFIRM (value = power)
+	miss     map[string]int       // cycles a pending node has been unreachable
+	lastSent map[string]time.Time // last time we sent any command to a node
 }
 
-func NewEngine(cfg Config, log *Logger, ks *keystore.Store, send func(string) error, apply bool, fresh time.Duration) *Engine {
+func NewEngine(cfg Config, log *Logger, ks *keystore.Store, send func(string) error, apply bool, fresh, heartbeat time.Duration) *Engine {
 	return &Engine{
-		cfg: cfg, log: log, ks: ks, send: send, apply: apply, fresh: fresh,
+		cfg: cfg, log: log, ks: ks, send: send, apply: apply, fresh: fresh, heartbeat: heartbeat,
 		targets: map[string]int8{}, pending: map[string]int8{}, miss: map[string]int{},
+		lastSent: map[string]time.Time{},
 	}
 }
 
@@ -72,6 +75,7 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 			if e.apply && e.ks != nil {
 				if ctr, err := e.ks.Next(); err == nil {
 					if line, err := commander.Confirm(parseHexID(node), pwr, ctr, e.ks.Priv()); err == nil && e.send(line) == nil {
+						e.lastSent[node] = now
 						e.log.Event(now, "confirm", node, fmt.Sprintf("still reachable after decrease — CONFIRMed %ddBm (ctr=%d)", pwr, ctr))
 					}
 				}
@@ -120,10 +124,23 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 			if c, err := e.ks.Next(); err == nil {
 				if line, err := commander.Power(parseHexID(n.ID), d.NewTarget, c, e.ks.Priv()); err == nil && e.send(line) == nil {
 					applied, ctr = true, c
+					e.lastSent[n.ID] = now
 					e.targets[n.ID] = d.NewTarget // controller owns the power; track what we set
 					if d.Action == Lower {
 						e.pending[n.ID] = d.NewTarget // a decrease must be CONFIRMed next cycle
 						e.miss[n.ID] = 0
+					}
+				}
+			}
+		} else if e.apply && e.ks != nil && d.Action == Hold && e.heartbeat > 0 {
+			// Heartbeat: re-assert a held node's runtime power so its node-side #3 watchdog
+			// doesn't expire and snap it back to the loud flash default. Only for nodes we've
+			// actually commanded (lastSent set).
+			if t, ok := e.lastSent[n.ID]; ok && now.Sub(t) >= e.heartbeat {
+				if c, err := e.ks.Next(); err == nil {
+					if line, err := commander.Power(parseHexID(n.ID), cur, c, e.ks.Priv()); err == nil && e.send(line) == nil {
+						e.lastSent[n.ID] = now
+						e.log.Event(now, "heartbeat", n.ID, fmt.Sprintf("re-assert %ddBm (keep node watchdog fresh)", cur))
 					}
 				}
 			}

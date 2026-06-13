@@ -118,7 +118,10 @@
 // Network-wide PHY (Agent.md §3 "Confirmed parameters"). ALL nodes must match
 // these to hear each other — LongFast preset on a single US channel.
 // ---------------------------------------------------------------------------
-#define PHY_FREQ_MHZ      904.375f  // single fixed channel for v1
+#define PHY_FREQ_MHZ      906.625f  // single fixed channel for v1. One 250 kHz slot below
+                                    // Meshtastic US LongFast (906.875) on the US915 raster:
+                                    // close, non-overlapping, and clear of the busier lower
+                                    // LoRaWAN-uplink area. Network-wide — all nodes must match.
 #define PHY_BW_KHZ        250.0f    // bandwidth
 #define PHY_SF            9         // spreading factor: 5 dB more budget than SF7,
                                     // texts still ~2 s — the deployment sweet spot

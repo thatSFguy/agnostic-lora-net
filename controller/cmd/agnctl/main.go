@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"net/http"
+	"path/filepath"
 
 	"agnostic-lora-net/controller/internal/capture"
 	"agnostic-lora-net/controller/internal/commander"
@@ -53,14 +54,15 @@ func main() {
 		importBak = flag.String("import-backup", "", "adopt the controller key from a map-app backup JSON (reuse the browser key)")
 		mint      = flag.Bool("mint", false, "mint a fresh controller key (production) instead of loading/importing")
 
-		optimize = flag.Bool("optimize", false, "run the autonomous RF power-optimisation loop")
-		apply    = flag.Bool("apply", false, "with -optimize: actually send commands (default is dry-run, log only)")
-		polLog   = flag.String("policy-log", "policy.jsonl", "policy decision audit trail (JSONL)")
-		polEvery = flag.Duration("policy-interval", 15*time.Second, "optimisation cycle interval")
-		marginLo = flag.Float64("margin-low", 6, "raise power below this SNR margin (dB)")
-		marginHi = flag.Float64("margin-high", 12, "lower power above this SNR margin (dB)")
-		maxStep  = flag.Int("max-step", 3, "max dBm power change per cycle")
-		httpAddr = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
+		optimize  = flag.Bool("optimize", false, "run the autonomous RF power-optimisation loop")
+		apply     = flag.Bool("apply", false, "with -optimize: actually send commands (default is dry-run, log only)")
+		polLog    = flag.String("policy-log", "policy.jsonl", "policy decision audit trail (JSONL)")
+		polEvery  = flag.Duration("policy-interval", 15*time.Second, "optimisation cycle interval")
+		marginLo  = flag.Float64("margin-low", 6, "raise power below this SNR margin (dB)")
+		marginHi  = flag.Float64("margin-high", 12, "lower power above this SNR margin (dB)")
+		maxStep   = flag.Int("max-step", 3, "max dBm power change per cycle")
+		heartbeat = flag.Duration("heartbeat", 2*time.Hour, "re-assert held nodes this often (keeps their flash-default watchdog fresh; must be < the node's 6h window)")
+		httpAddr  = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
 	)
 	flag.Parse()
 
@@ -108,7 +110,7 @@ func main() {
 	// Live web dashboard (read-only): topology + the streaming decision feed.
 	var dash *httpd.Server
 	if *httpAddr != "" {
-		dash = httpd.New(graph)
+		dash = httpd.New(graph, ks, src.Send, filepath.Join(*keydir, "ui.json"))
 		go func() {
 			if err := http.ListenAndServe(*httpAddr, dash.Handler()); err != nil {
 				fmt.Fprintf(os.Stderr, "http: %v\n", err)
@@ -138,7 +140,7 @@ func main() {
 		}
 		cfg := policy.DefaultConfig()
 		cfg.MarginLow, cfg.MarginHigh, cfg.MaxStep = *marginLo, *marginHi, int8(*maxStep)
-		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery))
+		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat)
 		mode := "dry-run (log only)"
 		if *apply {
 			mode = "APPLY"
@@ -184,6 +186,9 @@ loop:
 			e, _ := ingest.ParseLine(line)
 			graph.Apply(e, now)
 			logger.Log(e, now)
+			if dash != nil {
+				dash.Console(line) // raw console line -> dashboard console pane
+			}
 			if eng != nil && e.Kind == ingest.KindCtrlAck {
 				eng.NoteAck(now, e.ID, e.Num["applied"], e.Num["provisional"])
 			}

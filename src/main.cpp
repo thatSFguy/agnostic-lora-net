@@ -1070,6 +1070,15 @@ static int8_t   ctrl_pending_dbm = 0;      // the provisional value awaiting CON
 static uint32_t ctrl_revert_ms = 0;        // 0 = disarmed
 static const uint32_t CTRL_REVERT_WINDOW_MS = 60000;
 
+// Heartbeat watchdog (#3). Control-plane power is runtime-only (#2), so a permanently
+// absent controller could leave a node stuck at its last optimised (low) power. If no
+// valid control command arrives for CTRL_HEARTBEAT_MS, restore the saved (flash) default
+// power at runtime — the loud value the node boots with. The controller keeps this alive
+// by re-asserting power periodically even while holding (see the Go policy heartbeat).
+static const uint32_t CTRL_HEARTBEAT_MS = 6UL * 3600UL * 1000UL;  // 6 h
+static bool     ctrl_power_managed = false;   // control plane has set runtime power
+static uint32_t ctrl_contact_ms    = 0;       // millis() of the last accepted command
+
 // Block dead-man: a signed BLOCK auto-expires unless renewed, so a stale block can never
 // permanently partition the mesh (mirrors the power revert rail). The controller renews
 // by re-sending BLOCK before expiry; UNBLOCK clears immediately. Parallel to the router's
@@ -1141,11 +1150,30 @@ static void ctrl_apply_power(int8_t dbm, bool persist) {
     }
 }
 
+// Heartbeat watchdog (#3): if the controller has gone silent for CTRL_HEARTBEAT_MS while
+// it was managing our (runtime-only) power, restore the saved flash default — the loud
+// value we'd boot with — so a dead controller can't strand us low forever.
+static void ctrl_heartbeat_sweep() {
+    if (!ctrl_power_managed) return;
+    if ((int32_t)(millis() - (ctrl_contact_ms + CTRL_HEARTBEAT_MS)) < 0) return;  // still in window
+    RadioCfg fcfg;
+    int8_t def = rf_read(fcfg) ? fcfg.power_dbm : (int8_t)PHY_TX_POWER_DBM;
+    if (radio.config().power_dbm != def) {
+        ctrl_apply_power(def, false);   // restore at runtime; flash already holds it
+        char l[80];
+        snprintf(l, sizeof(l), "[ctrl] no controller for %lus -> power restored to default %ddBm",
+                 (unsigned long)(CTRL_HEARTBEAT_MS / 1000), (int)def);
+        g_con->println(l);
+    }
+    ctrl_power_managed = false;   // disarm until the controller returns
+}
+
 // Apply a signature-verified command and ack the controller. reply_to==my_id
 // means a local self-loopback (ack goes to the console, not the air).
 static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
     char line[96];
     ctrl_counter = m.counter; ctrl_cfg_save();   // advance the replay floor
+    ctrl_contact_ms = millis();                  // controller is alive (heartbeat #3)
     bool local = (reply_to == my_id);
     auto ack = [&](int8_t applied, uint8_t prov) {
         if (local) return;                       // self-loopback: console line below suffices
@@ -1154,6 +1182,11 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
         if (an) send_loc_unicast(reply_to, a, an, PKT_CONTROL);
     };
     if (m.cmd == mesh::CTRL_POWER) {
+        // Control-plane power is RUNTIME-ONLY: we never persist it to flash. Flash keeps
+        // the operator's high default (set via the local `rf power` console); the node
+        // boots loud, the controller trims it back down each session, and a permanently
+        // absent controller is caught by the heartbeat watchdog below (restores the saved
+        // default). This is the "leave flash high, retune on rejoin" model.
         int8_t cur = radio.config().power_dbm;
         int8_t want = m.arg;
         if (want > LORA_MAX_TX_POWER_DBM) want = LORA_MAX_TX_POWER_DBM;
@@ -1164,18 +1197,19 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
             ctrl_apply_power(want, false);
             prov = 1;
         } else {
-            ctrl_apply_power(want, true);
+            ctrl_apply_power(want, false);       // runtime-only (was persisted; now #2)
             ctrl_revert_ms = 0;
         }
-        snprintf(line, sizeof(line), "[ctrl] POWER %d dBm applied%s (counter=%lu)",
+        ctrl_power_managed = true;               // arm the no-controller heartbeat watchdog
+        snprintf(line, sizeof(line), "[ctrl] POWER %d dBm applied%s runtime-only (counter=%lu)",
                  (int)want, prov ? " PROVISIONALLY (60s revert)" : "", (unsigned long)m.counter);
         Serial.println(line);
         ack(want, prov);
     } else if (m.cmd == mesh::CTRL_CONFIRM) {
         if (ctrl_revert_ms && m.arg == ctrl_pending_dbm) {
             ctrl_revert_ms = 0;
-            ctrl_apply_power(ctrl_pending_dbm, true);
-            Serial.println("[ctrl] CONFIRM — provisional power persisted");
+            ctrl_apply_power(ctrl_pending_dbm, false);   // keep at runtime, do NOT persist (#2)
+            Serial.println("[ctrl] CONFIRM — runtime power kept (flash default unchanged)");
             ack(ctrl_pending_dbm, 0);
         }
     } else if (m.cmd == mesh::CTRL_BLOCK) {
@@ -2510,7 +2544,8 @@ static void agn_loop_once() {
         ctrl_apply_power(ctrl_revert_dbm, false);
         Serial.println("[ctrl] no CONFIRM — provisional power REVERTED");
     }
-    ctrl_blk_sweep();   // expire TTL-bounded signed blocks (dead-man rail)
+    ctrl_blk_sweep();        // expire TTL-bounded signed blocks (dead-man rail)
+    ctrl_heartbeat_sweep();  // restore flash default power if the controller went silent (#3)
 
     // Fresh-registration burst (see reg_burst_left): re-flood early so a lost
     // broadcast costs seconds, not the LOC_REREG_MS refresh period.

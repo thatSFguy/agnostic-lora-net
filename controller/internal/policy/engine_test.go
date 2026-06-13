@@ -49,7 +49,7 @@ func find(ds []Decision, node string) Decision {
 }
 
 func TestEngineDryRun(t *testing.T) {
-	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute)
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
 	ds := eng.Tick(snap(time.Now()), time.Now())
 	if d := find(ds, "AAAA0001"); d.Action != Lower || d.NewTarget != 19 {
 		t.Fatalf("loud node: %+v want Lower->19", d)
@@ -85,7 +85,7 @@ func TestEngineApplyAndConfirm(t *testing.T) {
 	}
 	var sent []string
 	send := func(s string) error { sent = append(sent, s); return nil }
-	eng := NewEngine(DefaultConfig(), newLogger(t), ks, send, true, time.Minute)
+	eng := NewEngine(DefaultConfig(), newLogger(t), ks, send, true, time.Minute, time.Hour)
 	pub := ks.Pub()
 
 	// Cycle 1: expect a signed POWER 22->19 to the loud node.
