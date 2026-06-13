@@ -27,3 +27,4 @@ controller/policy.jsonl
 controller/*.jsonl
 controller/state/
 controller/cmd/agnctl/state/
+controller/agnctl

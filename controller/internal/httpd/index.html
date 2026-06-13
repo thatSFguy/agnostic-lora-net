@@ -63,7 +63,10 @@ const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
 let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null;
 const nm = id => aliases[id] || id;
 const clamp01 = v => Math.max(0, Math.min(1, v));
-const qcol = q => `hsl(${Math.round((q||0)*120)},60%,55%)`;
+const ASYM = 0.35;                                  // mirrors lib/mesh ASYM_THRESHOLD
+const qcol = q => q>=0.9?'#3fb950':q>=0.6?'#d29922':'#f85149';   // green / amber / red
+const esc = s => String(s).replace(/[<&>]/g,c=>({'<':'&lt;','&':'&amp;','>':'&gt;'}[c]));
+function snrMarginTxt(snr,sf){ const lim=SNR_LIMIT[sf||9]??-12.5, m=snr-lim; return `${m>=0?'+':''}${m.toFixed(1)} dB margin (SF${sf||'?'})`; }
 
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
 async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...p})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); return j.ok; }catch(e){ toast('✗ '+e); } }
@@ -111,14 +114,38 @@ function renderMap(state){
   if(dragging) return;
   const snap=state.snapshot||{}, nodes=snap.nodes||[], links=snap.links||[];
   const xy={}; nodes.forEach((n,i)=>xy[n.id]=mapXY(n,i,nodes.length));
-  const pair={}; for(const l of links){ if(xy[l.from]&&xy[l.to]){ const k=[l.from,l.to].sort().join('|'); if(!pair[k]||l.q>pair[k].q) pair[k]={...l}; } }
+  const sf={}; nodes.forEach(n=>sf[n.id]=n.sf);
+  const dir={}; for(const l of links) dir[l.from+'>'+l.to]=l;      // directed lookup
+  const seen={}, pairs=[];                                         // unordered adjacencies
+  for(const l of links){ const k=[l.from,l.to].sort().join('|'); if(seen[k])continue; seen[k]=1; pairs.push(k.split('|')); }
   let s=`<svg id="svg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">`;
-  for(const k in pair){ const l=pair[k],a=xy[l.from],b=xy[l.to]; s+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${qcol(l.q)}" stroke-width="2" opacity="0.65"/>`; }
+  // two parallel directional lines per adjacency, each coloured by its own quality
+  for(const [a,b] of pairs){
+    if(!xy[a]||!xy[b]) continue;
+    const A=xy[a], B=xy[b], ab=dir[a+'>'+b], ba=dir[b+'>'+a];
+    for(const [from,to,d] of [[a,b,ab],[b,a,ba]]){
+      const P=xy[from], T=xy[to], dx=T[0]-P[0], dy=T[1]-P[1], len=Math.hypot(dx,dy)||1;
+      const ox=-dy/len*5, oy=dx/len*5;                             // perpendicular offset
+      const x1=P[0]+ox, y1=P[1]+oy, x2=T[0]+ox, y2=T[1]+oy;
+      if(d&&d.q>0){
+        const col=qcol(d.q), tip=`${nm(from)} → ${nm(to)}\nq=${d.q.toFixed(2)} rssi=${d.rssi} snr=${d.snr} → ${snrMarginTxt(d.snr,sf[to])}${d.src?'  ('+d.src+')':''}`;
+        s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="${(1+3*d.q).toFixed(1)}" opacity="0.85"><title>${esc(tip)}</title></line>`;
+        const t=0.62, ax=x1+(x2-x1)*t, ay=y1+(y2-y1)*t, ang=(Math.atan2(y2-y1,x2-x1)*180/Math.PI).toFixed(1);
+        s+=`<text x="${ax.toFixed(1)}" y="${ay.toFixed(1)}" fill="${col}" font-size="13" text-anchor="middle" dominant-baseline="middle" transform="rotate(${ang} ${ax.toFixed(1)} ${ay.toFixed(1)})" style="pointer-events:none">➤</text>`;
+      } else {
+        s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#666" stroke-width="1" stroke-dasharray="4 6" opacity="0.55"><title>${esc(nm(from)+' → '+nm(to)+'  (no link heard)')}</title></line>`;
+      }
+    }
+    if(ab&&ba&&ab.q>0&&ba.q>0&&Math.abs(ab.q-ba.q)>ASYM){        // asymmetry badge
+      const mx=((A[0]+B[0])/2).toFixed(1), my=((A[1]+B[1])/2).toFixed(1);
+      s+=`<text x="${mx}" y="${my}" font-size="14" text-anchor="middle" dominant-baseline="middle" style="pointer-events:none"><title>asymmetric: ${nm(a)}→${nm(b)} q=${ab.q.toFixed(2)} vs ${nm(b)}→${nm(a)} q=${ba.q.toFixed(2)}</title>⚠️</text>`;
+    }
+  }
   nodes.forEach((n,i)=>{ const [x,y]=xy[n.id]; const fill=n.is_gateway?'var(--acc)':(n.blocked?'var(--revert)':'#2a3340');
     s+=`<g class="mnode" data-id="${n.id}" transform="translate(${x},${y})" style="cursor:grab">
       <circle r="10" fill="${fill}" stroke="var(--line)" stroke-width="2"/>
       <text y="-15" text-anchor="middle">${nm(n.id)}</text></g>`; });
-  s+=`</svg><div class="maphint">drag nodes to lay out the mesh · line colour = link quality · positions save automatically</div>`;
+  s+=`</svg><div class="maphint">per-direction links · colour=quality (green ≥.9 · amber ≥.6 · red) · width=quality · ➤ direction · dashed=one-way · ⚠️ asymmetric · hover a line for q/rssi/snr · drag nodes to lay out · positions save automatically</div>`;
   $('#mapview').innerHTML=s;
   $('#mapview').querySelectorAll('.mnode').forEach(g=>{
     g.addEventListener('mousedown',ev=>{ ev.preventDefault(); dragging=g.dataset.id; const svg=$('#svg');
