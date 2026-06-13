@@ -59,6 +59,56 @@ func TestEngineDryRun(t *testing.T) {
 	}
 }
 
+// Mesh behaviour: a node's single TX power must satisfy its WEAKEST listener. A node that
+// blasts the gateway (margin 21.5, would lower in isolation) but is only marginally heard by
+// a far neighbour (q=0.3 -> margin ~3) must RAISE, not lower — the far link governs.
+func TestEngineWorstLinkGoverns(t *testing.T) {
+	now := time.Now()
+	s := topo.Snapshot{
+		Gateway: "GW000001",
+		Nodes: []topo.Node{
+			{ID: "GW000001", IsGateway: true},
+			{ID: "MESH0001", SF: 9, Power: 10},
+		},
+		Links: []topo.Link{
+			{From: "MESH0001", To: "GW000001", RSSI: -42, SNR: 9, At: now}, // loud to gateway
+			{From: "MESH0001", To: "FARN0002", Q: 0.3, At: now},            // marginal to far node
+		},
+	}
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	d := find(eng.Tick(s, now), "MESH0001")
+	if d.Action != Raise || d.Governs != "FARN0002" {
+		t.Fatalf("worst-link should govern: %+v want Raise governed by FARN0002", d)
+	}
+}
+
+// A node reachable only by quality-only (telemetry) links: a weak one raises (low q is
+// trustworthy), but a "loud" one holds — the q->SNR estimate saturates, so we never trim
+// power blind on it.
+func TestEngineQualityOnlyLinks(t *testing.T) {
+	now := time.Now()
+	s := topo.Snapshot{
+		Gateway: "GW000001",
+		Nodes: []topo.Node{
+			{ID: "GW000001", IsGateway: true},
+			{ID: "WEAK0001", SF: 9, Power: 10}, // q=0.3 -> margin ~3 -> raise
+			{ID: "LOUD0001", SF: 9, Power: 22}, // q=1.0 -> margin ~20 but soft -> hold
+		},
+		Links: []topo.Link{
+			{From: "WEAK0001", To: "PEER0009", Q: 0.3, At: now},
+			{From: "LOUD0001", To: "PEER0009", Q: 1.0, At: now},
+		},
+	}
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	ds := eng.Tick(s, now)
+	if d := find(ds, "WEAK0001"); d.Action != Raise || !d.Soft {
+		t.Fatalf("weak quality-only node: %+v want Raise (soft)", d)
+	}
+	if d := find(ds, "LOUD0001"); d.Action != Hold || !d.Soft {
+		t.Fatalf("loud quality-only node must hold (no blind trim): %+v", d)
+	}
+}
+
 func decodeCtrlsend(t *testing.T, line string, pub ed25519.PublicKey) sign.Command {
 	t.Helper()
 	f := strings.Fields(line)

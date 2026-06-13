@@ -50,16 +50,43 @@ func parseHexID(s string) uint32 {
 	return uint32(v)
 }
 
-// gwSNR returns the SNR the gateway currently hears `node` at (link node->gateway), and
-// whether it's a fresh, real observation. RSSI==0 means "no measurement" (LoRa RSSI is
-// always negative), and a stale link doesn't count as "reachable now".
-func gwSNR(snap topo.Snapshot, node string, now time.Time, fresh time.Duration) (float64, bool) {
+// SNR_FLOOR_DB / SNR_GOOD_DB mirror lib/mesh/link_metric.h: the firmware maps SNR linearly
+// onto link quality across this band. qToSNR inverts that map so a quality-only link (from
+// routed telemetry, which carries no SNR) can be placed on the same margin scale. It
+// SATURATES: q==1 only means SNR ≥ SNR_GOOD_DB, so the result is a lower bound at the top —
+// good for spotting a marginal link, not for judging "too loud" (hence Observation.Soft).
+const snrFloorDB, snrGoodDB = -17.0, 8.0
+
+func qToSNR(q float64) float64 { return snrFloorDB + q*(snrGoodDB-snrFloorDB) }
+
+// observe builds the worst-case view of how `node`'s neighbours hear it: it scans every
+// fresh outbound link (node->X) and keeps the minimum margin — the weakest link the node's
+// single shared TX power must satisfy. Measured SNR is used where present; quality-only
+// links estimate SNR via qToSNR and are flagged Soft. HasObs is false when no neighbour
+// currently hears the node (it isn't reachable / observable this cycle).
+func observe(snap topo.Snapshot, node string, sf int, now time.Time, fresh time.Duration) Observation {
+	obs := Observation{Node: node, SF: sf}
+	limit := SNRLimit(sf)
+	best := 0.0
 	for _, l := range snap.Links {
-		if l.From == node && l.To == snap.Gateway && l.RSSI != 0 && now.Sub(l.At) < fresh {
-			return float64(l.SNR), true
+		if l.From != node || now.Sub(l.At) >= fresh {
+			continue
+		}
+		snr, soft := 0.0, true
+		switch {
+		case l.RSSI != 0: // measured SNR on this link (LoRa RSSI is always negative)
+			snr, soft = float64(l.SNR), false
+		case l.Q > 0: // quality only (routed telemetry) — estimate, saturates high
+			snr = qToSNR(l.Q)
+		default:
+			continue // no usable signal on this link
+		}
+		if m := snr - limit; !obs.HasObs || m < best {
+			best = m
+			obs.HasObs, obs.Margin, obs.SNR, obs.Soft, obs.GovPeer = true, m, snr, soft, l.To
 		}
 	}
-	return 0, false
+	return obs
 }
 
 // Tick processes one cycle: confirm/expire pending decreases, then decide + (in apply
@@ -71,7 +98,7 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 	// 1) Resolve pending decreases: confirm if the node is still reachable, else let the
 	//    firmware's 60 s dead-man revert it (and stop tracking after a couple of misses).
 	for node, pwr := range e.pending {
-		if _, ok := gwSNR(snap, node, now, e.fresh); ok {
+		if observe(snap, node, e.cfg.DefaultSF, now, e.fresh).HasObs {
 			if e.apply && e.ks != nil {
 				if ctr, err := e.ks.Next(); err == nil {
 					if line, err := commander.Confirm(parseHexID(node), pwr, ctr, e.ks.Priv()); err == nil && e.send(line) == nil {
@@ -102,8 +129,7 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		if sf <= 0 {
 			sf = e.cfg.DefaultSF
 		}
-		snr, ok := gwSNR(snap, n.ID, now, e.fresh)
-		obs := Observation{Node: n.ID, SF: sf, HeardSNR: snr, HasSNR: ok}
+		obs := observe(snap, n.ID, sf, now, e.fresh)
 
 		cur, seeded := e.targets[n.ID]
 		if !seeded {

@@ -4,10 +4,14 @@
 // it's heard too loudly (saves airtime/power, the "all nodes turned way down" fix done
 // *measured* instead of guessed), higher when it's marginal.
 //
-// Scope of this first version (honest): it optimises each non-gateway node against the SNR
-// the *tethered gateway* directly measures (the link node->gateway). That's exactly right
-// for a star/bench layout and a sound first approximation elsewhere; true global
-// per-direction optimisation waits on the telemetry hardening in §4c.
+// Scope (Phase 1, mesh-wide): a node transmits at one power, so the binding constraint is
+// the *weakest outbound link it must keep* — the neighbour that hears it worst. The engine
+// gathers every link node->X (how each neighbour hears it) and optimises against the
+// minimum margin. Links the tethered gateway measures directly carry true SNR; remote
+// links come from routed telemetry as link *quality* (0..1), which we invert to an
+// approximate SNR. That estimate saturates at high SNR, so quality-only links can prove a
+// link is marginal (-> raise) but never that it is too loud (-> lower) — we only trim power
+// on a measured SNR. Per-link SNR everywhere waits on the telemetry-frame change in §4c.
 //
 // Safety: the controller owns each node's power (POWER sets an absolute dBm), tracks its
 // own target per node, step-limits and clamps every change, and — because a power DECREASE
@@ -46,12 +50,17 @@ func DefaultConfig() Config {
 
 func (c Config) mid() float64 { return (c.MarginLow + c.MarginHigh) / 2 }
 
-// Observation is what we know about one managed node this cycle.
+// Observation is what we know about one managed node this cycle: the worst-case view of
+// how its neighbours hear it. Because a node has one shared TX power, the binding link is
+// the weakest outbound one it must keep — that's what Margin/SNR describe.
 type Observation struct {
-	Node     string
-	SF       int
-	HeardSNR float64 // SNR the gateway hears this node at (link node->gateway)
-	HasSNR   bool
+	Node    string
+	SF      int
+	HasObs  bool    // at least one fresh outbound link observed (node is reachable now)
+	Margin  float64 // worst (minimum) SNR margin across the node's outbound links (dB)
+	SNR     float64 // SNR of that governing link — measured, or estimated from quality
+	Soft    bool    // governing link is quality-only (estimate saturates; not safe to trim on)
+	GovPeer string  // receiver of the governing (weakest) link, for the audit log
 }
 
 // Action is the verdict for one node.
@@ -76,6 +85,8 @@ type Decision struct {
 	Delta     int8    `json:"delta"`
 	NewTarget int8    `json:"new_target"`
 	Reason    string  `json:"reason"`
+	Soft      bool    `json:"soft,omitempty"`    // governing margin estimated from quality, not measured SNR
+	Governs   string  `json:"governs,omitempty"` // receiver of the weakest outbound link
 }
 
 func clampI8(v, lo, hi int8) int8 {
@@ -91,27 +102,36 @@ func clampI8(v, lo, hi int8) int8 {
 // Decide is the pure per-node policy: given the observation and the power the controller
 // currently targets for this node, return the (explained) next step. No I/O, no state.
 func Decide(obs Observation, curTarget int8, cfg Config) Decision {
-	d := Decision{Node: obs.Node, SF: obs.SF, HasSNR: obs.HasSNR, CurTarget: curTarget, NewTarget: curTarget}
-	if !obs.HasSNR {
+	d := Decision{Node: obs.Node, SF: obs.SF, HasSNR: obs.HasObs, CurTarget: curTarget, NewTarget: curTarget,
+		Soft: obs.Soft, Governs: obs.GovPeer}
+	if !obs.HasObs {
 		d.Action = Skip
-		d.Reason = "no SNR for node->gateway link (gateway hasn't heard it) — cannot judge margin"
+		d.Reason = "no fresh outbound link observed — no neighbour currently hears this node"
 		return d
 	}
-	limit := SNRLimit(obs.SF)
-	margin := obs.HeardSNR - limit
-	d.HeardSNR, d.Margin = obs.HeardSNR, margin
+	margin := obs.Margin // already the worst-link margin (min over outbound links)
+	d.HeardSNR, d.Margin = obs.SNR, margin
 
 	switch {
-	case margin > cfg.MarginHigh:
-		// Heard too loudly — we can trim power. ~1 dB power ≈ 1 dB SNR.
-		want := int8(math.Round(margin - cfg.mid()))
-		d.Delta = -clampI8(want, 0, cfg.MaxStep)
 	case margin < cfg.MarginLow:
+		// The weakest neighbour that must hear this node is marginal — raise. Reliable even
+		// from quality (a low q unambiguously means a weak link).
 		want := int8(math.Round(cfg.mid() - margin))
 		d.Delta = clampI8(want, 0, cfg.MaxStep)
+	case margin > cfg.MarginHigh:
+		// Every neighbour hears it too loudly — we could trim power. But only on a *measured*
+		// SNR: the quality->SNR estimate saturates at the top, so a "loud" quality reading
+		// can't tell +8 dB from +30 dB. Don't trim blind.
+		if obs.Soft {
+			d.Action = Hold
+			d.Reason = "margin above band but governing link is quality-only (estimate saturates) — hold rather than trim blind"
+			return d
+		}
+		want := int8(math.Round(margin - cfg.mid())) // ~1 dB power ≈ 1 dB SNR
+		d.Delta = -clampI8(want, 0, cfg.MaxStep)
 	default:
 		d.Action = Hold
-		d.Reason = "margin in band — hold"
+		d.Reason = "worst-link margin in band — hold"
 		return d
 	}
 

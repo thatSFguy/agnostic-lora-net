@@ -63,11 +63,18 @@ func hhmmss(t time.Time) string { return t.Format("15:04:05") }
 func (l *Logger) Decision(now time.Time, d Decision, applied bool, ctr uint32, mode string) {
 	dd := d
 	r := Record{TS: now.UnixMilli(), Kind: "decision", Node: d.Node, Mode: mode, Applied: applied, Counter: ctr, Decision: &dd}
+	gov := "" // which neighbour's link bound this decision, and whether it was estimated
+	if d.Governs != "" {
+		gov = " worst→" + d.Governs
+		if d.Soft {
+			gov += " (q-est)"
+		}
+	}
 	var human string
 	switch d.Action {
 	case Hold:
-		human = fmt.Sprintf("%s  %s  SF%d snr=%.1f margin=%.1f → HOLD @%ddBm",
-			hhmmss(now), d.Node, d.SF, d.HeardSNR, d.Margin, d.CurTarget)
+		human = fmt.Sprintf("%s  %s  SF%d snr=%.1f margin=%.1f%s → HOLD @%ddBm",
+			hhmmss(now), d.Node, d.SF, d.HeardSNR, d.Margin, gov, d.CurTarget)
 	case Skip:
 		human = fmt.Sprintf("%s  %s  → SKIP (%s)", hhmmss(now), d.Node, d.Reason)
 	default:
@@ -75,8 +82,8 @@ func (l *Logger) Decision(now time.Time, d Decision, applied bool, ctr uint32, m
 		if applied {
 			tag = fmt.Sprintf("[SENT ctr=%d]", ctr)
 		}
-		human = fmt.Sprintf("%s  %s  SF%d snr=%.1f margin=%.1f → %s %d→%ddBm (Δ%+d) %s : %s",
-			hhmmss(now), d.Node, d.SF, d.HeardSNR, d.Margin,
+		human = fmt.Sprintf("%s  %s  SF%d snr=%.1f margin=%.1f%s → %s %d→%ddBm (Δ%+d) %s : %s",
+			hhmmss(now), d.Node, d.SF, d.HeardSNR, d.Margin, gov,
 			titleUp(string(d.Action)), d.CurTarget, d.NewTarget, d.Delta, tag, d.Reason)
 	}
 	l.write(r, human)

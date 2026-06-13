@@ -106,10 +106,15 @@ observation → decision → command → ack is logged to a **JSONL audit trail*
 
 **Safety:** the controller owns each node's power (absolute POWER), step-limits every
 change, and only CONFIRMs a *decrease* after re-observing the node reachable — so a bad
-call (or the controller dying) self-heals via the on-device 60 s revert. *Scope (v1):* it
-optimises against the SNR the **tethered gateway** measures (link node→gateway) — exact for
-a star/bench layout, a sound first approximation otherwise; global per-direction
-optimisation is a later step.
+call (or the controller dying) self-heals via the on-device 60 s revert. *Scope
+(mesh-wide):* a node has one TX power, so it optimises against the **weakest outbound link
+the node must keep** — the neighbour that hears it worst — gathered from every link
+`node→X`. The tethered gateway's own links carry measured SNR; remote links arrive via
+round-robin `status <id>` telemetry polls as link *quality*, which is inverted to an
+approximate SNR. That estimate saturates at high SNR, so a quality-only link can trigger a
+**raise** (a weak link is unambiguous) but never a **lower** — power is only trimmed on a
+measured SNR. Per-link SNR everywhere (so remote links can be trimmed too) needs the
+telemetry-frame change in §4c.
 
 Outputs: `capture.csv` (one row per console event; `airframe=1` marks real on-air
 frames — beacon TX/RX, forwards — visible with `trace on`) and an optional topology

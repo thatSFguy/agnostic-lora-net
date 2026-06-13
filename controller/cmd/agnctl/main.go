@@ -101,7 +101,7 @@ func main() {
 	defer stop()
 
 	if serial && *poll {
-		go pollLoop(ctx, src)
+		go pollLoop(ctx, src, graph)
 	}
 	if serial && ks != nil {
 		go commandREPL(ctx, src, ks)
@@ -254,12 +254,12 @@ func openSource(port, file string, baud int) (ingest.Source, bool, error) {
 	return s, true, nil
 }
 
-func pollLoop(ctx context.Context, src ingest.Source) {
+func pollLoop(ctx context.Context, src ingest.Source, graph *topo.Graph) {
 	time.Sleep(400 * time.Millisecond)
 	_ = src.Send("trace on")
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
-	tick := 0
+	tick, rr := 0, 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -268,6 +268,14 @@ func pollLoop(ctx context.Context, src ingest.Source) {
 			_ = src.Send("info")
 			if tick%3 == 0 {
 				_ = src.Send("nbrdump")
+			}
+			// Round-robin one remote telemetry query per tick. The reply (a routed `[status] N`
+			// + its `nbr …` table) feeds the mesh-wide topology the optimiser needs to tune
+			// nodes that can't reach the gateway directly. One per tick keeps airtime modest;
+			// each known node is polled every (3s × node-count).
+			if ids := graph.ManagedIDs(); len(ids) > 0 {
+				_ = src.Send("status " + ids[rr%len(ids)])
+				rr++
 			}
 			tick++
 		}

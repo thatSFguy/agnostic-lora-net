@@ -6,6 +6,7 @@
 package topo
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -44,6 +45,11 @@ type Graph struct {
 	BeaconSec int
 	nodes     map[string]*Node
 	links     map[string]*Link // key "FROM>TO"
+
+	// reportOwner is whose neighbour table the current `nbr X q_rx q_tx` lines belong to:
+	// the gateway after its `node …` info header, or a remote node after its `[status] N`
+	// telemetry reply. Lets one parser shape build real node<->node links, not just spokes.
+	reportOwner string
 }
 
 func New() *Graph {
@@ -82,6 +88,7 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		g.Gateway = e.ID
 		n := g.node(e.ID)
 		n.IsGateway, n.LastSeen = true, at
+		g.reportOwner = e.ID // the gateway's own `nbr …` lines follow this header
 
 	case ingest.KindBlocked:
 		set := map[string]bool{}
@@ -93,22 +100,33 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		}
 
 	case ingest.KindNbr:
-		// Gateway G's own neighbour X: q_rx = G hears X (link X->G); q_tx = X hears G
-		// (link G->X). One line gives us both directions.
-		if g.Gateway == "" {
+		// A `nbr X q_rx q_tx [rssi snr]` line owned by reportOwner O (the gateway after its
+		// info header, or a remote node after its `[status]` telemetry reply): q_rx = O hears
+		// X (link X->O); q_tx = X hears O (link O->X). One line gives both directions, keyed by
+		// the real endpoints — so remote telemetry yields true node<->node links, not spokes.
+		owner := g.reportOwner
+		if owner == "" {
+			owner = g.Gateway
+		}
+		if owner == "" {
 			return
 		}
+		src := "telemetry"
+		if owner == g.Gateway {
+			src = "gateway"
+		}
 		x := e.ID
+		g.node(owner).LastSeen = at
 		g.node(x).LastSeen = at
-		if v, ok := e.Num["q_rx"]; ok {
-			l := g.link(x, g.Gateway, "gateway", at)
+		if v, ok := e.Num["q_rx"]; ok && v > 0 { // O hears X => link X->O
+			l := g.link(x, owner, src, at)
 			l.Q = float64(v) / 100
 			if r, ok := e.Num["rssi"]; ok {
 				l.RSSI, l.SNR = r, e.Num["snr"]
 			}
 		}
-		if v, ok := e.Num["q_tx"]; ok {
-			g.link(g.Gateway, x, "gateway", at).Q = float64(v) / 100
+		if v, ok := e.Num["q_tx"]; ok && v > 0 { // X hears O => link O->X
+			g.link(owner, x, src, at).Q = float64(v) / 100
 		}
 
 	case ingest.KindAnnNbr:
@@ -126,6 +144,7 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		}
 
 	case ingest.KindStatus:
+		g.reportOwner = e.ID // remote telemetry reply — its `nbr …` lines belong to this node
 		n := g.node(e.ID)
 		n.LastSeen = at
 		if v, ok := e.Str["fw"]; ok {
@@ -184,6 +203,22 @@ type Snapshot struct {
 	At        int64  `json:"at_unix_ms"`
 }
 
+// ManagedIDs returns the non-gateway node IDs (sorted, stable) the controller knows about —
+// the set worth polling for remote telemetry. Excludes the tethered gateway itself.
+func (g *Graph) ManagedIDs() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var ids []string
+	for id, n := range g.nodes {
+		if id == g.Gateway || n.IsGateway {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func (g *Graph) Snapshot() Snapshot {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -194,5 +229,15 @@ func (g *Graph) Snapshot() Snapshot {
 	for _, l := range g.links {
 		s.Links = append(s.Links, *l)
 	}
+	// Map iteration order is randomised per call, so without this the dashboard
+	// reshuffles its node list and teleports unpositioned map nodes every poll.
+	// Emit a stable order: nodes by ID, links by (from, to).
+	sort.Slice(s.Nodes, func(i, j int) bool { return s.Nodes[i].ID < s.Nodes[j].ID })
+	sort.Slice(s.Links, func(i, j int) bool {
+		if s.Links[i].From != s.Links[j].From {
+			return s.Links[i].From < s.Links[j].From
+		}
+		return s.Links[i].To < s.Links[j].To
+	})
 	return s
 }
