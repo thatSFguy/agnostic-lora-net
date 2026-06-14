@@ -63,6 +63,7 @@ func main() {
 		maxStep   = flag.Int("max-step", 3, "max dBm power change per cycle")
 		heartbeat = flag.Duration("heartbeat", 2*time.Hour, "re-assert held nodes this often (keeps their flash-default watchdog fresh; must be < the node's 6h window)")
 		httpAddr  = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
+		fwDir     = flag.String("fwdir", "../web/fw", "directory of firmware packages to serve at /fw/ for the dashboard Flash tab")
 	)
 	flag.Parse()
 
@@ -110,7 +111,7 @@ func main() {
 	// Live web dashboard (read-only): topology + the streaming decision feed.
 	var dash *httpd.Server
 	if *httpAddr != "" {
-		dash = httpd.New(graph, ks, src.Send, filepath.Join(*keydir, "ui.json"))
+		dash = httpd.New(graph, ks, src.Send, filepath.Join(*keydir, "ui.json"), *fwDir)
 		go func() {
 			if err := http.ListenAndServe(*httpAddr, dash.Handler()); err != nil {
 				fmt.Fprintf(os.Stderr, "http: %v\n", err)
@@ -247,10 +248,10 @@ func openSource(port, file string, baud int) (ingest.Source, bool, error) {
 		}
 		return ingest.NewReaderSource(f), false, nil
 	}
-	s, err := ingest.OpenSerial(port, baud)
-	if err != nil {
-		return nil, false, err
-	}
+	// Resilient: reconnects across node reboots / USB re-enumeration instead of exiting,
+	// and starts even if the gateway isn't attached yet — so the dashboard (incl. the
+	// Configure/Flash tabs, which don't use the gateway) stays up across node blips.
+	s := ingest.NewReconnectingSerial(port, baud, func(m string) { fmt.Fprintln(os.Stderr, m) })
 	return s, true, nil
 }
 

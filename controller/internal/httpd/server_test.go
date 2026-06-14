@@ -17,7 +17,7 @@ func TestServe(t *testing.T) {
 	g.Apply(ingest.Event{Kind: ingest.KindInfoHeader, ID: "GW000001"}, time.Now())
 
 	var sent []string
-	s := New(g, nil, func(line string) error { sent = append(sent, line); return nil }, "")
+	s := New(g, nil, func(line string) error { sent = append(sent, line); return nil }, "", "")
 	s.Sink(policy.Record{Kind: "decision", Node: "AAAA0001"})
 
 	h := s.Handler()
@@ -49,7 +49,7 @@ func TestServe(t *testing.T) {
 
 func TestCmdAPI(t *testing.T) {
 	var sent []string
-	s := New(topo.New(), nil, func(l string) error { sent = append(sent, l); return nil }, "")
+	s := New(topo.New(), nil, func(l string) error { sent = append(sent, l); return nil }, "", "")
 	h := s.Handler()
 
 	// raw console line needs no key -> sent through.

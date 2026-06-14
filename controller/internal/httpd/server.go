@@ -43,14 +43,16 @@ type Server struct {
 	ks      *keystore.Store
 	send    func(string) error
 	ui      *uiState
+	fwDir   string // firmware packages served at /fw/ for the Flash tab ("" = disabled)
 	mu      sync.Mutex
 	events  []policy.Record
 	console []string
 }
 
 // New builds the server. uiPath persists aliases + map positions ("" = in-memory only).
-func New(graph *topo.Graph, ks *keystore.Store, send func(string) error, uiPath string) *Server {
-	return &Server{graph: graph, ks: ks, send: send, ui: loadUI(uiPath)}
+// fwDir is the directory of firmware packages served at /fw/ ("" disables it).
+func New(graph *topo.Graph, ks *keystore.Store, send func(string) error, uiPath, fwDir string) *Server {
+	return &Server{graph: graph, ks: ks, send: send, ui: loadUI(uiPath), fwDir: fwDir}
 }
 
 // Console records a raw node console line for the dashboard's console pane.
@@ -154,6 +156,11 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		_, _ = w.Write(dfuJS)
 	})
+	if s.fwDir != "" {
+		// Serve firmware packages (UF2 / .dfu.json) so the Flash tab works without the
+		// public GitHub release. http.FileServer cleans paths (no traversal above fwDir).
+		mux.Handle("/fw/", http.StripPrefix("/fw/", http.FileServer(http.Dir(s.fwDir))))
+	}
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		ev := make([]policy.Record, len(s.events))
