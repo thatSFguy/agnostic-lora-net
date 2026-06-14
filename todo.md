@@ -8,6 +8,34 @@ while scoping identity but are **separate from it**.
 
 ---
 
+## Controller → v2 (16-byte ids) — ✅ DONE & MERGED (2026-06-14)
+
+Merged to `main` (merge `2fc3ed6`): the self-certifying identity + membership ACL + signed
+BLE/retune v2 control plane (`CTRL_VER` 1→2, 16-byte node ids). Both halves landed —
+
+- **Firmware:** 16-byte self-certifying ids (blake2b(pubkey)), per-node keygen, signed announces
+  + verify-once, `pub` command, `CTRL_BLE`, `CTRL_RETUNE`. Host **76/76**, all 5 targets build;
+  keygen + persistence + id==blake2b(pubkey) bench-validated on two RAKs.
+- **Controller:** `sign` widened to 16-byte target/aux (87/103/99-byte POWER/BLOCK/RETUNE),
+  `CmdBle`/`BuildBle`/`BuildRetune`; ingest reads `[ann] <id> pub= sig=` → verified id↔pubkey;
+  keystore allowlist; `ManagedIDs`/`CommandAllowed` gate (verified + allowed); `/api/acl` +
+  **Security** dashboard tab; `agnctl acl list|pending|approve|revoke` + `retune`. Controller
+  tests green. Plan: [`docs/controller-verify-acl-impl.md`](docs/controller-verify-acl-impl.md).
+
+Open follow-ups:
+- [ ] **Re-pin `test_ctrl_interop` v2 vectors on-device** — `go test ./internal/sign -run EmitVector -v`
+      emits them (GO_MSG=87, GO_BLK=103). The firmware test currently uses sign→verify round-trips.
+- [ ] **Network-wide retune orchestration** (remote-config.md §4): open BLE rescue → push retune →
+      reconcile (nodes reappear on the new PHY) → field-fix stragglers → close rescue. The signed
+      `retune` command exists; the multi-node *workflow* + dashboard surface is not built (a naive
+      fire-and-forget retune button can strand a node — left deliberately for this considered flow).
+
+> **v2 firmware images are staged in `web/fw/`** (all 5 variants — `agn-rak`, `agn-xiao`,
+> `agn-promicro`, `agn-t1000` as `.dfu.json`+`.uf2`; `agn-heltec-v4.bin` for CLI flash), served at
+> `/fw/` for the dashboard Flash tab. Re-run `bash scripts/refresh_web_fw.sh` to rebuild after changes.
+
+---
+
 ## Relay-only role build (RAM reclaim)
 
 - [ ] Add a **relay-only build variant** for fixed backbone nodes that only forward — they never
@@ -34,7 +62,7 @@ relay node still routes/forwards correctly on the bench.
 
 ---
 
-## Runtime BLE enable/disable for fixed nodes
+## Remote BLE enable/disable for fixed nodes
 
 - [ ] Make BLE **off by default** on fixed nodes, enabled only for a provisioning/retune window,
       then disabled again — but gated on *positive confirmation*, never on a timer.
@@ -56,30 +84,63 @@ is the gate, not elapsed time.
 This is deliberately the **inverse** of the power-command dead-man rail: power fails *safe* by
 auto-reverting to loud; BLE must **not** fail to "off", because off = remotely unrecoverable.
 
-**Sub-parts.**
-- [ ] Runtime BLE start/stop (Bluefruit advertising + SoftDevice gating) — verify the SoftDevice
-      can be quiesced/re-activated cleanly within one boot (it likely cannot be torn down; gating
-      advertising/connectability is the pragmatic path).
-- [ ] Enable trigger — preferred: a **signed control-plane command** ("enter provisioning mode"),
-      so a node can be opened for retune remotely without physical access. Physical-button fallback
-      for the field.
-- [ ] **Proof-of-config**: node reports its current PHY/config (telemetry REPLY already carries
-      `sf`/`power_dbm`; extend as needed); controller compares against the pushed config and only
-      marks the node "confirmed on new config" on a match.
-- [ ] Explicit **signed "BLE off"** command, issued only after proof-of-config succeeds.
-- [ ] Dependency: the **retune push itself should be a signed control command** (see
-      [`docs/remote-config.md`](docs/remote-config.md) — signing was noted pending).
+**What already exists (2026-06-14 audit).** The *node-side runtime toggle is already built* —
+`ble on` / `ble off` / `ble unbond` console commands (`src/main.cpp:2065`), **lazy SoftDevice
+bring-up** (`ble_setup()` only enables the stack on first `ble on`, so a node that never enables
+BLE pays zero runtime/RAM-at-init cost — `src/main.cpp:517`), and **enabled-state persisted to
+flash** and restored on reboot (`cfg_ble_enabled`, `src/main.cpp:2444`). This confirms the note's
+hunch: the SoftDevice is *not* torn down — it's gated via lazy init + advertising start/stop.
+So the original "runtime BLE start/stop" sub-part is **done**. What is missing is the **remote**
+path: the signed control plane has only four commands —
+`CTRL_POWER/CONFIRM/BLOCK/UNBLOCK` (`lib/mesh/control.h:32`), **no `CTRL_BLE`** — so the toggle is
+reachable today only over the **local serial console** (i.e. only on the tethered gateway).
+Remote nodes cannot be flipped over the air. The remaining work is therefore mostly *wiring the
+existing toggle to the signed control plane* + the confirmation gate, not new BLE plumbing.
+
+### Controller work (this is independently buildable now)
+
+- [x] Manual BLE on/off from the **node list** on the dashboard — a clickable pill (color =
+      state: green on / grey off / dim "?" unknown). Tethered **gateway** is driven directly via
+      the existing `ble on/off` console line (works today); remote nodes send a signed `CTRL_BLE`
+      (works once the firmware half lands). *(commander `Ble`, sign `CmdBle=5`/`BuildBle`,
+      `/api/cmd` action `ble`, pill in `index.html`.)*
+- [ ] **Proof-of-config gate** (pure controller policy): never auto-send "BLE off"; only enable
+      the "off" affordance / auto-disable after telemetry proves the node is up on the *expected*
+      config. Build against the `ble=` telemetry field (parser already extended to read it).
+- [ ] Surface node BLE state in the list/map from telemetry once firmware reports it (controller
+      already parses `ble=` from the `[status]` line and carries `Node.BLE` tri-state).
+
+### Firmware work (the other half — pairs with the controller above)
+
+- [x] Runtime BLE start/stop (lazy SoftDevice + advertising gate) — **already done**, see audit
+      above (`ble_start_adv`/`ble_stop_adv`, `cfg_ble_enabled` persistence).
+- [x] Add `CTRL_BLE = 5` + node handler (arg 1/0 → `ble_start_adv()`/`ble_stop_adv()` + persist).
+      **Done on `worktree-self-certifying-identity`** — but in **v2** form (23-byte header,
+      16-byte target — NOT the 11-byte v1 layout originally noted here). `#ifdef AGN_BLE` guarded
+      (no-op on ESP32). The controller's `BuildBle` must emit the v2 layout to match.
+- [x] Enable trigger — signed `CTRL_BLE on` is the remote "enter provisioning mode" opener.
+      **Done (branch).** ~~Physical-button fallback~~ CLOSED (operator: "if I
+      have to get to it, I can plug into it" — the local USB/serial console already enables BLE on a
+      tethered node, so no separate button path is needed).
+- [x] **Proof-of-config**: `ble=N` now on the `[status]` line via `TELEM_FLAG_BLE` (set from
+      `ble_advertising`). **Done (branch)** — `src/main.cpp` `telem_print_status`.
+- [x] Explicit signed "BLE off" honored as a normal command (firmware obeys; the *gate* lives in
+      the controller). **Done (branch).**
+- [x] The **retune push is now a signed control command** — `CTRL_RETUNE = 6` (v2), PHY-only
+      13-byte blob, atomic apply + persist, range-validated, no firmware auto-revert (operational
+      BLE-rescue per [`docs/remote-config.md`](docs/remote-config.md) §4). **Done on
+      `worktree-self-certifying-identity`.** Controller needs a matching `BuildRetune` (v2) — see
+      the Controller→v2 handoff above.
 
 ---
 
 ## Other infra that surfaced (non-identity)
 
-- [ ] **Pin down the true free-RAM margin.** `arm-none-eabi-size` reports ~234 KB bss on the RAK
-      build, but named symbols sum to only ~50 KB — the rest is almost certainly the sbrk heap
-      pool, not consumed static RAM. Run `pio run -e wiscore_rak4631 -t size` for the authoritative
-      `RAM: x% (N of M)` line, or generate the `.map` and measure the `__bss_end__ → __StackTop`
-      gap. This determines whether RAM is actually constrained or already comfortable (it decides
-      how urgent the relay-only build is).
+- [x] **Pin down the true free-RAM margin.** ANSWERED (2026-06-14, v2 branch device build): the
+      linker reports **RAM 25% — 62 KB used of 248 KB** on RAK4631. The scary ~234 KB `bss` from
+      `arm-none-eabi-size` was indeed the sbrk heap pool, not consumed static RAM. **RAM is NOT
+      constrained** → the relay-only build is a nice-to-have, not a necessity; the identity
+      widening + keygen + signed announces cost is comfortably absorbed.
 - [ ] **(Optional) SoftDevice RAM-config tuning.** The 24 KB SoftDevice reservation is tunable at
       link/config time — fewer concurrent connections, smaller ATT table, shorter event length →
       lower `RAM_START` → relink for a few KB back. Build-time only; lower priority than the
