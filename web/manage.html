@@ -126,8 +126,8 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
   <h2>Mobility (fw ≥ 0.11.0)</h2>
   <div class="stat" style="margin:.3rem 0;">this node is: <b id="mob_val">—</b></div>
   <fieldset id="mobfs" disabled style="border:none;padding:0;margin:0;">
-    <button id="mob_fixed">Fixed</button>
-    <button id="mob_mobile">📍 Mobile</button>
+    <button id="mob_fixed">📍 Fixed</button>
+    <button id="mob_mobile">🚗 Mobile</button>
     <div class="muted" style="margin-top:.3rem;">
       Flag a node that moves around. The controller gives it a higher margin reserve and an
       asymmetric loop — raises power fast when the link weakens, trims slowly (and only after
@@ -189,7 +189,7 @@ function onLine(line){
   if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
   // `mobile on/off …` (command/query reply) or `… mobile=on/off` (info node line)
   if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
-    $('mob_val').textContent = m[1]==='on' ? '📍 mobile (controller holds power)' : 'fixed (power optimised)';
+    $('mob_val').textContent = m[1]==='on' ? '🚗 mobile (reserve band, raise fast / trim slow)' : '📍 fixed (power optimised)';
   if((m=line.match(/^batt raw=(\d+) mv=(\d+) pct=(\d+)/)))
     $('batt_val').textContent=m[2]+' mV — '+m[3]+'%  (raw '+m[1]+')';
   else if((m=line.match(/^batt raw=(\d+) UNCALIBRATED/)))
