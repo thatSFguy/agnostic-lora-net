@@ -1,6 +1,11 @@
 # LoRa Mesh Backbone — Project Plan
 
-> Working plan for review. Nothing here is built yet.
+> **[DESIGN DOCUMENT — historical.]** This is the original project plan. Most of it is
+> now built: Tier-0 (the full mesh data plane) and much of Tier-1 (the `agnctl` controller
+> — signed control, autonomous power optimisation, web dashboard) are shipping. The
+> planned MeshCore *fork* (§3) was superseded — the firmware is native (see
+> `docs/meshcore-integration.md`). For what actually shipped and how to run it, see the
+> top-level **README.md**. The requirements below (esp. Req 1–5) still govern the design.
 
 ---
 

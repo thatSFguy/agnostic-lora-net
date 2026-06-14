@@ -1,6 +1,8 @@
 // hub.js — logic for the commissioning hub (index.html).
 'use strict';
 const $ = id => document.getElementById(id);
+// GitHub releases are PRIVATE — set the firmware source to a local ./fw/ (refresh_web_fw.sh).
+// This URL is a fallback for a future public deploy. The agnctl dashboard serves /fw/ itself.
 const RELEASE_BASE = 'https://github.com/thatSFguy/agnostic-lora-net/releases/latest/download/';
 const BOARD_FILE = { rak:'agn-rak', xiao:'agn-xiao', promicro:'agn-promicro', t1000:'agn-t1000' };
 // ESP32 boards don't use the nRF52 serial-DFU path below — they flash with esptool /

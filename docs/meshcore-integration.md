@@ -1,6 +1,13 @@
 # Phase 1 — MeshCore fork integration design
 
-> Status: **design, not yet built.** The actual fork, flash, and BLE-coexistence
+> **[SUPERSEDED — kept for history.]** The firmware was NOT forked from MeshCore. It is
+> a native, portable C++ stack (`lib/mesh`) on a non-blocking radio HAL (`radio_hal.*`),
+> and BLE+LoRa coexistence (Req 1) is proven on it **without** the fork — the old failures
+> were from *blocking* radio code, not from lacking MeshCore. Board pin-maps were still
+> borrowed from MeshCore/Meshtastic (see `boards/`, `variants/`), but the Dispatcher-seam
+> integration below was never built. See the top-level README for the actual architecture.
+>
+> Original status: **design, not yet built.** The actual fork, flash, and BLE-coexistence
 > validation are hardware-gated (they need ≥2 RAK4631s and the operator's phones —
 > Agent.md Req 1). This document fixes the integration contract so the build is
 > mechanical when boards are in hand. API names below were read from

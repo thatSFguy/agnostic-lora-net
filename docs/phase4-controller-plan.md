@@ -1,7 +1,16 @@
 # Phase 4 — Tier-1 controller (RPi Zero 2 W)
 
-Status: **planning**. The signed-control *foundation* is already built (the POWER
-slice); this note plans the rest. Phase 4 turns the manual "browser-as-controller"
+Status (2026-06): **largely built.** The Go controller (`controller/`, `agnctl`) ships
+4a (console ingest + global topology), §8 (passive airtime capture), 4b (signed
+POWER/CONFIRM/BLOCK/UNBLOCK), and 4d (autonomous power-optimisation loop — now
+**mesh-wide**: tunes each node against its weakest outbound link, with a mobility-aware
+reserve/asymmetric strategy for nodes that self-report `mobile`). It serves a consolidated
+web dashboard (Dashboard | Map | Configure | Flash) and the firmware itself, and survives
+gateway drops (auto-reconnecting serial). Deferred: ROUTE override, auto-block of
+pathological links, transfer boost, key re-key (§4e). See the top-level README for shipped
+capabilities; the notes below are the original plan.
+
+Phase 4 turns the manual "browser-as-controller"
 setup into a real, field-resident **RPi controller** that collects global telemetry,
 optimizes RF autonomously under safety rails, and stays optional — kill it and the
 Tier-0 mesh keeps running (Agent.md §4, §7 Phase 4).

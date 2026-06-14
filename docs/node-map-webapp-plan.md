@@ -1,5 +1,11 @@
 # Plan: `web/map.html` — mesh map & node management console
 
+> Note (2026-06): the map + node-management console described here also ship **inside the
+> `agnctl` control-plane dashboard** (Map / Configure tabs at `localhost:8080`), now the
+> primary path when a controller is running. The standalone `web/map.html` / `web/manage.html`
+> remain for offline / no-controller use. The plan below is still the reference for the
+> gateway data model and map UI.
+
 Deployment target: **northern Kent County, Michigan** (Rockford / Cedar Springs /
 Belmont area). Real geography from day one — OSM tiles, map default-centered
 near 43.05° N, −85.60° W, zoom ~11 (covers Grand Rapids' north suburbs up past

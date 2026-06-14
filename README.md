@@ -29,8 +29,9 @@ Same radios, same physics — different class of network. All numbers below are
 | Addressing | fixed node ids | **identity directory**: register/resolve opaque ≤16 B ids (RNS hashes), push-on-change, mobility-ready |
 | PHY management | reflash / app setting | **runtime-retunable** (freq/BW/SF/CR/power, staged+persisted) with a documented network retune safety protocol |
 | Overhead | fixed beacon cadence | **beacon period auto-scales with SF** (~constant 0.3 % duty; configurable `net beacon`) |
-| Telemetry | app-dependent | battery %, link RSSI/SNR + **SNR margin**, neighbour tables — free in beacons, mapped live |
-| Management UI | phone app | **zero-install web apps** (Web Serial / Web Bluetooth): node manager + live mesh map |
+| Telemetry | app-dependent | battery %, **per-neighbour RSSI/SNR + SNR margin**, neighbour tables — free in beacons + on-demand status; mapped live |
+| RF power | fixed / manual | **autonomous closed-loop optimiser** (Tier-1 controller): signed, mesh-wide, tunes each node against its weakest link; mobility-aware (raise fast / trim slow); self-heals via on-device auto-revert |
+| Management UI | phone app | **one zero-install control plane** (`agnctl` dashboard): live map + decision feed + node config + in-browser firmware flashing, all over Web Serial / Web Bluetooth |
 
 The honest trade: our short texts are ~4× bigger on air than Meshtastic's
 (~200 B vs ~50 B) — that's the cost of end-to-end encryption and proofs, not of
@@ -52,10 +53,14 @@ Validated end-to-end on 2× RAK4631 + a Seeed XIAO nRF52840 (Wio-SX1262), all SX
 | Runtime **link blocking** (the Tier-1 "block a bad link" control hook) | `router.block()` |
 | **Reticulum** running over the mesh (announce + proven echo) | `reticulum/`, `scripts/rns_*` |
 | **BLE + LoRa coexistence (Req 1)** + phone-app ⇄ BLE ⇄ mesh ⇄ BLE ⇄ phone-app | `-DAGN_BLE`, `web/ble.html` |
+| **Signed control plane** — Ed25519 POWER/CONFIRM/BLOCK/UNBLOCK, replay-countered, auto-revert rails | `lib/mesh/control.*`, `controller/internal/sign` |
+| **Autonomous RF optimiser** — mesh-wide, weakest-link, mobility-aware (Tier-1 controller) | `controller/internal/policy` |
+| **Consolidated web control plane** — live map · decision feed · node Configure · in-browser Flash | `controller/` (`agnctl`, served at `:8080`) |
 
 The routing/codec/relay/alias/ARQ/SAR logic is **portable C++ in `lib/mesh`**, host
-unit-tested (**46 cases, `pio test -e native`**) and cross-compiled unchanged onto the
-nRF52.
+unit-tested (**66 cases, `pio test -e native`**) and cross-compiled unchanged onto the
+nRF52. The Tier-1 controller is **Go** (`controller/`, stdlib-only), with its own host
+tests (`go test ./...`). Current firmware: **v0.11.0**.
 
 > **BLE note:** the original plan assumed BLE+LoRa coexistence required forking
 > MeshCore (because every hand-rolled attempt had failed). On this firmware it **works
@@ -67,18 +72,23 @@ nRF52.
 ```
 platformio.ini            envs: wiscore_rak4631 · xiao_nrf52 · promicro · tracker_t1000_e · heltec_v4 · compile_check · native
 boards/ · variants/       project-local board defs + vendored pin-map variants (RAK / XIAO / Pro Micro / T1000-E / Heltec V4)
-include/board_config.h    per-board SX1262/LR1110 wiring + network-wide PHY (904.375 MHz, BW250, SF9, 22 dBm, sync 0x4D)
+include/board_config.h    per-board SX1262/LR1110 wiring + network-wide PHY (906.625 MHz, BW250, SF9, 22 dBm, sync 0x4D)
 include/fs_compat.h       persistence shim: Adafruit LittleFS (nRF52) / core LittleFS (ESP32)
 include/packet.h          on-air frame format (link + network headers)
 radio_hal.*               non-blocking SX1262/LR1110 transport (default SPI, per-board TCXO/RXEN/FEM)
 lib/mesh/                 PORTABLE core (no Arduino — builds for nRF52 + host):
     link_metric · neighbor_table · routing_table · router      link quality + per-direction DV
     announce_codec · forwarder · link_arq · sar                wire codec · relay · ARQ · file transfer
-src/main.cpp              firmware: prober + routing + forwarding + ARQ + SAR + console + tunnel + BLE
-test/test_*/              host unit tests (Unity): mesh · codec · forward · alias · arq · sar
+src/main.cpp              firmware: prober + routing + forwarding + ARQ + SAR + console + tunnel + BLE + signed control + mobile flag
+lib/mesh/control.*        Ed25519 signed-control codec (POWER/CONFIRM/BLOCK/UNBLOCK), shared with the controller
+lib/mesh/telemetry.*      battery + status query/reply codec (per-neighbour q/RSSI/SNR + mobile flag, fw 0.11.0)
+controller/               Tier-1 controller (Go, stdlib-only): `agnctl` — console ingest → live topology,
+                          airtime capture, signed control, autonomous power optimiser, served web dashboard
+test/test_*/              host unit tests (Unity): mesh · codec · forward · alias · arq · sar · control · telemetry · …
 docs/hardware-bringup.md  flashing + bring-up runbook
 docs/tcp-bridge.md        app-integration guide: TCP bridge + tunnel protocol (distributable)
-docs/meshcore-integration.md   Phase-1 fork seam design (now optional — BLE works without it)
+docs/phase4-controller-plan.md  Tier-1 controller plan (largely built — see controller/README.md)
+docs/meshcore-integration.md   Phase-1 fork seam design — SUPERSEDED (firmware is native, not a fork)
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
 web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
@@ -96,8 +106,7 @@ docs/identity-vs-locator.md  design boundary: mesh routes on node-id locators, a
 PlatformIO (`nordicnrf52` + Adafruit nRF52 core + RadioLib 7.x; host `g++` for tests):
 
 ```bash
-pio test -e native               # 46 host unit tests for lib/mesh (no hardware)
-pio test -e native               # 61 host unit tests for lib/mesh (no hardware)
+pio test -e native               # 66 host unit tests for lib/mesh (no hardware)
 pio run  -e wiscore_rak4631      # RAK4631 mesh firmware (BLE compiled in, off by default)
 pio run  -e xiao_nrf52           # Seeed XIAO nRF52840 + Wio-SX1262 (SoftDevice s140 v7)
 pio run  -e promicro             # Pro Micro nRF52840 + SX1262
@@ -142,6 +151,57 @@ without configuration.
   sync, staged + `rf apply`, persisted) are the local stand-ins for the Tier-1
   controller's signed control commands — see [`docs/remote-config.md`](docs/remote-config.md).
 
+## Control plane — the `agnctl` Tier-1 controller
+
+`controller/` is the **Tier-1 controller** (Go, stdlib-only — builds offline; `crypto/ed25519`
+for signing). It tethers to one node over USB, reads the console stream into a **live global
+topology**, and — with a controller key — signs and pushes control commands into the mesh. It
+stays **optional**: kill it and the Tier-0 mesh keeps running, and every connectivity-reducing
+command has an on-device auto-revert, so a controller crash self-heals.
+
+```bash
+cd controller
+go run ./cmd/agnctl -port /dev/ttyACM0 -optimize -apply -http :8080   # live: optimise + serve dashboard
+go run ./cmd/agnctl -file testdata/session.log -optimize -http :8080  # replay a log, no hardware
+```
+
+- **Autonomous RF power optimisation (mesh-wide).** A node transmits at one power, so the binding
+  constraint is the **weakest outbound link it must keep** — the optimiser tunes each node against
+  that, not just its link to the gateway. The tethered gateway's own links carry measured SNR;
+  remote links arrive as routed **telemetry** (`status <id>`), which since **fw 0.11.0** carries
+  per-neighbour SNR/RSSI so remote links are measured too (older/quality-only links can be raised
+  but never trimmed — a quality estimate saturates). Every change is step-limited; a *decrease*
+  applies provisionally and the controller only **CONFIRM**s it after re-observing the node, else
+  the node's 60 s dead-man revert restores it.
+- **Mobile vs fixed nodes.** A node self-reports mobility (`mobile on|off`, persisted, surfaced in
+  telemetry). **Fixed** nodes get optimised straight down to a target margin; **mobile** nodes get
+  a higher **reserve band** and an **asymmetric** loop — raise fast when the link weakens, trim
+  slowly and only after the margin stays strong — a slow analogue of cellular closed-loop power
+  control suited to the mesh's ~15 s feedback. (🚗 = mobile, 📍 = fixed in the UI.)
+- **Signed control** (`lib/mesh/control` ↔ `controller/internal/sign`, byte-identical, gold-tested):
+  POWER / CONFIRM / BLOCK / UNBLOCK, Ed25519-signed with a monotonic replay counter; flooded to the
+  target and ACKed back through the mesh. ROUTE override and remote PHY retune are still TODO.
+- **Resilient + self-contained.** The serial link auto-reconnects across node reboots/USB
+  re-enumeration (the dashboard stays up through gateway blips). The controller also **serves the
+  firmware** it flashes (`/fw/`, default `-fwdir ../web/fw`) — no public release needed (the GitHub
+  releases are private).
+
+**The dashboard** (`-http :8080`, one consolidated single-page app — `localhost` is a secure
+context, so Web Serial / Web Bluetooth work):
+
+- **Dashboard** — per-node power/margin/battery/**firmware**, decision feed, gateway console, fixed/mobile.
+- **Map** — per-direction link quality (colour + width + value labels), direction arrows, asymmetry
+  badges, the optimiser's decision under each node, neighbour count, battery, 🚗/📍 — click a node to
+  focus its links and see *why* the optimiser chose a power.
+- **Configure** — connect a locally-attached node over Web Serial/BLE: radio PHY (with retune
+  warning), battery calibration, BLE pairing/PIN, the mobile flag, raw console. (A port of
+  `web/manage.html` into the control plane.)
+- **Flash** — in-browser nRF52 serial DFU: pick a board, ① reboot to bootloader, ② select the
+  re-enumerated bootloader port & flash, with a UF2 fallback. (A port of the standalone hub.)
+
+See [`controller/README.md`](controller/README.md) for flags (margins, step, cadence, key custody)
+and [`docs/phase4-controller-plan.md`](docs/phase4-controller-plan.md) for scope.
+
 ## Reticulum over the mesh
 
 The backbone is a transparent **Reticulum interface** — RNS packets ride as opaque
@@ -172,53 +232,30 @@ default, and a 6-digit pairing PIN is set per node. Management is **out-of-band 
 `ble on|off`, `blepin [random|<6 digits>]`. The PIN is shown **on demand only**
 (never in periodic output).
 
-## Commissioning hub & web apps (zero install)
+## Standalone web apps (zero install, no controller needed)
 
-A single-page **commissioning hub** ([`web/index.html`](web/index.html)) flashes,
-provisions, and hands off nodes for remote administration. Run it locally
-(`localhost` is a secure context, so Web Serial / Web Bluetooth work):
+When a controller is running, flashing/config/map all live in the **`agnctl` dashboard**
+(above) — that's the primary path. The standalone single-file web apps remain for
+**offline / no-controller** use (e.g. bench-flashing before a controller exists). Web Serial /
+Web Bluetooth need a secure context — `localhost` qualifies:
 
 ```bash
-bash scripts/refresh_web_fw.sh     # build firmware into web/fw/
+bash scripts/refresh_web_fw.sh     # build firmware for all boards into web/fw/
 python3 -m http.server 8000        # then open http://localhost:8000/web/
 ```
-Set the hub's firmware source to `./fw/`. The flow:
 
-1. **Flash** — in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a faithful port of
-   adafruit-nrfutil's protocol, verified byte-for-byte) with **UF2 drag-drop fallback**.
-2. **Provision** — set the BLE PIN and bind the node to this browser's Ed25519
-   **controller key**, so it's ready for signed remote management.
-3. **Manage** — the live mesh map ([`web/map.html`](web/map.html)).
+- **`web/index.html`** — commissioning hub: in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a
+  byte-faithful port of adafruit-nrfutil) with UF2 fallback, plus BLE-PIN + controller-key
+  provisioning. Set the firmware source to `./fw/` — **GitHub releases are private**, so the
+  release URL is only a fallback.
+- **`web/manage.html`** — node manager: radio PHY (with retune warning), battery calibration,
+  BLE pairing/PIN, the mobile flag, raw console.
+- **`web/map.html`** — gateway-centric mesh map (Leaflet, real geography): per-direction link
+  quality/asymmetry/SNR-margin, battery badges, gateway console.
+- **`web/ble.html`** — Web Bluetooth chat demo (app ⇄ BLE ⇄ mesh).
 
-Firmware comes from `web/fw/` (built by `refresh_web_fw.sh`) or, for a public deploy,
-the latest GitHub release (UF2 + `.dfu.json` are published per board). Web Serial /
-Web Bluetooth need a secure context — `localhost` qualifies.
-
-## Web apps (zero install)
-
-Both are single files served from the repo — Web Serial / Web Bluetooth need a
-secure context, and `localhost` counts:
-
-```bash
-python3 -m http.server 8000
-# http://localhost:8000/web/manage.html   — node manager
-# http://localhost:8000/web/map.html      — mesh map
-```
-
-**manage.html** — connect a node over USB (Web Serial) or BLE (Web Bluetooth):
-enable BLE + read the pairing PIN, stage/apply radio settings with the retune
-warning, calibrate the battery (enter a multimeter reading — volts or mV — and
-the node derives + persists its ADC scale), or drive the raw console.
-
-**map.html** — connect ONE node as the *gateway* (deployed nodes have no USB;
-BLE from wherever you stand works). The app polls the gateway's tables plus the
-announce-derived view of every neighbour's links — the whole cluster appears
-with **zero extra packets on the air**. Place nodes on the map (positions
-persist; JSON export/import), then read it: paired directional arrows colored
-by link quality, grey-dashed = direction never heard (a one-way link), ⚠ =
-asymmetric, click a link for both directions' q/RSSI/SNR **and the SNR margin
-at the current SF** — the "how close is this link to the cliff" number. Click a
-node for vitals, battery, who it hears / who hears it, and its routes overlaid.
+(`nrf-dfu.js` is vendored into `controller/internal/httpd/` so the dashboard's Flash tab serves
+it too — keep the two copies in sync.)
 
 ## Bridges: putting other stacks on the mesh
 
@@ -244,13 +281,17 @@ integration surface for everything:
 
 ## What's left
 
-- **Tier-1 controller** — signed remote control is **live for TX power** (Ed25519, fw
-  ≥ 0.8.0): the controller key lives in the map app, gets provisioned per node
-  (`ctrlkey`), and commands carry a replay counter; power *decreases* apply
-  provisionally and auto-revert in 60 s unless confirmed, so a remote command can never
-  strand a node. `block`/route/full-rf-retune over the same signed path are next. The
+- **Tier-1 controller — shipped & ongoing.** Signed POWER/CONFIRM/**BLOCK/UNBLOCK**, the
+  mesh-wide autonomous power optimiser, mobility-aware control, the consolidated dashboard,
+  and resilient serial are all **live** (see the control-plane section above). Still TODO:
+  signed **ROUTE override** and **remote PHY retune** over the same path; auto-block of
+  pathological links; transfer boost; controller-key **rotation / re-key** (§4e). The
   network-wide retune safety protocol is in [`docs/remote-config.md`](docs/remote-config.md).
+- **Energy** — nodes currently run continuous RX with the MCU spinning; the highest-value
+  power win is to **light-sleep the nRF52 between radio interrupts** (DIO1 already wakes it),
+  plus a deep-sleep role for leaf/tracker nodes. Not yet implemented.
 - **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
   an RNode-compatible BLE front-end backed by the mesh).
-- Polish: pub-key-derived node IDs + signed control plane (§3/§5), FCC handling for the
-  1 W class (§8), flash-write minimization for solar nodes (§4 Req 4).
+- Polish: pub-key-derived node IDs (§3/§5, so node identity is authenticated — today's
+  32-bit IDs are opaque + spoofable), FCC dwell-time handling for the 906.625 MHz fixed
+  channel (§8), flash-write minimization for solar nodes (§4 Req 4).

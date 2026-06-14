@@ -1,7 +1,11 @@
 <!DOCTYPE html>
-<!-- index.html — AgnLoRa commissioning hub. Flash, provision, and hand off to
-     management, all in one page. Hosted on GitHub Pages (HTTPS = the secure
-     context Web Serial / Web Bluetooth require).
+<!-- index.html — AgnLoRa STANDALONE commissioning hub (offline / no-controller use).
+     When a controller is running, the same Flash + Configure live in the agnctl dashboard
+     (localhost:8080, Flash/Configure tabs) — that's the primary path now. This hub stays
+     for flashing/provisioning without agnctl. NOTE: GitHub releases are private, so set the
+     firmware source to a local ./fw/ (refresh_web_fw.sh) — the release URL is a fallback.
+     Flash, provision, and hand off to management, all in one page. Run on localhost (HTTPS
+     or localhost = the secure context Web Serial / Web Bluetooth require).
 
      Flash:    in-browser nRF52 serial DFU (web/nrf-dfu.js), UF2 drag-drop fallback.
      Provision: BLE PIN + controller pubkey (`ctrlkey`) -> node ready for remote admin.

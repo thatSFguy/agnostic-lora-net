@@ -6,10 +6,12 @@ bandwidth, spreading factor, coding rate, sync word, TX power, preamble) — is 
 It also defines the **safety protocol** the central node MUST follow for a network-wide
 retune, because a careless PHY change can strand nodes.
 
-> Status: the **local** path (USB / BLE console, `web/manage.html`) is implemented and
-> persisted. The **authenticated remote** path is specified here and stubbed at the
-> firmware seam (`RadioHal::apply_config()` + the `rf` console); the signed control
-> packet is Tier‑1 work, gated on the pub‑key‑derived node IDs of Agent.md §3/§5.
+> Status (2026-06): the **local** path (USB / BLE console, plus the `agnctl` dashboard's
+> Configure tab) is implemented and persisted. The **signed remote** path now ships for
+> POWER / CONFIRM / BLOCK / UNBLOCK (Ed25519, replay-countered, byte-identical Go signer
+> in `controller/internal/sign` ↔ firmware `lib/mesh/control`; auto-revert rails). Signed
+> **ROUTE override and remote PHY retune** are still TODO. The network-wide retune safety
+> protocol below still applies to whoever drives the change (today: local/Configure tab).
 
 ---
 

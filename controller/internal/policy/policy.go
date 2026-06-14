@@ -1,8 +1,9 @@
 // Package policy is the autonomous RF-optimisation loop (Phase 4 plan §4d). Each cycle it
-// reads the live topology, computes for every managed node how much SNR margin the gateway
-// hears it with, and nudges that node's TX power toward a target margin band — lower when
-// it's heard too loudly (saves airtime/power, the "all nodes turned way down" fix done
-// *measured* instead of guessed), higher when it's marginal.
+// reads the live topology, computes for every managed node its worst-case SNR margin (the
+// weakest neighbour that hears it — see the mesh-wide scope below), and nudges that node's
+// TX power toward a target margin band — lower when it's heard too loudly (saves
+// airtime/power, the "all nodes turned way down" fix done *measured* instead of guessed),
+// higher when it's marginal.
 //
 // Scope (mesh-wide): a node transmits at one power, so the binding constraint is the
 // *weakest outbound link it must keep* — the neighbour that hears it worst. The engine
