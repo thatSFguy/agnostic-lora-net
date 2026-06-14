@@ -501,8 +501,14 @@ static void cfg_save() {
 static void cfg_load() {
     InternalFS.begin();
     AgnBleCfg c;
-    if (cfg_read(c)) { strncpy(ble_pin, c.pin, 6); ble_pin[6] = 0; cfg_ble_enabled = c.enabled; }
-    else { ble_gen_pin(); cfg_first_boot = true; }
+    if (cfg_read(c)) {
+        strncpy(ble_pin, c.pin, 6); ble_pin[6] = 0;
+        // SAFETY GUARD (2026-06-14): do NOT auto-start BLE from a persisted "on". A v2 node
+        // with the SoftDevice active hard-hangs ~20s after boot (signed-beacon/SoftDevice
+        // coexistence regression — see memory v2-ble-hardware-regressions). Forcing off at
+        // boot keeps the node stable even if BLE was left enabled. Remove once that's fixed.
+        cfg_ble_enabled = false;  // was: c.enabled
+    } else { ble_gen_pin(); cfg_first_boot = true; }
 }
 
 static void ble_setup();   // fwd decl — start_adv brings the stack up on demand
@@ -2598,6 +2604,36 @@ static void poll_console() {
     }
 }
 
+// --- HardFault reporter (nRF52 / Cortex-M only; ESP32 has its own panic backtrace) ---------
+// USB-CDC can't flush inside a fault handler, so we stash the faulting PC/LR/fault-status in
+// noinit RAM (survives the reset), reboot, and print it at startup as a [FAULT] line. Cheap
+// safety net: any future HardFault self-reports its address instead of just freezing.
+#if !defined(ESP32)
+struct FaultInfo { uint32_t magic, pc, lr, psr, cfsr, hfsr, sp; };
+__attribute__((section(".noinit"))) static volatile FaultInfo g_fault;
+static const uint32_t FAULT_MAGIC = 0xFA017ED5u;
+
+extern "C" void hardfault_capture(uint32_t* sp) {
+    g_fault.magic = FAULT_MAGIC;
+    g_fault.lr   = sp[5];
+    g_fault.pc   = sp[6];
+    g_fault.psr  = sp[7];
+    g_fault.cfsr = SCB->CFSR;
+    g_fault.hfsr = SCB->HFSR;
+    g_fault.sp   = (uint32_t)sp;
+    NVIC_SystemReset();
+    for (;;) {}
+}
+extern "C" __attribute__((naked)) void HardFault_Handler(void) {
+    __asm volatile(
+        "tst lr, #4            \n"
+        "ite eq                \n"
+        "mrseq r0, msp         \n"
+        "mrsne r0, psp         \n"
+        "b hardfault_capture   \n");
+}
+#endif
+
 void setup() {
     boot_ms = millis();
     Serial.begin(115200);
@@ -2608,6 +2644,19 @@ void setup() {
     // forever (headless nodes have no host).
     uint32_t t0 = millis();
     while (!Serial && (millis() - t0) < 2000) { /* wait for monitor, briefly */ }
+
+#if !defined(ESP32)
+    if (g_fault.magic == FAULT_MAGIC) {   // a HardFault was captured before the last reset
+        g_fault.magic = 0;
+        char fb[128];
+        snprintf(fb, sizeof(fb),
+                 "[FAULT] pc=%08lX lr=%08lX psr=%08lX cfsr=%08lX hfsr=%08lX sp=%08lX",
+                 (unsigned long)g_fault.pc, (unsigned long)g_fault.lr, (unsigned long)g_fault.psr,
+                 (unsigned long)g_fault.cfsr, (unsigned long)g_fault.hfsr, (unsigned long)g_fault.sp);
+        Serial.println(fb);
+        Serial.flush();
+    }
+#endif
 
     my_id = node_key_init();   // load or mint the node's Ed25519 keypair; id = blake2b(pubkey)
     randomSeed(nid_fold(my_id));
@@ -2821,8 +2870,12 @@ void loop() { agn_loop_once(); }
 // SAR + console snprintf) ran that to within a few WORDS of the cliff: adding one 32-byte
 // local to the heartbeat crashed the node at the first beat (bisected on hardware — K1
 // fail vs K2 pass differed only in moving that buffer off the stack). So the real loop
-// runs in our own task with 2048 words (8 KB), and the core's loop() just parks. The
-// heartbeat's stk= field reports this task's remaining headroom — watch it in the field.
+// runs in our own task. v2 added Ed25519 sign (beacon TX) AND verify (announce RX) to the
+// hot path; verify is the deepest path and at 2048 words (8 KB) it overflowed the stack when
+// a peer's announce arrived (stk= had fallen to ~480 words from the TX path alone), hard-
+// faulting the node ~20s after it first heard a peer. Bumped to 4096 words (16 KB) — RAM is
+// ~26% used, so this is free — and the crypto view[] buffers are now static (off-stack).
+// The heartbeat's stk= field reports this task's remaining headroom — watch it in the field.
 static void agn_main_task(void*) {
     for (;;) { agn_loop_once(); yield(); }
 }
@@ -2831,7 +2884,7 @@ void loop() {
     static bool started = false;   // vTaskDelay(portMAX_DELAY) is ~49 days, not forever:
     if (!started) {                // guard so a wrap can never spawn a second main task
         started = true;
-        xTaskCreate(agn_main_task, "agn", 2048, NULL, TASK_PRIO_LOW, NULL);
+        xTaskCreate(agn_main_task, "agn", 4096, NULL, TASK_PRIO_LOW, NULL);
     }
     vTaskDelay(portMAX_DELAY);     // park the core's thin-stacked loop task
 }

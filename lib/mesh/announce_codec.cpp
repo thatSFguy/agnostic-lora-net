@@ -115,7 +115,9 @@ void announce_sign(const uint8_t* body, uint16_t body_len,
                    const uint8_t pubkey[32], const uint8_t seckey[64], uint8_t* tail) {
     if (body_len > ANN_VIEW_BODY_MAX) return;       // wire bodies never reach this
     memcpy(tail, pubkey, 32);
-    uint8_t view[sizeof(ANN_DOMAIN) + 32 + ANN_VIEW_BODY_MAX];
+    // static (off-stack): the mesh runs single-threaded in one loop task, and this ~297-byte
+    // buffer on the crypto path was overflowing that task's stack (see main.cpp agn_main_task).
+    static uint8_t view[sizeof(ANN_DOMAIN) + 32 + ANN_VIEW_BODY_MAX];
     uint16_t vn = ann_view(pubkey, body, body_len, view);
     crypto_ed25519_sign(tail + 32, seckey, view, vn);
 }
@@ -125,7 +127,7 @@ bool announce_verify(const uint8_t* body, uint16_t body_len,
     if (body_len > ANN_VIEW_BODY_MAX) return false;
     const uint8_t* pubkey = tail;       // [0..32)
     const uint8_t* sig    = tail + 32;  // [32..96)
-    uint8_t view[sizeof(ANN_DOMAIN) + 32 + ANN_VIEW_BODY_MAX];
+    static uint8_t view[sizeof(ANN_DOMAIN) + 32 + ANN_VIEW_BODY_MAX];  // off-stack (see announce_sign)
     uint16_t vn = ann_view(pubkey, body, body_len, view);
     if (crypto_ed25519_check(sig, pubkey, view, vn) != 0) return false;
     memcpy(out_pubkey, pubkey, 32);
