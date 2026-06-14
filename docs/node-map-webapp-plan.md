@@ -6,10 +6,9 @@
 > remain for offline / no-controller use. The plan below is still the reference for the
 > gateway data model and map UI.
 
-Deployment target: **northern Kent County, Michigan** (Rockford / Cedar Springs /
-Belmont area). Real geography from day one — OSM tiles, map default-centered
-near 43.05° N, −85.60° W, zoom ~11 (covers Grand Rapids' north suburbs up past
-Cedar Springs). Node spacing at that scale is kilometres, which is exactly the
+Real geography from day one — OSM tiles, with a configurable default map center/zoom (the
+map fits to placed nodes once you position them). Target deployments are
+**kilometre-scale** rural/suburban spreads, which is exactly the
 regime where link asymmetry and TX-power differences start to matter — the map
 is the tool for seeing it.
 
@@ -64,7 +63,7 @@ So unlike the original draft, this plan has a small firmware component
 
 ## 2. Map & node placement
 
-- Default view: northern Kent County (center ≈ 43.05, −85.60, zoom 11).
+- Default view: a generic center/zoom until nodes are placed (then the map fits to them).
 - New nodes land in a sidebar "unplaced" tray → click node, then click the map
   to place (or drag an existing marker).
 - Positions persist in `localStorage` keyed by node id, with **JSON

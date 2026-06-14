@@ -81,8 +81,8 @@ A central service improves the network but is never required for it to run.
 | Sync word        | **`0x4D`** — clear of MeshCore `0x12`, Meshtastic `0x2B`, LoRaWAN `0x34` (verified from MeshCore source) |
 | Reference HW     | **RAK WisBlock RAK4631** — nRF52840 + SX1262 |
 | Other HW (later) | LilyGo TLora (SX1276/1262), DIY 1 W nodes, misc |
-| Base firmware    | **Fork of MeshCore** (meshcore-dev) — inherit radio/BLE/host, replace routing |
-| RAK4631 BLE env  | `RAK_4631_companion_radio_ble` (MeshCore) |
+| Base firmware    | **Native** (portable C++ `lib/mesh` + non-blocking radio HAL). *Originally planned as a MeshCore fork — NOT taken; we borrow MeshCore/Meshtastic board pin-maps + BLE timing patterns, not the codebase.* |
+| RAK4631 build    | our own env `wiscore_rak4631` (BLE compiled in, lazy SoftDevice) |
 | Radio HAL        | **RadioLib** (covers SX1262 + SX1276 from one API) |
 | MCU platform     | `nordicnrf52` / Arduino (Adafruit nRF52 core), board `wiscore_rak4631` |
 | Addressing       | Node ID = **16-byte** truncated hash of the node's own public key (self-certifying, collision-free; RNS-shaped format, *separate namespace* — a **locator**, not an app/RNS identity). 32-bit `FICR` fold is the Tier-0 placeholder. See [`docs/identity-vs-locator.md`](docs/identity-vs-locator.md). |
@@ -167,15 +167,20 @@ additionally carry a signature so a node only obeys legitimate power/block/route
 
 ---
 
-## 7. Phased build plan (fork of MeshCore)
+## 7. Phased build plan
 
-### Phase 0 — Fork & baseline (prove Req 1 on our base)
-- Fork meshcore-dev/MeshCore; build `RAK_4631_companion_radio_ble` **unchanged** first.
-- Apply our PHY config: 904.375 MHz, BW 250, SF11, CR 4/5, sync `0x4D`.
-- Flash 2× RAK4631; **operator confirms BLE holds on A42 *and* Pixel 9XL under
-  sustained LoRa TX/RX.**
-- **Milestone:** stock-routing MeshCore on our PHY, BLE stable on both phones — the
-  working baseline we fork from. *(Manual: operator flashes + pairs phones.)*
+> **What actually happened:** the firmware was built **native** (portable C++ `lib/mesh`
+> on a non-blocking radio HAL), NOT forked from MeshCore. BLE+LoRa coexistence (Req 1) was
+> the reason a fork seemed necessary — but it works without one once the radio code is
+> rigorously non-blocking. The fork-based phasing below is the original plan, kept for
+> history; substitute "our native firmware" for "forked MeshCore" throughout.
+
+### Phase 0 — Baseline (prove Req 1 on our base)
+- ~~Fork meshcore-dev/MeshCore; build `RAK_4631_companion_radio_ble` unchanged.~~ Built our
+  own non-blocking radio HAL + BLE (lazy SoftDevice) instead.
+- Apply our PHY config: BW 250, SF, CR 4/5, sync `0x4D`.
+- Flash 2× RAK4631; **operator confirms BLE holds under sustained LoRa TX/RX.** (Done.)
+- **Milestone:** BLE stable on both phones alongside LoRa — reached on the native firmware.
 
 ### Phase 1 — Own the routing seam (parity, no regression)
 - Keep `Dispatcher` + radio/BLE/host untouched. Stand up our own mesh class that
@@ -207,8 +212,9 @@ additionally carry a signature so a node only obeys legitimate power/block/route
 - **Milestone:** heterogeneous nodes interoperate; a phone reaches an endpoint via a
   gateway; a mobile endpoint re-homes and stays findable.
 
-**Cross-cutting:** preserve MeshCore's BLE tuning + pinned forked nRF52 BSP
-byte-for-byte; **never block `loop()`**; flash dirty-compare (Req 4); signed control plane.
+**Cross-cutting:** reuse MeshCore's BLE *tuning values* (not its code) on the stock Adafruit
+nRF52 core + vendored RAK board variant; **never block `loop()`**; flash dirty-compare
+(Req 4); signed control plane.
 
 ---
 
@@ -252,11 +258,17 @@ Every hand-rolled attempt at BLE+LoRa on nRF52 has failed — including the prio
 `reticulum-loramesh` repo, whose "it's Samsung's fault" postmortem was **wrong**:
 stock Meshtastic, MeshCore, and Reticulum all hold stable BLE to the operator's
 Samsung A42 *and* Pixel 9XL on the same hardware. Non-blocking radio (principle #6)
-is necessary but was **not sufficient** alone. Conclusion: **never hand-roll the
-radio/BLE/host layer — take it from working firmware.**
+is necessary but was thought **not sufficient** alone.
 
-**Decision (resolved) — fork MeshCore (meshcore-dev).** Chosen over Meshtastic on
-evidence from reading both:
+> **Outcome (REVERSED — we did NOT fork).** A rigorously non-blocking radio HAL
+> (`radio_hal.cpp` over RadioLib) plus a lazily-enabled SoftDevice BLE layer holds Req 1 on
+> its own — the prior failures were *blocking* radio code, not the absence of MeshCore.
+> Non-blocking radio turned out to be sufficient after all. We kept MeshCore/Meshtastic
+> board pin-maps and BLE timing *values*, but the firmware is **native**, not a fork. The
+> rationale below is why a fork once looked like the safe choice.
+
+**Decision (originally resolved, later reversed) — fork MeshCore (meshcore-dev).** Chosen
+over Meshtastic at the time on evidence from reading both:
 - MeshCore's `Dispatcher`↔routing seam is a **single virtual**
   (`Mesh::onRecvPacket → DispatcherAction`); all radio scheduling, duty-cycle, CAD,
   dedup, and queueing sit *below* it, routing-agnostic. Payload container is opaque
@@ -267,8 +279,9 @@ evidence from reading both:
 
 **Keep byte-for-byte (Req 1):** the async RadioLib wrapper + DIO1 IRQ state machine
 (`RadioLibWrappers`, `CustomSX1262*`), `nrf52/SerialBLEInterface` with its
-conn-param / supervision-timeout / advertising-watchdog tuning, and the **pinned
-forked nRF52 BSP** in `[nrf52_base]` (load-bearing — exists to stop BLE lockups).
+conn-param / supervision-timeout / advertising-watchdog tuning, and a pinned nRF52 BSP.
+*(As built: none of this was taken byte-for-byte — see the reversal note above; we wrote a
+native non-blocking HAL on the stock Adafruit core.)*
 **Replace:** `Mesh::onRecvPacket` / `routeRecvPacket` / `send*` with our link-quality
 + independent-per-direction routing. Borrow self-certifying addresses from Reticulum.
 

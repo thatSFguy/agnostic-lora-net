@@ -60,7 +60,7 @@
 </head>
 <body>
 <header>
-  <h1>AgnLoRa mesh — northern Kent County</h1>
+  <h1>AgnLoRa mesh map</h1>
   <button id="btnSerial">Connect gateway (Serial)</button>
   <button id="btnBle">Connect gateway (BLE)</button>
   <span id="gwPill" class="pill">no gateway</span>
@@ -95,7 +95,8 @@
 <script>
 'use strict';
 // ---------- constants ----------
-const KENT = [43.05, -85.60], ZOOM = 11;
+// Generic default view until nodes are placed; the map fits to your placed positions.
+const DEFAULT_CENTER = [39.5, -98.35], ZOOM = 4;
 const ASYM_THRESHOLD = 0.35;                       // mirrors lib/mesh ASYM_THRESHOLD
 const SNR_LIMIT = {5:-2.5, 6:-5, 7:-7.5, 8:-10, 9:-12.5, 10:-15, 11:-17.5, 12:-20};
 // Marker freshness scales with the network's beacon cadence (fw `net beacon`,
@@ -307,7 +308,7 @@ function onLine(line) {
 }
 
 // ---------- map ----------
-const map = L.map('map').setView(KENT, ZOOM);
+const map = L.map('map').setView(DEFAULT_CENTER, ZOOM);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
             { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
 const layerLinks = L.layerGroup().addTo(map);
