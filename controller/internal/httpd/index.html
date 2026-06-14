@@ -284,8 +284,10 @@ function renderNodes(state){
     // Identity: ✓ verified / ⚠ unverified, plus a membership pill (allowed/pending/unverified).
     // n.acl is "" when no controller key (ACL inactive) — then show nothing, to keep read-only clean.
     const vBadge = n.verified ? '<span class="vbadge ok" title="announce signature verified by the gateway">✓</span>'
-                 : (n.acl ? '<span class="vbadge no" title="no valid signed announce seen">⚠</span>' : '');
-    const aclPill = n.acl ? `<span class="pill acl-${n.acl}" title="membership: ${n.acl}">${n.acl}</span>` : '';
+                 : (isGw ? '<span class="vbadge ok" title="tethered gateway — trusted by the direct serial link (Model A anchor)">✓</span>'
+                 : (n.acl ? '<span class="vbadge no" title="no valid signed announce seen">⚠</span>' : ''));
+    // The gateway's "gateway" pill already conveys its role; don't also tag it "allowed".
+    const aclPill = (n.acl && !isGw) ? `<span class="pill acl-${n.acl}" title="membership: ${n.acl}">${n.acl}</span>` : '';
     const ctrls=isGw?'':`<div class="row">
         <input class="pw" type="number" value="${typeof pwr==='number'?pwr:''}" data-pw="${n.id}" title="dBm">
         <button data-pwset="${n.id}">Set</button><button data-pwkeep="${n.id}">Keep</button>

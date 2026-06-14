@@ -77,11 +77,16 @@ func (g *Graph) SetAllowFunc(f func(pubHex string) bool) {
 }
 
 // aclLabel derives a node's membership label. "" when no ACL is configured. Caller holds mu.
+// The tethered gateway is "allowed" by definition: it's the controller's own radio, trusted
+// by the direct serial link (Model A's anchor) — a node never hears its own announce, so it
+// can't be verified via the [ann] path and must not be flagged unverified.
 func (g *Graph) aclLabel(n *Node) string {
 	if g.allow == nil {
 		return ""
 	}
 	switch {
+	case n.IsGateway:
+		return "allowed"
 	case n.Verified && g.allow(n.Pub):
 		return "allowed"
 	case n.Verified:
@@ -92,15 +97,16 @@ func (g *Graph) aclLabel(n *Node) string {
 }
 
 // manageable reports whether the controller may tune/command this node. Permissive without
-// an ACL; otherwise requires verified + allowlisted. Caller holds mu.
+// an ACL; otherwise requires verified + allowlisted (the tethered gateway is always trusted).
 func (g *Graph) manageable(n *Node) bool {
-	return g.allow == nil || (n.Verified && g.allow(n.Pub))
+	return g.allow == nil || n.IsGateway || (n.Verified && g.allow(n.Pub))
 }
 
 // CommandAllowed reports whether a signed command may be issued to node id, returning the
 // resolved pubkey for messaging. Permissive when no ACL is configured; otherwise the target
-// must be verified and on the allowlist. The HTTP/CLI command paths gate on this before
-// advancing the replay counter (so a rejected command never burns a counter).
+// must be verified and on the allowlist. The tethered gateway is always trusted (Model A).
+// The HTTP/CLI command paths gate on this before advancing the replay counter (so a rejected
+// command never burns a counter).
 func (g *Graph) CommandAllowed(id string) (pub string, ok bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -108,7 +114,13 @@ func (g *Graph) CommandAllowed(id string) (pub string, ok bool) {
 		return "", true
 	}
 	n := g.nodes[strings.ToUpper(id)]
-	if n == nil || !n.Verified {
+	if n == nil {
+		return "", false
+	}
+	if n.IsGateway {
+		return "", true // trusted by the direct serial tether
+	}
+	if !n.Verified {
 		return "", false
 	}
 	return n.Pub, g.allow(n.Pub)
