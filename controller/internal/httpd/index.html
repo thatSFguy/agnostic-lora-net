@@ -59,6 +59,7 @@
   button.primary{ background:#13314f; border-color:var(--acc); } label.chk{ color:var(--dim); font-size:12px; }
   .pill{ font-size:11px; padding:2px 8px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
   .pill.ok{ color:var(--confirm); border-color:var(--confirm); } .pill.bad{ color:var(--revert); border-color:var(--revert); }
+  .pill.warn{ color:var(--lower); border-color:var(--lower); }
   .termlog{ background:#0a0d12; color:#7fdc8f; font-family:ui-monospace,monospace; font-size:11px; height:11rem;
             overflow:auto; padding:6px 8px; border-radius:6px; white-space:pre-wrap; margin-top:8px; }
 </style>
@@ -165,7 +166,8 @@
     <div class="row" style="margin:.5rem 0">
       <label class="chk"><input id="fl_isboot" type="checkbox"> node is already in bootloader (skip the touch)</label>
     </div>
-    <div class="row"><button id="fl_go" class="primary">Connect &amp; flash →</button>
+    <div class="row"><button id="fl_go" class="primary">① Reboot to bootloader →</button>
+      <button id="fl_finish" class="primary hide">② Select bootloader port &amp; flash →</button>
       <span id="fl_state" class="pill">idle</span>
       <button id="fl_uf2" class="hide">Download UF2 (drag-drop fallback)</button></div>
     <div class="bar" style="height:8px;margin:.6rem 0"><span id="fl_prog" style="width:0"></span></div>
@@ -447,20 +449,36 @@ const FL_RELEASE='/fw/';   // served by agnctl from -fwdir (GitHub is private); 
 function flog(m){ const l=$('#fl_log'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-200).join('\n'); l.scrollTop=l.scrollHeight; }
 function flState(t,cls){ const e=$('#fl_state'); e.textContent=t; e.className='pill'+(cls?' '+cls:''); }
 function flBase(){ return $('#fl_base').value.trim()||FL_RELEASE; }
-async function flFlash(){ const board=$('#fl_board').value;
+let flDfu=null;   // firmware fetched at step ①, used at step ②
+async function flDoFlash(port){   // DFU a freshly-picked port (the bootloader)
+  try{ flState('flashing…'); await DFU.flash(port,flDfu,{ log:flog, prog:p=>{ $('#fl_prog').style.width=p+'%'; flState('flashing… '+p+'%'); } });
+    flState('flashed ✓','ok'); flog('done — node rebooting'); $('#fl_finish').classList.add('hide'); }
+  catch(e){ flog('DFU error: '+e); flState('failed — use UF2 fallback','bad'); } }
+// Step ①: fetch firmware, then either flash directly (already in bootloader) or touch to
+// reboot into the bootloader. The bootloader RE-ENUMERATES as a new serial port, so we
+// can't reuse the handle — the user must pick it at step ② (which also gives requestPort
+// the fresh user gesture it requires).
+async function flStart(){ const board=$('#fl_board').value; $('#fl_finish').classList.add('hide');
   if(board in FL_ESP){ flState('ESP32 — flash via CLI'); flog('Heltec V4 is ESP32-S3; the nRF52 serial-DFU path does not apply.'); flog('Flash it with:  pio run -e heltec_v4 -t upload'); return; }
   $('#fl_uf2').classList.remove('hide'); $('#fl_uf2').onclick=()=>window.open(flBase()+FL_BOARD[board]+'.uf2','_blank'); $('#fl_prog').style.width='0';
   if(typeof DFU==='undefined'){ flState('DFU module not loaded','bad'); return; }
   if(!navigator.serial){ flState('Web Serial unsupported — use Chrome/Edge','bad'); return; }
-  let dfu;
-  try{ flState('fetching firmware…'); const r=await fetch(flBase()+FL_BOARD[board]+'.dfu.json'); if(!r.ok) throw new Error('HTTP '+r.status); dfu=await r.json(); flog('firmware: '+dfu.app_size+' B'); }
+  try{ flState('fetching firmware…'); const r=await fetch(flBase()+FL_BOARD[board]+'.dfu.json'); if(!r.ok) throw new Error('HTTP '+r.status); flDfu=await r.json(); flog('firmware: '+flDfu.app_size+' B'); }
   catch(e){ flState('fetch failed','bad'); flog('Could not fetch firmware ('+e+'). Use the UF2 fallback.'); return; }
+  if($('#fl_isboot').checked){   // already in bootloader: pick that port and flash now
+    let port; try{ port=await navigator.serial.requestPort(); }catch(e){ flState('cancelled'); return; }
+    await flDoFlash(port); return; }
+  let port; try{ port=await navigator.serial.requestPort(); }catch(e){ flState('cancelled'); return; }   // the app port to touch
+  try{ flState('rebooting to bootloader…'); flog('1200-baud touch'); await DFU.touch(port); }
+  catch(e){ flog('touch note: '+e); }   // touch often "fails" to reopen — that's fine, it rebooted
+  flState('rebooted — pick the BOOTLOADER port','warn');
+  flog('node re-enumerated as a NEW serial port — click ② and choose the bootloader port (often a different COM/ttyACM than the app).');
+  $('#fl_finish').classList.remove('hide'); }
+// Step ②: fresh user gesture -> pick the bootloader port -> DFU.
+async function flFinish(){ if(!flDfu){ flState('run ① first','bad'); return; }
   let port; try{ port=await navigator.serial.requestPort(); }catch(e){ flState('cancelled'); return; }
-  try{ if(!$('#fl_isboot').checked){ flState('rebooting to bootloader…'); flog('1200-baud touch'); await DFU.touch(port); }
-    flState('flashing…'); await DFU.flash(port,dfu,{ log:flog, prog:p=>{ $('#fl_prog').style.width=p+'%'; flState('flashing… '+p+'%'); } });
-    flState('flashed ✓','ok'); flog('done — node rebooting'); }
-  catch(e){ flog('DFU error: '+e); flState('failed — use UF2 fallback','bad'); } }
-$('#fl_go').onclick=flFlash;
+  await flDoFlash(port); }
+$('#fl_go').onclick=flStart; $('#fl_finish').onclick=flFinish;
 
 tick(); setInterval(tick,1500);
 </script>
