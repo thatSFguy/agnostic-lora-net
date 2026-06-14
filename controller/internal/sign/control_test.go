@@ -99,6 +99,33 @@ func TestBlockRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBleRoundTrip(t *testing.T) {
+	priv := KeyFromSeed(interopSeed())
+	pub := pubOf(priv)
+	for _, tc := range []struct {
+		on  bool
+		arg int8
+	}{{true, 1}, {false, 0}} {
+		msg, err := BuildBle(0x7D9BB406, tc.on, 9, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msg) != MsgBytes { // BLE uses the short POWER/CONFIRM layout
+			t.Fatalf("on=%v len=%d want %d", tc.on, len(msg), MsgBytes)
+		}
+		c, err := VerifyControl(msg, pub, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Cmd != CmdBle || c.Target != 0x7D9BB406 || c.Arg != tc.arg || c.Counter != 9 {
+			t.Fatalf("on=%v decoded wrong: %+v", tc.on, c)
+		}
+	}
+	if _, err := BuildBle(0, true, 1, priv); err != ErrBadTarget {
+		t.Fatalf("zero target: got %v want ErrBadTarget", err)
+	}
+}
+
 // TestEmitVector prints the POWER + BLOCK vectors (message + pubkey) to paste into the
 // on-device interop test. Run: go test ./internal/sign -run EmitVector -v
 func TestEmitVector(t *testing.T) {

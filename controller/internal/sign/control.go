@@ -21,8 +21,9 @@ const (
 	CmdConfirm = 2 // CTRL_CONFIRM
 	CmdBlock   = 3 // CTRL_BLOCK
 	CmdUnblock = 4 // CTRL_UNBLOCK
+	CmdBle     = 5 // CTRL_BLE — arg: 1 = enable BLE/BT advertising, 0 = disable
 
-	unsignedBytes      = 11                                         // POWER/CONFIRM header
+	unsignedBytes      = 11                                         // POWER/CONFIRM/BLE header
 	unsignedBytesBlock = 15                                         // BLOCK/UNBLOCK header (+ victim)
 	MsgBytes           = unsignedBytes + ed25519.SignatureSize      // 75
 	BlkBytes           = unsignedBytesBlock + ed25519.SignatureSize // 79
@@ -79,7 +80,7 @@ func unsignedLen(cmd uint8) int {
 }
 
 func knownCmd(cmd uint8) bool {
-	return cmd == CmdPower || cmd == CmdConfirm || cmd == CmdBlock || cmd == CmdUnblock
+	return cmd == CmdPower || cmd == CmdConfirm || cmd == CmdBlock || cmd == CmdUnblock || cmd == CmdBle
 }
 
 // Command is a decoded control command.
@@ -101,6 +102,26 @@ func BuildControl(cmd uint8, target uint32, arg int8, counter uint32, priv ed255
 		return nil, ErrBadTarget
 	}
 	u := unsignedPart(cmd, target, arg, counter)
+	sig := ed25519.Sign(priv, signedView(u))
+	out := make([]byte, 0, MsgBytes)
+	out = append(out, u...)
+	out = append(out, sig...)
+	return out, nil
+}
+
+// BuildBle enables (on=true) or disables BLE/BT advertising on the target node. Same
+// 11-byte unsigned header + 64-byte signature as POWER/CONFIRM, with arg = 1/0. NOTE:
+// remote delivery requires firmware CTRL_BLE support (todo #2 firmware half); the tethered
+// gateway is driven directly via the `ble on/off` console line, not this builder.
+func BuildBle(target uint32, on bool, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
+	if target == 0 {
+		return nil, ErrBadTarget
+	}
+	var arg int8
+	if on {
+		arg = 1
+	}
+	u := unsignedPart(CmdBle, target, arg, counter)
 	sig := ed25519.Sign(priv, signedView(u))
 	out := make([]byte, 0, MsgBytes)
 	out = append(out, u...)

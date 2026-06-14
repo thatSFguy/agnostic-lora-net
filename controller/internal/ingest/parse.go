@@ -20,7 +20,7 @@ var (
 	reRoute      = regexp.MustCompile(`^route dst=([0-9A-Fa-f]{8}) via=([0-9A-Fa-f]{8}) cost=(-?\d+) hops=(\d+)`)
 	reCtrlAck    = regexp.MustCompile(`^\[ctrl\] ack ([0-9A-Fa-f]{8}) cmd=(\d+) applied=(-?\d+) provisional=(\d)`)
 	reNodeBatt   = regexp.MustCompile(`^\[batt\] ([0-9A-Fa-f]{8}) mv=(\d+) pct=(\d+) age=(\d+)s`)
-	reStatus     = regexp.MustCompile(`^\[status\] ([0-9A-Fa-f]{8}) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV/(\d+)%|\?)(?: mob=(\d))?`)
+	reStatus     = regexp.MustCompile(`^\[status\] ([0-9A-Fa-f]{8}) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV/(\d+)%|\?)(?: mob=(\d))?(?: ble=(\d))?`)
 	reAnnNbr     = regexp.MustCompile(`^\[nbrs\] ([0-9A-Fa-f]{8}) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?`)
 	reBeaconTX   = regexp.MustCompile(`^\[TX\] beacon seq=(\d+) from ([0-9A-Fa-f]{8})\s+\+announce (\d+)B`)
 	reBeaconRX   = regexp.MustCompile(`^\[RX\] beacon\s+src=([0-9A-Fa-f]{8}) seq=(\d+) up=(\d+)s`)
@@ -87,6 +87,9 @@ func ParseLine(line string) (Event, bool) {
 		}
 		if m[8] != "" {
 			e.Num["mob"] = atoi(m[8])
+		}
+		if m[9] != "" {
+			e.Num["ble"] = atoi(m[9])
 		}
 		return e, true
 	}

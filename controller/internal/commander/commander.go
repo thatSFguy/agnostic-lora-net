@@ -43,6 +43,17 @@ func Block(recipient, victim uint32, ttlMin int8, counter uint32, priv ed25519.P
 	return line(m), nil
 }
 
+// Ble enables (on=true) or disables BLE/BT advertising on the target node via a signed
+// CTRL_BLE command. Remote nodes need firmware CTRL_BLE support to honor it; for the
+// tethered gateway the server short-circuits to a direct `ble on/off` console line instead.
+func Ble(target uint32, on bool, counter uint32, priv ed25519.PrivateKey) (string, error) {
+	m, err := sign.BuildBle(target, on, counter, priv)
+	if err != nil {
+		return "", err
+	}
+	return line(m), nil
+}
+
 // Unblock clears a block of `victim` on `recipient`.
 func Unblock(recipient, victim uint32, counter uint32, priv ed25519.PrivateKey) (string, error) {
 	m, err := sign.BuildBlock(sign.CmdUnblock, recipient, victim, 0, counter, priv)

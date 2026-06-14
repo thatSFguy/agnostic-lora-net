@@ -154,6 +154,16 @@ func (s *Server) issue(c cmdReq) (string, error) {
 		}
 		return "sent: " + c.Line, s.send(c.Line)
 	}
+	// BLE on the tethered gateway: drive the existing `ble on/off` console command
+	// directly — no key, no counter, no mesh round-trip. Works today. (Remote nodes fall
+	// through to the signed CTRL_BLE path below, which needs the firmware handler.)
+	if c.Action == "ble" && c.Node != "" && c.Node == s.graph.GatewayID() {
+		verb := "off"
+		if c.On {
+			verb = "on"
+		}
+		return "BLE " + verb + " → gateway (direct console)", s.send("ble " + verb)
+	}
 	if s.ks == nil {
 		return "", errNoKey
 	}
@@ -171,6 +181,10 @@ func (s *Server) issue(c cmdReq) (string, error) {
 		line, err = commander.Block(hexID(c.Node), hexID(c.Victim), int8(c.Ttl), ctr, s.ks.Priv())
 	case "unblock":
 		line, err = commander.Unblock(hexID(c.Node), hexID(c.Victim), ctr, s.ks.Priv())
+	case "ble":
+		// Remote node: signed CTRL_BLE (gateway was handled directly above). Needs the
+		// firmware CTRL_BLE handler (todo #2 firmware half) to take effect on-device.
+		line, err = commander.Ble(hexID(c.Node), c.On, ctr, s.ks.Priv())
 	default:
 		return "", errors.New("unknown action " + c.Action)
 	}
@@ -181,11 +195,12 @@ func (s *Server) issue(c cmdReq) (string, error) {
 }
 
 type cmdReq struct {
-	Action string `json:"action"` // raw | power | confirm | block | unblock
+	Action string `json:"action"` // raw | power | confirm | block | unblock | ble
 	Node   string `json:"node"`   // hex id (recipient)
 	Victim string `json:"victim"` // hex id (block/unblock)
 	Dbm    int    `json:"dbm"`
 	Ttl    int    `json:"ttl"`
+	On     bool   `json:"on"`   // ble: true = enable advertising, false = disable
 	Line   string `json:"line"` // raw console line
 }
 

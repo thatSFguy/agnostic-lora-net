@@ -38,6 +38,8 @@ func TestParseLine(t *testing.T) {
 			checkS: map[string]string{"fw": "0.8.2"}},
 		{line: "[status] 1FAE0DBD fw=0.8.2 up=42min sf=9 pwr=14 batt=?", wantOK: true, want: KindStatus,
 			id: "1FAE0DBD", checkN: map[string]int{"sf": 9, "power": 14}},
+		{line: "[status] 1FAE0DBD fw=0.9.0 up=42min sf=9 pwr=14 batt=3850mV/60% mob=0 ble=1", wantOK: true, want: KindStatus,
+			id: "1FAE0DBD", checkN: map[string]int{"sf": 9, "power": 14, "mv": 3850, "pct": 60, "mob": 0, "ble": 1}},
 		{line: "[TX] beacon seq=5 from 1A2B3C4D  +announce 24B", wantOK: true, want: KindBeaconTX,
 			id: "1A2B3C4D", checkN: map[string]int{"seq": 5, "ann": 24}},
 		{line: "[RX] beacon  src=8EA09546 seq=3 up=120s  rssi=-42.0 snr=9.0", wantOK: true, want: KindBeaconRX,

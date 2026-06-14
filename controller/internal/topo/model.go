@@ -22,8 +22,9 @@ type Node struct {
 	BattMv    int       `json:"batt_mv,omitempty"`
 	BattPct   int       `json:"batt_pct,omitempty"`
 	IsGateway bool      `json:"is_gateway,omitempty"`
-	Blocked   bool      `json:"blocked,omitempty"`  // blocked by the gateway/controller
-	Mobile    bool      `json:"mobile,omitempty"`   // node self-reports it moves (telemetry mob=1)
+	Blocked   bool      `json:"blocked,omitempty"` // blocked by the gateway/controller
+	Mobile    bool      `json:"mobile,omitempty"`  // node self-reports it moves (telemetry mob=1)
+	BLE       *bool     `json:"ble,omitempty"`     // node-reported BLE/BT advertising state (nil = unknown until firmware reports ble=)
 	LastSeen  time.Time `json:"last_seen"`
 }
 
@@ -160,6 +161,10 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		if v, ok := e.Num["mob"]; ok {
 			n.Mobile = v != 0
 		}
+		if v, ok := e.Num["ble"]; ok {
+			b := v != 0
+			n.BLE = &b
+		}
 		if v, ok := e.Num["mv"]; ok {
 			n.BattMv, n.BattPct = v, e.Num["pct"]
 		}
@@ -221,6 +226,14 @@ func (g *Graph) ManagedIDs() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// GatewayID returns the tethered gateway's node id ("" if not yet known). Used by the
+// write API to drive the gateway's BLE directly over the console instead of the mesh.
+func (g *Graph) GatewayID() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.Gateway
 }
 
 func (g *Graph) Snapshot() Snapshot {
