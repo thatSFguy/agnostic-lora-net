@@ -468,6 +468,10 @@ static void ble_gen_pin() {
 static const char     CFG_PATH[]  = "/agn_ble.cfg";
 static const uint32_t CFG_MAGIC   = 0x314E4741;   // "AGN1"
 static bool           cfg_first_boot  = false;
+// BLE is OFF by default. KNOWN v2 HAZARD (2026-06-14): with the SoftDevice active, the node
+// hard-hangs ~20s after boot — the first signed-announce beacon TX doesn't survive SoftDevice
+// coexistence (a v2 regression; the same board validated stable to uptime 353s with BLE off).
+// Do NOT enable BLE on a v2 node until that beacon-TX/SoftDevice coexistence is fixed.
 static bool           cfg_ble_enabled = false;
 struct __attribute__((packed)) AgnBleCfg { uint32_t magic; char pin[7]; uint8_t enabled; };
 
@@ -527,8 +531,12 @@ static void ble_setup() {
     Bluefruit.begin();                              // start the SoftDevice (before radio.begin)
     Bluefruit.autoConnLed(false);                   // no blinking conn LED — solar power budget
     Bluefruit.setTxPower(4);
-    char nm[48]; char idhx[33]; nid_hex(my_id, idhx);
-    snprintf(nm, sizeof(nm), "AgnLoRa-%s", idhx);
+    // The BLE name must fit the 31-byte legacy advertising / scan-response payload (a Complete
+    // Local Name adds 2 AD bytes). The v2 id is 32 hex chars, so "AgnLoRa-"+32 = 40 chars
+    // OVERFLOWS that and gets silently truncated to a garbled shortened name — which broke BLE
+    // discovery/pairing in v2 (the id-widening regression). Use a short, still-unique id slice.
+    char nm[24]; char idhx[33]; nid_hex(my_id, idhx);
+    snprintf(nm, sizeof(nm), "AgnLoRa-%.8s", idhx);   // e.g. "AgnLoRa-b0459c80" (16 chars, fits)
     Bluefruit.setName(nm);
     Bluefruit.Security.setPIN(ble_pin);             // static passkey -> phone must enter it
     Bluefruit.Periph.setConnectCallback(ble_connect_cb);
