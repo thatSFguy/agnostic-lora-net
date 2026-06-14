@@ -327,7 +327,7 @@ func pollLoop(ctx context.Context, src ingest.Source, graph *topo.Graph) {
 // commandREPL reads controller commands from stdin and pushes signed control messages to
 // the tethered node. Acks come back through the normal console stream (KindCtrlAck).
 func commandREPL(ctx context.Context, src ingest.Source, ks *keystore.Store, graph *topo.Graph) {
-	fmt.Fprintln(os.Stderr, "commands: power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | acl list|pending|approve <pub>|revoke <pub> | pub | help")
+	fmt.Fprintln(os.Stderr, "commands: power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | retune <id> <freqHz> <bwHz> <sf> <cr> <syncHex> <preamble> | acl list|pending|approve <pub>|revoke <pub> | pub | help")
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		if ctx.Err() != nil {
@@ -376,9 +376,37 @@ func handleCommand(line string, src ingest.Source, ks *keystore.Store, graph *to
 	case "pub":
 		fmt.Fprintf(os.Stderr, "  controller pub = %s\n", ks.PubHex())
 	case "help":
-		fmt.Fprintln(os.Stderr, "  power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | acl list|pending|approve <pub>|revoke <pub> | pub")
+		fmt.Fprintln(os.Stderr, "  power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | retune <id> <freqHz> <bwHz> <sf> <cr> <syncHex> <preamble> | acl list|pending|approve <pub>|revoke <pub> | pub")
 	case "acl":
 		handleACL(f, ks, graph, warn)
+	case "retune":
+		if len(f) != 8 {
+			warn("usage: retune <id> <freqHz> <bwHz> <sf> <cr> <syncHex> <preamble>")
+			return
+		}
+		id, e1 := parseID(f[1])
+		freq, e2 := strconv.ParseUint(f[2], 10, 32)
+		bw, e3 := strconv.ParseUint(f[3], 10, 32)
+		sf, e4 := strconv.Atoi(f[4])
+		cr, e5 := strconv.Atoi(f[5])
+		sync, e6 := strconv.ParseUint(strings.TrimPrefix(f[6], "0x"), 16, 8)
+		pre, e7 := strconv.ParseUint(f[7], 10, 16)
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil {
+			warn("bad args (freq/bw=Hz decimal, sync=hex, sf/cr/preamble=decimal)")
+			return
+		}
+		if !gate(f[1]) {
+			return
+		}
+		ctr, err := ks.Next()
+		if err != nil {
+			warn(err.Error())
+			return
+		}
+		send(commander.Retune(id, sign.RetuneCfg{
+			FreqHz: uint32(freq), BwHz: uint32(bw), SF: uint8(sf), CR: uint8(cr),
+			Sync: uint8(sync), Preamble: uint16(pre),
+		}, ctr, ks.Priv()))
 	case "power", "confirm":
 		if len(f) != 3 {
 			warn("usage: " + f[0] + " <hexid> <dbm>")

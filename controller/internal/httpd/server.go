@@ -218,6 +218,13 @@ func (s *Server) issue(c cmdReq) (string, error) {
 		// Remote node: signed CTRL_BLE (gateway was handled directly above). Needs the
 		// firmware CTRL_BLE handler (todo #2 firmware half) to take effect on-device.
 		line, err = commander.Ble(hexID(c.Node), c.On, ctr, s.ks.Priv())
+	case "retune":
+		// Signed CTRL_RETUNE: change the node's PHY over the air (PHY only — power stays under
+		// CTRL_POWER). The node validates + acks on the new PHY; recovery is the BLE-rescue flow.
+		line, err = commander.Retune(hexID(c.Node), sign.RetuneCfg{
+			FreqHz: uint32(c.FreqHz), BwHz: uint32(c.BwHz),
+			SF: uint8(c.SF), CR: uint8(c.CR), Sync: uint8(c.Sync), Preamble: uint16(c.Preamble),
+		}, ctr, s.ks.Priv())
 	default:
 		return "", errors.New("unknown action " + c.Action)
 	}
@@ -233,8 +240,15 @@ type cmdReq struct {
 	Victim string `json:"victim"` // hex id (block/unblock)
 	Dbm    int    `json:"dbm"`
 	Ttl    int    `json:"ttl"`
-	On     bool   `json:"on"`   // ble: true = enable advertising, false = disable
-	Line   string `json:"line"` // raw console line
+	On     bool   `json:"on"` // ble: true = enable advertising, false = disable
+	// retune: the PHY to apply (PHY only — TX power stays under power/confirm).
+	FreqHz   int    `json:"freq_hz"`
+	BwHz     int    `json:"bw_hz"`
+	SF       int    `json:"sf"`
+	CR       int    `json:"cr"`
+	Sync     int    `json:"sync"`
+	Preamble int    `json:"preamble"`
+	Line     string `json:"line"` // raw console line
 }
 
 type stateJSON struct {

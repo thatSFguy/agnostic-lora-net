@@ -148,6 +148,34 @@ func TestBleRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRetuneRoundTrip(t *testing.T) {
+	priv := KeyFromSeed(interopSeed())
+	pub := pubOf(priv)
+	cfg := RetuneCfg{FreqHz: 906625000, BwHz: 250000, SF: 9, CR: 5, Sync: 0x4D, Preamble: 16}
+	msg, err := BuildRetune(idTarget, cfg, 11, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg) != RtnBytes {
+		t.Fatalf("len=%d want %d", len(msg), RtnBytes)
+	}
+	c, err := VerifyControl(msg, pub, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cmd != CmdRetune || c.Target != idTarget || c.Counter != 11 {
+		t.Fatalf("retune decoded wrong: %+v", c)
+	}
+	if got := DecodeRetuneCfg(c.Cfg); got != cfg {
+		t.Fatalf("PHY blob round-trip: %+v want %+v", got, cfg)
+	}
+	// Tampering a cfg byte must break the signature.
+	msg[2+IDBytes] ^= 0x01
+	if _, err := VerifyControl(msg, pub, 10); err != ErrBadSig {
+		t.Fatalf("tampered cfg: got %v want ErrBadSig", err)
+	}
+}
+
 func TestParseNodeID(t *testing.T) {
 	if _, err := ParseNodeID("9828f51b"); err == nil { // 8 hex = v1 width, rejected as a 16-byte id
 		t.Fatal("8-hex id should fail ParseNodeID")

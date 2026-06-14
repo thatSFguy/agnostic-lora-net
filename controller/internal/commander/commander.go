@@ -54,6 +54,18 @@ func Ble(target sign.NodeID, on bool, counter uint32, priv ed25519.PrivateKey) (
 	return line(m), nil
 }
 
+// Retune changes the target node's PHY over the air via a signed CTRL_RETUNE command (PHY
+// only — TX power stays under Power and its dead-man rail). The node validates the config
+// before applying and acks on the NEW PHY; recovery from a bad retune is the BLE-rescue +
+// reconcile flow the controller drives, NOT a firmware auto-revert (see docs/remote-config.md).
+func Retune(target sign.NodeID, cfg sign.RetuneCfg, counter uint32, priv ed25519.PrivateKey) (string, error) {
+	m, err := sign.BuildRetune(target, cfg, counter, priv)
+	if err != nil {
+		return "", err
+	}
+	return line(m), nil
+}
+
 // Unblock clears a block of `victim` on `recipient`.
 func Unblock(recipient, victim sign.NodeID, counter uint32, priv ed25519.PrivateKey) (string, error) {
 	m, err := sign.BuildBlock(sign.CmdUnblock, recipient, victim, 0, counter, priv)
