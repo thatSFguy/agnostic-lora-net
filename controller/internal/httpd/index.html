@@ -99,6 +99,14 @@
     <span class="kv" style="margin-left:auto">talks directly to a node plugged into THIS machine — not over the mesh</span>
   </div>
 
+  <div class="cfgcard"><h3>Provisioning</h3>
+    <div class="kv">Flashing writes firmware only — it does <b>not</b> provision. Do this once per node after flashing so the controller can sign commands to it (power/block): push <b>this controller's key</b>, then set a BLE PIN below if you'll manage it over BLE.</div>
+    <div class="kv" style="margin:.3rem 0">controller key: <b id="prov_pub" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all">—</b></div>
+    <fieldset id="provfs" disabled>
+      <button id="prov_key">Provision controller key (ctrlkey)</button>
+    </fieldset>
+  </div>
+
   <div class="cfgcard"><h3>Radio (PHY)</h3>
     <div class="warn">⚠ Changing frequency, bandwidth or SF retunes this node — it drops off-air from any node still on the old settings. TX power is safe to change alone.</div>
     <div class="powerbox"><span>TX&nbsp;Power</span>
@@ -155,6 +163,7 @@
 <div id="flashview" class="tabview hide"><div class="col">
   <div class="cfgcard"><h3>Flash firmware (nRF52 serial DFU)</h3>
     <div class="kv">Flashes a node plugged into THIS machine over Web Serial. The node reboots into its bootloader (1200-baud touch) and re-enumerates — pick the bootloader port when prompted.</div>
+    <div class="kv" style="color:var(--lower)">Firmware only — this does <b>not</b> provision. A freshly flashed node has no controller key, so the optimiser/commands can't reach it yet. After it reboots, go to <b>Configure → Provisioning</b> and push the controller key (and set a BLE PIN).</div>
     <div class="grid" style="margin-top:.6rem">
       <label>Board<select id="fl_board">
         <option value="rak">RAK4631 (nRF52840 + SX1262)</option>
@@ -367,6 +376,7 @@ function render(st){
   $('#gw').textContent=gateway?nm(gateway):'—'; $('#count').textContent=(st.snapshot?.nodes?.length||0)+' nodes';
   $('#key').textContent=hasKey?'key '+(st.pub||'').slice(0,12)+'…':'⚠ no key (read-only)';
   $('#backup').style.display=hasKey?'':'none';   // export only meaningful with a key
+  ctrlPub=st.pub||''; $('#prov_pub').textContent=ctrlPub||'(controller has no key — mint/import one)';
   $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';
   if(view==='map'){ renderMap(st); } else if(view==='dash'){ renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
 }
@@ -376,11 +386,11 @@ $('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').c
 // ===================== CONFIGURE: direct Web Serial / BLE to a local node =====================
 // Ported from web/manage.html. This talks to a node plugged into THIS machine, not the mesh.
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e', NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e', NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
-let cfgPort=null, cfgWriter=null, cfgBleDev=null, cfgReader=null, cfgSendRaw=null, cfgRxbuf='', loadedRf=null;
+let cfgPort=null, cfgWriter=null, cfgBleDev=null, cfgReader=null, cfgSendRaw=null, cfgRxbuf='', loadedRf=null, ctrlPub='';
 function clog(m){ const l=$('#cfgLog'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-300).join('\n'); l.scrollTop=l.scrollHeight; }
 function cfgFeed(t){ cfgRxbuf+=t; let i; while((i=cfgRxbuf.indexOf('\n'))>=0){ cfgLine(cfgRxbuf.slice(0,i).replace(/\r$/,'')); cfgRxbuf=cfgRxbuf.slice(i+1); } }
 async function cfgSend(s){ if(cfgSendRaw) await cfgSendRaw(s+'\n'); else clog('not connected'); }
-function cfgEnable(on){ for(const f of ['#rffs','#battfs','#blefs','#mobfs']) $(f).disabled=!on;
+function cfgEnable(on){ for(const f of ['#rffs','#battfs','#blefs','#mobfs','#provfs']) $(f).disabled=!on;
   $('#rf_pwr').disabled=!on; $('#cfgCmd').disabled=!on; $('#cfgSend').disabled=!on; }
 function cfgFillRf(r){ $('#rf_freq').value=(r.freq_hz/1e6).toFixed(3).replace(/\.?0+$/,'');
   for(const o of $('#rf_bw').options){ if(Math.round(parseFloat(o.value)*1000)===r.bw_hz){ $('#rf_bw').value=o.value; break; } }
@@ -448,6 +458,8 @@ $('#batt_read').onclick=()=>cfgSend('batt');
 $('#batt_cal').onclick=()=>{ let v=+$('#batt_mv').value; if(v>0&&v<10) v=Math.round(v*1000);
   if(v>=1000&&v<=6000) cfgSend('batt cal '+v); else clog('enter measured battery (volts e.g. 4.02, or mV e.g. 4020)'); };
 $('#mob_fixed').onclick=()=>cfgSend('mobile off'); $('#mob_mobile').onclick=()=>cfgSend('mobile on');
+$('#prov_key').onclick=()=>{ if(!ctrlPub){ clog('controller has no key — mint or import one first'); return; }
+  cfgSend('ctrlkey '+ctrlPub); clog('→ ctrlkey '+ctrlPub.slice(0,12)+'… (provisioning this node)'); setTimeout(()=>cfgSend('ctrlkey'),600); };
 window.addEventListener('pagehide',()=>cfgCloseUsb());
 
 // ===================== FLASH: nRF52 serial DFU to a local node (ported from hub.js) =====================
