@@ -753,6 +753,16 @@ static node_id_t node_key_init() {
     return mesh::nid_from_pubkey(node_pk);
 }
 
+// --- Signed announces (docs/node-keygen-signed-announce-impl.md §5/6) -----------
+// A node signs its own announce (announce_sign/announce_verify in the codec) so peers —
+// and, via the gateway console, the controller — can verify the id<->pubkey binding:
+// id == blake2b(pubkey) AND a valid Ed25519 sig over the announce body.
+//
+// Identity directory: each id is verified ONCE (verify-once — the crypto runs only when a
+// new/unverified id is first heard, not on every beacon). Separate from the routing tables
+// (which still key on full NodeId); this is the firmware-local verified set.
+static mesh::NodeTable id_table;
+
 static uint32_t schedule_next_beacon() {
     return millis() + beacon_period_ms() + (uint32_t)random(0, beacon_jitter_ms());
 }
@@ -867,12 +877,22 @@ static void send_beacon() {
     // Piggyback this node's announce so distance-vector + reverse-link quality
     // propagate (Agent.md §6).
     uint16_t ann_len = 0;
+    // Reserve room for the identity tail when we can sign, so the announce never
+    // crowds it out (graceful: fewer routes per beacon, never an overflow).
+    const uint16_t ann_cap = (uint16_t)(sizeof(frame) - base
+                                        - (node_have_key ? mesh::ANNOUNCE_SIG_TAIL : 0));
     if (router) {
         mesh::Announce ann;
         router->build_announce(ann);
-        ann_len = mesh::announce_serialize(ann, frame + base, (uint16_t)(sizeof(frame) - base));
+        ann_len = mesh::announce_serialize(ann, frame + base, ann_cap);
     }
-    const uint16_t frame_len = base + ann_len;
+    uint16_t frame_len = base + ann_len;
+
+    // Append [pubkey][sig] — the self-certifying identity tail (signed announce).
+    if (node_have_key) {
+        mesh::announce_sign(frame + base, ann_len, node_pk, node_sk, frame + frame_len);
+        frame_len += mesh::ANNOUNCE_SIG_TAIL;
+    }
 
     if (txq_push(frame, frame_len)) {
         if (trace_beacons) {
@@ -1558,12 +1578,42 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     if (router && type == PKT_BEACON) {
         mesh::Announce ann;              // cleared to empty by default
         const uint16_t base = HEADER_BYTES + sizeof(BeaconPayload);
+        bool ann_ok = false;
         if (len > base) {
             // Untrusted radio data — deserialize is bounds-checked and just leaves
             // `ann` empty if the bytes are malformed.
-            mesh::announce_deserialize(buf + base, (uint16_t)(len - base), ann);
+            ann_ok = mesh::announce_deserialize(buf + base, (uint16_t)(len - base), ann);
         }
         router->on_beacon(net.src, q, ann, millis());
+
+        // Verify the sender's self-certifying identity ONCE (verify-once): the announce
+        // body is followed by [pubkey][sig]. Confirm id == blake2b(pubkey) and the sig,
+        // then emit the gateway->controller binding line. Crypto runs only on first hear.
+        if (ann_ok) {
+            const uint8_t* region = buf + base;
+            uint16_t region_len = (uint16_t)(len - base);
+            uint16_t bl = mesh::announce_body_len(ann);
+            if (region_len >= (uint16_t)(bl + mesh::ANNOUNCE_SIG_TAIL)) {
+                node_ref r = id_table.intern(net.src, millis());
+                if (!id_table.verified(r)) {       // verify-once: crypto only on first hear
+                    uint8_t pub[32];
+                    bool ok = mesh::announce_verify(region, bl, region + bl, pub)
+                              && (mesh::nid_from_pubkey(pub) == net.src);
+                    char idhx[33]; nid_hex(net.src, idhx);
+                    if (ok) {
+                        id_table.mark_verified(r);
+                        char pubhx[65]; loc_id_hex(pub, 32, pubhx);
+                        char l[120];
+                        snprintf(l, sizeof(l), "[ann] %s pub=%s sig=ok", idhx, pubhx);
+                        g_con->println(l);
+                    } else {
+                        char l[64];
+                        snprintf(l, sizeof(l), "[ann] %s sig=bad", idhx);
+                        g_con->println(l);
+                    }
+                }
+            }
+        }
         uint8_t bpp = 0;                 // battery byte from the beacon payload
         if (len >= HEADER_BYTES + (uint16_t)sizeof(BeaconPayload)) {
             BeaconPayload bp;
@@ -2225,6 +2275,16 @@ static void handle_command(char* line) {
         }
         Serial.println(l);
 #endif
+    } else if (!strcmp(cmd, "pub")) {          // pub — this node's own pubkey + id (provisioning)
+        char idhx[33]; nid_hex(my_id, idhx);
+        if (node_have_key) {
+            char pubhx[65]; loc_id_hex(node_pk, 32, pubhx);
+            char l[120]; snprintf(l, sizeof(l), "pub %s  id=%s", pubhx, idhx);
+            Serial.println(l);
+        } else {
+            char l[64]; snprintf(l, sizeof(l), "pub (none — AGN_NODE_ID override)  id=%s", idhx);
+            Serial.println(l);
+        }
     } else if (!strcmp(cmd, "ctrlkey")) {      // ctrlkey <64hex>|clear — controller pubkey
         char* a = strtok(nullptr, " ");
         if (a && !strcmp(a, "clear")) {
@@ -2403,7 +2463,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | pub | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif

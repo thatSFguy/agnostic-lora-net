@@ -1,6 +1,25 @@
 #include "announce_codec.h"
+#include "monocypher.h"
+#include "monocypher-ed25519.h"
+#include <string.h>
 
 namespace mesh {
+
+// Domain tag for announce identity signatures (distinct from control's "AGN-CTRL-1").
+static const uint8_t ANN_DOMAIN[9] = {'A','G','N','-','A','N','N','-','1'};
+// Max announce body we sign/verify (a beacon body never approaches this on the wire); the
+// lib stays independent of packet.h's MAX_PAYLOAD, so this is a self-contained bound.
+static const uint16_t ANN_VIEW_BODY_MAX = 256;
+
+// Build the signed view: DOMAIN || pubkey || announce-body. body_len is bounded by the
+// LoRa payload, so a fixed stack buffer covers the worst case.
+static uint16_t ann_view(const uint8_t pubkey[32], const uint8_t* body, uint16_t body_len,
+                         uint8_t* out) {
+    memcpy(out, ANN_DOMAIN, sizeof(ANN_DOMAIN));
+    memcpy(out + sizeof(ANN_DOMAIN), pubkey, 32);
+    memcpy(out + sizeof(ANN_DOMAIN) + 32, body, body_len);
+    return (uint16_t)(sizeof(ANN_DOMAIN) + 32 + body_len);
+}
 
 // --- little-endian byte helpers --------------------------------------------
 static inline void put_u8(uint8_t* p, uint8_t v)  { p[0] = v; }
@@ -83,6 +102,33 @@ bool announce_deserialize(const uint8_t* buf, uint16_t len, Announce& out) {
         out.routes[i].hops     = get_u8(buf + off); off += 1;
     }
     out.n_routes = n_routes;
+    return true;
+}
+
+uint16_t announce_body_len(const Announce& a) {
+    return (uint16_t)(ANNOUNCE_HDR_BYTES
+                    + (uint16_t)a.n_reports * ANNOUNCE_REPORT_BYTES
+                    + (uint16_t)a.n_routes  * ANNOUNCE_ROUTE_BYTES);
+}
+
+void announce_sign(const uint8_t* body, uint16_t body_len,
+                   const uint8_t pubkey[32], const uint8_t seckey[64], uint8_t* tail) {
+    if (body_len > ANN_VIEW_BODY_MAX) return;       // wire bodies never reach this
+    memcpy(tail, pubkey, 32);
+    uint8_t view[sizeof(ANN_DOMAIN) + 32 + ANN_VIEW_BODY_MAX];
+    uint16_t vn = ann_view(pubkey, body, body_len, view);
+    crypto_ed25519_sign(tail + 32, seckey, view, vn);
+}
+
+bool announce_verify(const uint8_t* body, uint16_t body_len,
+                     const uint8_t* tail, uint8_t out_pubkey[32]) {
+    if (body_len > ANN_VIEW_BODY_MAX) return false;
+    const uint8_t* pubkey = tail;       // [0..32)
+    const uint8_t* sig    = tail + 32;  // [32..96)
+    uint8_t view[sizeof(ANN_DOMAIN) + 32 + ANN_VIEW_BODY_MAX];
+    uint16_t vn = ann_view(pubkey, body, body_len, view);
+    if (crypto_ed25519_check(sig, pubkey, view, vn) != 0) return false;
+    memcpy(out_pubkey, pubkey, 32);
     return true;
 }
 

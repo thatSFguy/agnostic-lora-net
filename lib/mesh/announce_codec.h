@@ -37,4 +37,24 @@ uint16_t announce_serialize(const Announce& a, uint8_t* buf, uint16_t cap);
 // Returns false on any truncation or malformed count, leaving `out` cleared.
 bool announce_deserialize(const uint8_t* buf, uint16_t len, Announce& out);
 
+// --- signed-announce identity tail (docs/node-keygen-signed-announce-impl.md §5/6) ---
+// A beacon's serialized announce body is followed by [pubkey:32][sig:64]; the Ed25519
+// signature covers "AGN-ANN-1" || pubkey || announce-body (domain-tagged, so it can never
+// be confused with a control signature). This proves the sender owns the key whose hash is
+// its node id. The id == blake2b(pubkey) check is the CALLER's (it needs node_table).
+constexpr uint16_t ANNOUNCE_SIG_TAIL = 32 + 64;   // pubkey + signature
+
+// Number of body bytes a parsed announce occupies on the wire (header + entries).
+uint16_t announce_body_len(const Announce& a);
+
+// Write the identity tail (pubkey + signature over the domain-tagged view) for the
+// serialized announce `body`/`body_len`. `tail` must have room for ANNOUNCE_SIG_TAIL.
+void announce_sign(const uint8_t* body, uint16_t body_len,
+                   const uint8_t pubkey[32], const uint8_t seckey[64], uint8_t* tail);
+
+// Verify an identity `tail` (pubkey+sig) against the announce `body`/`body_len`. Returns
+// true iff the signature checks out; on success `out_pubkey` (32 B) is the sender's key.
+bool announce_verify(const uint8_t* body, uint16_t body_len,
+                     const uint8_t* tail, uint8_t out_pubkey[32]);
+
 } // namespace mesh
