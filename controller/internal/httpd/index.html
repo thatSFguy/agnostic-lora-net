@@ -63,6 +63,13 @@
   .pill.ble{ cursor:pointer; user-select:none; } .pill.ble:hover{ border-color:var(--acc); }
   .pill.ble-on{ color:var(--acc); border-color:var(--acc); } .pill.ble-off{ color:var(--dim); }
   .pill.ble-unk{ color:var(--dim); border-style:dashed; }
+  .pill.acl-allowed{ color:var(--confirm); border-color:var(--confirm); }
+  .pill.acl-pending{ color:var(--lower); border-color:var(--lower); }
+  .pill.acl-unverified{ color:var(--revert); border-color:var(--revert); }
+  .vbadge{ font-size:11px; margin-left:4px; } .vbadge.ok{ color:var(--confirm); } .vbadge.no{ color:var(--revert); }
+  #tab_sec_badge:not(:empty){ margin-left:5px; background:var(--lower); color:#0e1116; border-radius:8px; padding:0 5px; font-size:10px; font-weight:700; }
+  .secrow{ display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .secrow .mono{ font-family:ui-monospace,monospace; font-size:11px; word-break:break-all; color:var(--dim); }
   .termlog{ background:#0a0d12; color:#7fdc8f; font-family:ui-monospace,monospace; font-size:11px; height:11rem;
             overflow:auto; padding:6px 8px; border-radius:6px; white-space:pre-wrap; margin-top:8px; }
 </style>
@@ -73,6 +80,7 @@
   <div class="tab on" id="tab-dash">Dashboard</div>
   <div class="tab" id="tab-map">Map</div>
   <div class="tab" id="tab-node">Add / Configure</div>
+  <div class="tab" id="tab-security">Security<span id="tab_sec_badge"></span></div>
   <div class="tab" id="tab-settings">Settings</div>
   <div>gw <span id="gw" class="gw">—</span></div>
   <div id="count" class="kv"></div>
@@ -207,6 +215,25 @@
   </div>
 </div></div>
 
+<!-- ============ SECURITY (membership ACL over verified node pubkeys) ============ -->
+<div id="securityview" class="tabview hide"><div class="col">
+  <div class="cfgcard"><h3>Membership</h3>
+    <div class="kv">Each node mints its own Ed25519 key and derives its id from it (self-certifying). The gateway verifies every announce signature; the controller only <b>manages</b> (tunes/commands) nodes whose verified pubkey you've <b>approved</b> here. Approval is keyed on the pubkey, so spoofing an id can't grant membership.</div>
+    <div class="kv" id="sec_summary" style="margin-top:.4rem"></div>
+  </div>
+  <div class="cfgcard"><h3>Pending approval <span id="sec_pending_n" class="kv"></span></h3>
+    <div class="kv">Verified nodes not yet approved — they route at Tier-0 but the controller won't tune them until approved.</div>
+    <div id="sec_pending" style="margin-top:.5rem"></div>
+  </div>
+  <div class="cfgcard"><h3>Approved members <span id="sec_allowed_n" class="kv"></span></h3>
+    <div id="sec_allowed" style="margin-top:.5rem"></div>
+  </div>
+  <div class="cfgcard"><h3>Unverified</h3>
+    <div class="kv">Heard, but no valid signed announce yet (legacy/unsigned firmware, or a failed signature). Never managed.</div>
+    <div id="sec_unverified" style="margin-top:.5rem"></div>
+  </div>
+</div></div>
+
 <div id="toast"></div>
 <script src="/nrf-dfu.js"></script>
 <script>
@@ -222,10 +249,11 @@ function snrMarginTxt(snr,sf){ const lim=SNR_LIMIT[sf||9]??-12.5, m=snr-lim; ret
 
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
 async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...p})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); return j.ok; }catch(e){ toast('✗ '+e); } }
+async function aclApi(action,pub){ try{ const r=await fetch('/api/acl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,pub})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); if(j.ok)tick(); return j.ok; }catch(e){ toast('✗ '+e); } }
 function uiPost(b){ fetch('/api/ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
 function setAlias(id,name){ if(name)aliases[id]=name; else delete aliases[id]; uiPost({type:'alias',id,name}); }
 
-const VIEWS={dash:'#grid', map:'#mapview', node:'#nodeview', settings:'#settingsview'};
+const VIEWS={dash:'#grid', map:'#mapview', node:'#nodeview', security:'#securityview', settings:'#settingsview'};
 function setView(v){ view=v;
   for(const k in VIEWS){ $('#tab-'+k).classList.toggle('on',k===v); $(VIEWS[k]).classList.toggle('hide',k!==v); }
   if(state) render(state); }
@@ -253,12 +281,17 @@ function renderNodes(state){
     const bleNext=bleOn?0:1;   // click target: turn off if on, else turn on
     const bleTitle=(bleOn?'BLE on — click to disable':(bleKnown?'BLE off — click to enable':'BLE state unknown — click to enable'))+(isGw?' (gateway, direct)':' (signed — needs firmware CTRL_BLE)');
     const blePill=`<span class="pill ble ${bleCls}" data-ble="${n.id}" data-on="${bleNext}" title="${bleTitle}">${bleTxt}</span>`;
+    // Identity: ✓ verified / ⚠ unverified, plus a membership pill (allowed/pending/unverified).
+    // n.acl is "" when no controller key (ACL inactive) — then show nothing, to keep read-only clean.
+    const vBadge = n.verified ? '<span class="vbadge ok" title="announce signature verified by the gateway">✓</span>'
+                 : (n.acl ? '<span class="vbadge no" title="no valid signed announce seen">⚠</span>' : '');
+    const aclPill = n.acl ? `<span class="pill acl-${n.acl}" title="membership: ${n.acl}">${n.acl}</span>` : '';
     const ctrls=isGw?'':`<div class="row">
         <input class="pw" type="number" value="${typeof pwr==='number'?pwr:''}" data-pw="${n.id}" title="dBm">
         <button data-pwset="${n.id}">Set</button><button data-pwkeep="${n.id}">Keep</button>
         ${n.blocked?`<button class="danger" data-unblock="${n.id}">Unblock</button>`:`<button class="danger" data-block="${n.id}">Block</button>`}</div>`;
     return `<div class="node ${n.blocked?'blocked':''}">
-      <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${isGw?'<span class="pill">gateway</span>':''}${mob?'<span class="pill">🚗 mobile</span>':''}${blePill}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
+      <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${vBadge}${isGw?'<span class="pill">gateway</span>':''}${aclPill}${mob?'<span class="pill">🚗 mobile</span>':''}${blePill}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
       <div class="kv">${n.id} · SF${n.sf||'?'}${typeof pwr==='number'?' · '+pwr+'dBm':''}${n.fw?' · fw '+n.fw:''}${n.batt_pct?' · '+n.batt_pct+'%':''}${h?' · gw hears '+h.rssi+'/'+h.snr+'dB':''}</div>
       ${margin!=null?`<div class="kv">margin ${margin.toFixed(1)} dB</div><div class="bar"><span style="width:${pct}%"></span></div>`:'<div class="kv">no SNR yet</div>'}
       <div class="row"><input class="alias" placeholder="alias" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" data-alias="${n.id}"></div>${ctrls}</div>`;
@@ -400,6 +433,38 @@ function renderFeed(events){
 function renderConsole(lines){ const out=$('#conout'); const pinned=out.scrollHeight-out.scrollTop-out.clientHeight<30;
   out.innerHTML=(lines||[]).slice(-200).map(l=>`<div class="cl">${l.replace(/[<&]/g,c=>({'<':'&lt;','&':'&amp;'}[c]))}</div>`).join(''); if(pinned)out.scrollTop=out.scrollHeight; }
 
+// Security view: membership ACL over verified node pubkeys. Approval is keyed on the pubkey,
+// so the rows surface the pubkey prominently and match it back to a node id where known.
+function secRow(label, idTxt, pub, btn){
+  return `<div class="secrow"><div style="min-width:120px"><b>${idTxt}</b></div>`
+    + (label?`<span class="pill acl-${label}">${label}</span>`:'')
+    + `<span class="mono" style="flex:1">${pub||'(no pubkey)'}</span>${btn||''}</div>`;
+}
+function renderSecurity(st){
+  const nodes=(st.snapshot?.nodes)||[], allow=st.allowlist||{};
+  if(!st.has_key){ $('#sec_summary').innerHTML='⚠ This controller has no key — membership is inactive (every heard node is shown but none is managed). Mint/import a key in Settings.'; }
+  const byPub={}; nodes.forEach(n=>{ if(n.pub) byPub[n.pub.toUpperCase()]=n; });
+  const pending=nodes.filter(n=>n.acl==='pending'), unver=nodes.filter(n=>n.acl==='unverified');
+  const allowPubs=Object.keys(allow);
+  if(st.has_key) $('#sec_summary').innerHTML=`${allowPubs.length} approved · ${pending.length} pending · ${unver.length} unverified`;
+  $('#sec_pending_n').textContent=pending.length?`(${pending.length})`:'';
+  $('#sec_allowed_n').textContent=allowPubs.length?`(${allowPubs.length})`:'';
+  // Pending: verified, awaiting approval.
+  $('#sec_pending').innerHTML = pending.length
+    ? pending.map(n=>secRow('', nm(n.id), n.pub, `<button class="primary" data-approve="${n.pub}">Approve</button>`)).join('')
+    : '<div class="kv">none</div>';
+  // Approved: from the allowlist, matched to a node id where we've heard one.
+  $('#sec_allowed').innerHTML = allowPubs.length
+    ? allowPubs.map(p=>{ const n=byPub[p.toUpperCase()]; const idTxt=n?nm(n.id):'(not currently heard)';
+        return secRow('allowed', idTxt, p, `<button class="danger" data-revoke="${p}">Revoke</button>`); }).join('')
+    : '<div class="kv">none approved yet</div>';
+  $('#sec_unverified').innerHTML = unver.length
+    ? unver.map(n=>secRow('unverified', nm(n.id), '', '')).join('')
+    : '<div class="kv">none</div>';
+  $('#securityview').querySelectorAll('[data-approve]').forEach(b=>b.onclick=()=>aclApi('approve',b.dataset.approve));
+  $('#securityview').querySelectorAll('[data-revoke]').forEach(b=>b.onclick=()=>aclApi('revoke',b.dataset.revoke));
+}
+
 let state=null;
 function render(st){
   state=st; lastOk=Date.now(); gateway=st.snapshot?.gateway||''; hasKey=st.has_key;
@@ -409,8 +474,11 @@ function render(st){
   ctrlPub=st.pub||'';
   $('#prov_pub').textContent=ctrlPub||'(controller has no key — mint/import one)';
   $('#set_pub').textContent=ctrlPub||'(no key — read-only)';
+  // Header badge: count of nodes needing attention (pending approval) so the operator notices.
+  const pendN=hasKey?((st.snapshot?.nodes)||[]).filter(n=>n.acl==='pending').length:0;
+  $('#tab_sec_badge').textContent=pendN?pendN:'';
   $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';
-  if(view==='map'){ renderMap(st); } else if(view==='dash'){ renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
+  if(view==='map'){ renderMap(st); } else if(view==='security'){ renderSecurity(st); } else if(view==='dash'){ renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
 }
 async function tick(){ try{ const r=await fetch('/api/state'); if(r.ok) render(await r.json()); }catch(e){} if(Date.now()-lastOk>6000)$('#stale').textContent='● controller not responding'; }
 $('#consend').onclick=()=>{ const v=$('#conline').value.trim(); if(v){api('raw',{line:v});$('#conline').value='';} };
@@ -433,8 +501,8 @@ function cfgFillRf(r){ $('#rf_freq').value=(r.freq_hz/1e6).toFixed(3).replace(/\
 function cfgLine(line){ clog(line); let m;
   if((m=line.match(/^fw[= ](\S+)(?:\s+built[= ](.+))?/))) $('#cfgFw').textContent=m[1]+(m[2]?' ('+m[2]+')':'');
   if((m=line.match(/PIN=(\d{6})/))) $('#pin').textContent=m[1].split('').join(' ');
-  if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('#cfgNode').textContent=m[1].toUpperCase();
-  if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('#cfgNode').textContent=m[1].toUpperCase();
+  if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8,32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
+  if((m=line.match(/node[= ]([0-9A-Fa-f]{8,32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
   if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
     $('#mob_val').textContent = m[1]==='on'?'🚗 mobile (reserve band, raise fast / trim slow)':'📍 fixed (power optimised)';
   // provisioning state: node reports `ctrlkey AABB..YYZZ counter=N` | `ctrlkey: none` | set/clear acks

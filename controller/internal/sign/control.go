@@ -31,8 +31,8 @@ const (
 	CmdUnblock = 4 // CTRL_UNBLOCK
 	CmdBle     = 5 // CTRL_BLE — arg: 1 = enable BLE/BT advertising, 0 = disable
 
-	IDBytes            = 16                                          // a NodeId on the wire
-	unsignedBytes      = 1 + 1 + IDBytes + 1 + 4                     // 23: ver|cmd|target|arg|counter
+	IDBytes            = 16                                         // a NodeId on the wire
+	unsignedBytes      = 1 + 1 + IDBytes + 1 + 4                    // 23: ver|cmd|target|arg|counter
 	unsignedBytesBlock = 1 + 1 + IDBytes + 1 + IDBytes + 4          // 39: + victim before counter
 	MsgBytes           = unsignedBytes + ed25519.SignatureSize      // 87
 	BlkBytes           = unsignedBytesBlock + ed25519.SignatureSize // 103

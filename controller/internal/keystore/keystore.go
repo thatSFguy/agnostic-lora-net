@@ -217,8 +217,12 @@ func (s *Store) LoadAllowlist(al map[string]int64) error {
 
 // Pub is the controller public key — provision it on each node with `ctrlkey <hex>`.
 // Pub/PubHex/Priv lock so a live Adopt() can't tear the key field mid-read.
-func (s *Store) Pub() ed25519.PublicKey { s.mu.Lock(); defer s.mu.Unlock(); return s.priv.Public().(ed25519.PublicKey) }
-func (s *Store) PubHex() string         { return hex.EncodeToString(s.Pub()) }
+func (s *Store) Pub() ed25519.PublicKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.priv.Public().(ed25519.PublicKey)
+}
+func (s *Store) PubHex() string           { return hex.EncodeToString(s.Pub()) }
 func (s *Store) Priv() ed25519.PrivateKey { s.mu.Lock(); defer s.mu.Unlock(); return s.priv }
 
 // Export returns the key + replay counter in the same encoding the map app's backup uses

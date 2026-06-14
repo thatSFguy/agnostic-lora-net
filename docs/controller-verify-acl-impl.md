@@ -1,11 +1,26 @@
 # Implementing controller-side identity verify + membership ACL
 
-Status (2026-06): **planned, not started.** The controller half of
-[`self-certifying-identity-plan.md`](self-certifying-identity-plan.md): learn each node's
-verified pubkey, enforce a membership allowlist over approved pubkeys, and refuse to manage
-(command) nodes that aren't approved. Composes on top of the firmware work
+Status (2026-06-14): **implemented on `worktree-self-certifying-identity`** (controller v2).
+The controller half of [`self-certifying-identity-plan.md`](self-certifying-identity-plan.md):
+learn each node's verified pubkey, enforce a membership allowlist over approved pubkeys, and
+refuse to manage (command) nodes that aren't approved. Composes on top of the firmware work
 ([`node-keygen-signed-announce-impl.md`](node-keygen-signed-announce-impl.md)) and the type
-change ([`node-id-widening-impl.md`](node-id-widening-impl.md)).
+change ([`node-id-widening-impl.md`](node-id-widening-impl.md)), both already landed on this branch.
+
+**What landed (controller v2):** §1 keystore allowlist (`Approve/Revoke/IsAllowed/Allowlist`,
+persisted in `controller.json`, carried through backup/restore). §2 ingest reads the
+`[ann] <id> pub= sig=` contract → `KindIdentity` (`Event.Pub`/`SigOK`); id regexes widened to
+accept 8- or 32-hex during rollout. §3 topo `Node.{Pub,Verified,ACL}`; ACL derived live at
+Snapshot time; `ManagedIDs` + the optimiser filter to verified-and-allowed; `CommandAllowed`
+gate. §4 `sign/control.go` widened to 16-byte target/aux (`CtrlVer=2`, 87/103-byte commands,
+raw `NodeID`), `hexID`/`parseID` decode 32-hex; `issue()` + the REPL gate on `IsAllowed`
+**before** advancing the replay counter (no counter burn on reject). §5 `/api/acl` + a
+**Security** dashboard tab (trust badges ✓/⚠, ACL pills, pending/approved/unverified lists,
+header pending-count badge). §6 `agnctl acl list|pending|approve|revoke`. §7 tests as below.
+Permissive when no controller key is configured (replay/dry-run), so existing flows are unaffected.
+
+Still firmware-side / follow-up: re-pin the `test_ctrl_interop` v2 vectors on-device
+(GO_MSG=87, GO_BLK=103; `go test ./internal/sign -run EmitVector -v` emits them).
 
 All anchors verified against the current tree.
 

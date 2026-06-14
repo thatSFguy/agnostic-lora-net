@@ -13,19 +13,34 @@ import (
 	"agnostic-lora-net/controller/internal/topo"
 )
 
+// v2 32-hex node ids (the engine builds commands via sign.ParseNodeID, which needs 16 bytes).
+const (
+	gwID = "00000000000000000000000000000001"
+	aID  = "aaaa00010000000000000000000000a1" // loud node
+	bID  = "bbbb00020000000000000000000000b2" // in-band node
+)
+
+func mustNID(s string) sign.NodeID {
+	id, err := sign.ParseNodeID(s)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // A gateway hearing a LOUD node (snr 9 -> margin 21.5, too high) and an IN-BAND node
 // (snr -4 -> margin 8.5). SF9 floor is -12.5.
 func snap(now time.Time) topo.Snapshot {
 	return topo.Snapshot{
-		Gateway: "GW000001",
+		Gateway: gwID,
 		Nodes: []topo.Node{
-			{ID: "GW000001", IsGateway: true},
-			{ID: "AAAA0001", SF: 9, Power: 22}, // loud -> should lower
-			{ID: "BBBB0002", SF: 9, Power: 14}, // in band -> hold
+			{ID: gwID, IsGateway: true},
+			{ID: aID, SF: 9, Power: 22}, // loud -> should lower
+			{ID: bID, SF: 9, Power: 14}, // in band -> hold
 		},
 		Links: []topo.Link{
-			{From: "AAAA0001", To: "GW000001", RSSI: -42, SNR: 9, At: now},
-			{From: "BBBB0002", To: "GW000001", RSSI: -95, SNR: -4, At: now},
+			{From: aID, To: gwID, RSSI: -42, SNR: 9, At: now},
+			{From: bID, To: gwID, RSSI: -95, SNR: -4, At: now},
 		},
 	}
 }
@@ -51,10 +66,10 @@ func find(ds []Decision, node string) Decision {
 func TestEngineDryRun(t *testing.T) {
 	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
 	ds := eng.Tick(snap(time.Now()), time.Now())
-	if d := find(ds, "AAAA0001"); d.Action != Lower || d.NewTarget != 19 {
+	if d := find(ds, aID); d.Action != Lower || d.NewTarget != 19 {
 		t.Fatalf("loud node: %+v want Lower->19", d)
 	}
-	if d := find(ds, "BBBB0002"); d.Action != Hold {
+	if d := find(ds, bID); d.Action != Hold {
 		t.Fatalf("in-band node: %+v want Hold", d)
 	}
 }
@@ -189,7 +204,7 @@ func TestEngineApplyAndConfirm(t *testing.T) {
 	eng.Tick(snap(time.Now()), time.Now())
 	var gotPower bool
 	for _, l := range sent {
-		if c := decodeCtrlsend(t, l, pub); c.Cmd == sign.CmdPower && c.Target == 0xAAAA0001 && c.Arg == 19 {
+		if c := decodeCtrlsend(t, l, pub); c.Cmd == sign.CmdPower && c.Target == mustNID(aID) && c.Arg == 19 {
 			gotPower = true
 		}
 	}
@@ -202,7 +217,7 @@ func TestEngineApplyAndConfirm(t *testing.T) {
 	eng.Tick(snap(time.Now()), time.Now())
 	var gotConfirm bool
 	for _, l := range sent {
-		if c := decodeCtrlsend(t, l, pub); c.Cmd == sign.CmdConfirm && c.Target == 0xAAAA0001 && c.Arg == 19 {
+		if c := decodeCtrlsend(t, l, pub); c.Cmd == sign.CmdConfirm && c.Target == mustNID(aID) && c.Arg == 19 {
 			gotConfirm = true
 		}
 	}

@@ -107,3 +107,54 @@ func TestOpenMissing(t *testing.T) {
 		t.Fatalf("expected ErrNotExist, got %v", err)
 	}
 }
+
+// The membership allowlist: approve/revoke/IsAllowed, case-insensitive keys, and a
+// persistence round-trip (it must survive Open after a Mint+Approve).
+func TestAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	ks, err := Mint(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pub = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+	if ks.IsAllowed(pub) {
+		t.Fatal("fresh store should allow nothing")
+	}
+	if err := ks.Approve(pub, 1700000000); err != nil {
+		t.Fatal(err)
+	}
+	if !ks.IsAllowed(pub) || !ks.IsAllowed(toLowerHex(pub)) { // case-insensitive
+		t.Fatal("approved pub should be allowed regardless of case")
+	}
+	if al := ks.Allowlist(); al[pub] != 1700000000 {
+		t.Fatalf("allowlist snapshot wrong: %v", al)
+	}
+	// Persistence: reopen the same dir and the approval must still be there.
+	ks2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ks2.IsAllowed(pub) {
+		t.Fatal("approval did not persist across reopen")
+	}
+	// Revoke clears it (and persists).
+	if err := ks2.Revoke(pub); err != nil {
+		t.Fatal(err)
+	}
+	if ks2.IsAllowed(pub) {
+		t.Fatal("revoked pub should not be allowed")
+	}
+	if ks3, _ := Open(dir); ks3.IsAllowed(pub) {
+		t.Fatal("revoke did not persist")
+	}
+}
+
+func toLowerHex(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'F' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}

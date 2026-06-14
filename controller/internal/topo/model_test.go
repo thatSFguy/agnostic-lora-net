@@ -73,3 +73,68 @@ func TestRemoteTelemetryBuildsNodeToNodeLinks(t *testing.T) {
 		}
 	}
 }
+
+// Identity + ACL: a verified node is "pending" until its pubkey is approved, then "allowed";
+// an unverified node is "unverified". ManagedIDs and CommandAllowed must gate on that.
+func TestIdentityACLGating(t *testing.T) {
+	g := New()
+	now := time.Now()
+	const vid = "9828F51B1122334455667788990011AA" // verified node id (upper, as the parser stores)
+	const uid = "1111111122222222333333334444AAAA" // unverified node id
+	const pub = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+
+	g.Apply(ingest.Event{Kind: ingest.KindInfoHeader, ID: "GW00000000000000000000000000000A"}, now)
+	feed(g, now, "[ann] "+toLower(vid)+" pub="+pub+" sig=ok")
+	feed(g, now, "[ann] "+toLower(uid)+" sig=bad")
+
+	// allowlist: approve nobody yet.
+	allowed := map[string]bool{}
+	g.SetAllowFunc(func(p string) bool { return allowed[p] })
+
+	byID := func(id string) Node {
+		for _, n := range g.Snapshot().Nodes {
+			if n.ID == id {
+				return n
+			}
+		}
+		return Node{}
+	}
+	if n := byID(vid); !n.Verified || n.ACL != "pending" {
+		t.Fatalf("verified-unapproved: verified=%v acl=%q want pending", n.Verified, n.ACL)
+	}
+	if n := byID(uid); n.Verified || n.ACL != "unverified" {
+		t.Fatalf("unverified: verified=%v acl=%q want unverified", n.Verified, n.ACL)
+	}
+	// CommandAllowed gates pending + unverified off.
+	if _, ok := g.CommandAllowed(vid); ok {
+		t.Fatal("pending node must not be commandable")
+	}
+	if _, ok := g.CommandAllowed(uid); ok {
+		t.Fatal("unverified node must not be commandable")
+	}
+	// Approve the pubkey -> allowed + commandable; ManagedIDs includes it (not the unverified one).
+	allowed[pub] = true
+	if n := byID(vid); n.ACL != "allowed" {
+		t.Fatalf("after approve acl=%q want allowed", n.ACL)
+	}
+	if pubGot, ok := g.CommandAllowed(vid); !ok || pubGot != pub {
+		t.Fatalf("approved node should be commandable, got pub=%q ok=%v", pubGot, ok)
+	}
+	mids := map[string]bool{}
+	for _, id := range g.ManagedIDs() {
+		mids[id] = true
+	}
+	if !mids[vid] || mids[uid] {
+		t.Fatalf("ManagedIDs should include approved %s and exclude unverified %s: %v", vid, uid, mids)
+	}
+}
+
+func toLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'F' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
