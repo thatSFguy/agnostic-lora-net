@@ -29,7 +29,9 @@
 
 namespace mesh {
 
-enum CtrlCmd : uint8_t { CTRL_POWER = 1, CTRL_CONFIRM = 2, CTRL_BLOCK = 3, CTRL_UNBLOCK = 4 };
+enum CtrlCmd : uint8_t { CTRL_POWER = 1, CTRL_CONFIRM = 2, CTRL_BLOCK = 3, CTRL_UNBLOCK = 4,
+                         CTRL_BLE = 5 };   // CTRL_BLE: arg 1=enable advertising, 0=disable
+
 enum CtrlVerdict : uint8_t { CTRL_OK = 0, CTRL_MALFORMED, CTRL_BAD_SIG, CTRL_REPLAY };
 
 constexpr uint8_t  CTRL_VER       = 2;   // v2: 16-byte node ids (was 4-byte in v1)

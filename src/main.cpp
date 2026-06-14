@@ -1340,6 +1340,20 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
             Serial.println(line);
             ack(0, 0);
         }
+    } else if (m.cmd == mesh::CTRL_BLE) {
+        // Remote BLE toggle (arg: 1=on, 0=off). NOT a dead-man: the firmware just obeys;
+        // the "only disable after proof-of-config" gate lives in the controller (todo.md).
+        // Replicates the local `ble on/off` console path verbatim (incl. flash persist).
+#ifdef AGN_BLE
+        bool on = (m.arg != 0);
+        if (on) ble_start_adv(); else ble_stop_adv();
+        cfg_save();
+        snprintf(line, sizeof(line), "[ctrl] BLE %s (counter=%lu)",
+                 on ? "on" : "off", (unsigned long)m.counter);
+        Serial.println(line);
+        ack(on ? 1 : 0, 0);
+#endif
+        // (targets without AGN_BLE have no SoftDevice — command is a no-op, no ack)
     }
 }
 
@@ -1415,13 +1429,14 @@ static void telem_flood_batt() {
 static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
     char line[128]; char orighx[33]; nid_hex(origin, orighx);
     unsigned mob = (m.flags & mesh::TELEM_FLAG_MOBILE) ? 1u : 0u;
+    unsigned ble = (m.flags & mesh::TELEM_FLAG_BLE) ? 1u : 0u;
     if (m.pct_plus1)
-        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u",
+        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u ble=%u",
                  orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf,
-                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob);
+                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob, ble);
     else
-        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u",
-                 orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob);
+        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u ble=%u",
+                 orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob, ble);
 #ifdef AGN_BLE
     if (ble_connected) bleuart.println(line);
 #endif
@@ -1479,9 +1494,12 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                         nn++;
                     }
                 }
-                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 9];
+                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 21];  // nbr entry is 21 B (16-byte id)
                 uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
                 uint8_t flags = node_mobile ? mesh::TELEM_FLAG_MOBILE : 0;
+#ifdef AGN_BLE
+                if (ble_advertising) flags |= mesh::TELEM_FLAG_BLE;   // proof-of-config: report advertising state
+#endif
                 uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
                         (uint16_t)((millis() - boot_ms) / 60000u),
                         radio.config().power_dbm, radio.config().sf, flags, AGN_FW_VERSION,

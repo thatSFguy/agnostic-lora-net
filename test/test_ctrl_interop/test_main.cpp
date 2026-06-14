@@ -94,6 +94,18 @@ static void test_block_byte_identical_v2() {
     TEST_ASSERT_EQUAL_UINT32(7, out.counter);
 }
 
+// 4b) CTRL_BLE (remote BLE toggle) shares the POWER-style layout: build -> verify -> arg.
+static void test_ble_cmd_roundtrip() {
+    uint8_t m[CTRL_MSG_BYTES];
+    uint16_t n = ctrl_build(CTRL_BLE, target_id(), 1, 99, SK, m, sizeof(m));  // arg 1 = enable
+    TEST_ASSERT_EQUAL_UINT16(CTRL_MSG_BYTES, n);
+    CtrlMsg out;
+    TEST_ASSERT_EQUAL_UINT8(CTRL_OK, ctrl_verify(m, n, PK, 98, &out));
+    TEST_ASSERT_EQUAL_UINT8(CTRL_BLE, out.cmd);
+    TEST_ASSERT_TRUE(out.target == target_id());
+    TEST_ASSERT_EQUAL_INT8(1, out.arg);
+}
+
 // 5) Replay floor: a counter at/below the floor is rejected after the sig checks out.
 static void test_replay_rejected() {
     uint8_t m[CTRL_MSG_BYTES];
@@ -112,6 +124,7 @@ int main(int, char**) {
     RUN_TEST(test_message_byte_identical_v2);
     RUN_TEST(test_tamper_rejected);
     RUN_TEST(test_block_byte_identical_v2);
+    RUN_TEST(test_ble_cmd_roundtrip);
     RUN_TEST(test_replay_rejected);
     return UNITY_END();
 }

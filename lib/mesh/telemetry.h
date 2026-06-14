@@ -75,6 +75,7 @@ uint16_t telem_build_reply(uint16_t mv, uint8_t pct_plus1, uint16_t uptime_min,
                            uint8_t* out, uint16_t cap);
 
 constexpr uint8_t TELEM_FLAG_MOBILE = 0x01;
+constexpr uint8_t TELEM_FLAG_BLE    = 0x02;   // REPLY: node is currently BLE-advertising
 // Parse any TELEM message. Returns true only for a well-formed message.
 bool telem_parse(const uint8_t* msg, uint16_t len, TelemMsg* out);
 

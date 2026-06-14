@@ -20,7 +20,8 @@ static uint16_t unsigned_len(uint8_t cmd) {
 static const uint16_t DOMAIN_VIEW_MAX = sizeof(DOMAIN) + 39;
 
 static bool known_cmd(uint8_t cmd) {
-    return cmd == CTRL_POWER || cmd == CTRL_CONFIRM || cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK;
+    return cmd == CTRL_POWER || cmd == CTRL_CONFIRM || cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK
+        || cmd == CTRL_BLE;
 }
 
 // The exact byte string that is signed: DOMAIN || unsigned-part (ulen bytes).
@@ -33,7 +34,8 @@ static uint16_t signed_view(const uint8_t* unsigned_part, uint16_t ulen, uint8_t
 uint16_t ctrl_build(uint8_t cmd, node_id_t target, int8_t arg, uint32_t counter,
                     const uint8_t seckey[64], uint8_t* out, uint16_t cap) {
     if (cap < CTRL_MSG_BYTES || target.is_zero()) return 0;
-    if (cmd != CTRL_POWER && cmd != CTRL_CONFIRM) return 0;   // block uses ctrl_build_block
+    // POWER-style layout (target|arg|counter): POWER, CONFIRM, BLE. BLOCK/UNBLOCK use ctrl_build_block.
+    if (cmd != CTRL_POWER && cmd != CTRL_CONFIRM && cmd != CTRL_BLE) return 0;
     out[0] = CTRL_VER;
     out[1] = cmd;
     nid_write(out + 2, target);
