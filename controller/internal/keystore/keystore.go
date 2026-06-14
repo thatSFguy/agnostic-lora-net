@@ -68,14 +68,9 @@ func Mint(dir string) (*Store, error) {
 	return newStore(dir, priv)
 }
 
-// ImportBrowserBackup reads the map app's backup JSON (or the raw {priv,pub} object) and
-// adopts its controller key — "reuse the browser key". The priv field is base64 PKCS#8.
-func ImportBrowserBackup(dir, backupPath string) (*Store, error) {
-	b, err := os.ReadFile(backupPath)
-	if err != nil {
-		return nil, err
-	}
-	// Accept either the full backup ({"controllerKey":{priv,pub}}) or the bare key object.
+// ParseBackupPriv extracts the Ed25519 private key from a map-app / controller backup JSON
+// (the full {"controllerKey":{priv,pub}} or the bare {priv,pub}). priv is base64 PKCS#8.
+func ParseBackupPriv(b []byte) (ed25519.PrivateKey, error) {
 	var outer struct {
 		ControllerKey *struct {
 			Priv string `json:"priv"`
@@ -105,7 +100,46 @@ func ImportBrowserBackup(dir, backupPath string) (*Store, error) {
 	if !ok {
 		return nil, errors.New("keystore: backup key is not Ed25519")
 	}
+	return priv, nil
+}
+
+// ImportBrowserBackup reads a backup JSON file and adopts its controller key, persisting a
+// fresh store in dir. Used at startup (-import-backup).
+func ImportBrowserBackup(dir, backupPath string) (*Store, error) {
+	b, err := os.ReadFile(backupPath)
+	if err != nil {
+		return nil, err
+	}
+	priv, err := ParseBackupPriv(b)
+	if err != nil {
+		return nil, err
+	}
 	return newStore(dir, priv)
+}
+
+// RestoreKey adopts the key from backup bytes into a fresh store at dir (for the CLI
+// `-restore`, which has the bytes in hand).
+func RestoreKey(dir string, backup []byte) (*Store, error) {
+	priv, err := ParseBackupPriv(backup)
+	if err != nil {
+		return nil, err
+	}
+	return newStore(dir, priv)
+}
+
+// Adopt swaps in the key from backup bytes IN PLACE (every holder of this *Store sees it),
+// re-seeding the replay counter from wall-clock so it clears each node's stored floor.
+// For a live restore on a running controller.
+func (s *Store) Adopt(backup []byte) error {
+	priv, err := ParseBackupPriv(backup)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.priv = priv
+	s.counter = uint32(time.Now().Unix())
+	return s.save()
 }
 
 func newStore(dir string, priv ed25519.PrivateKey) (*Store, error) {
@@ -117,9 +151,10 @@ func newStore(dir string, priv ed25519.PrivateKey) (*Store, error) {
 }
 
 // Pub is the controller public key — provision it on each node with `ctrlkey <hex>`.
-func (s *Store) Pub() ed25519.PublicKey   { return s.priv.Public().(ed25519.PublicKey) }
-func (s *Store) PubHex() string           { return hex.EncodeToString(s.Pub()) }
-func (s *Store) Priv() ed25519.PrivateKey { return s.priv }
+// Pub/PubHex/Priv lock so a live Adopt() can't tear the key field mid-read.
+func (s *Store) Pub() ed25519.PublicKey { s.mu.Lock(); defer s.mu.Unlock(); return s.priv.Public().(ed25519.PublicKey) }
+func (s *Store) PubHex() string         { return hex.EncodeToString(s.Pub()) }
+func (s *Store) Priv() ed25519.PrivateKey { s.mu.Lock(); defer s.mu.Unlock(); return s.priv }
 
 // Export returns the key + replay counter in the same encoding the map app's backup uses
 // (priv = base64 PKCS#8, pub = uppercase hex), so the result round-trips through
@@ -131,7 +166,8 @@ func (s *Store) Export() (privB64, pubHex string, counter uint32, err error) {
 	if err != nil {
 		return "", "", 0, err
 	}
-	return base64.StdEncoding.EncodeToString(der), strings.ToUpper(hex.EncodeToString(s.Pub())), s.counter, nil
+	pub := s.priv.Public().(ed25519.PublicKey) // compute directly — s.Pub() would re-lock s.mu (deadlock)
+	return base64.StdEncoding.EncodeToString(der), strings.ToUpper(hex.EncodeToString(pub)), s.counter, nil
 }
 
 // Next advances the replay counter, persists it, and returns the new value. Persist

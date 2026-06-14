@@ -51,6 +51,20 @@ func (u *uiState) setPos(id string, x, y float64) {
 	u.save()
 }
 
+// replaceAll overwrites aliases + positions wholesale (a backup restore) and persists.
+func (u *uiState) replaceAll(aliases map[string]string, positions map[string][]float64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if aliases == nil {
+		aliases = map[string]string{}
+	}
+	if positions == nil {
+		positions = map[string][]float64{}
+	}
+	u.Aliases, u.Positions = aliases, positions
+	u.save()
+}
+
 // snapshot returns copies safe to marshal without holding the lock.
 func (u *uiState) snapshot() (map[string]string, map[string][]float64) {
 	u.mu.Lock()

@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -117,6 +118,28 @@ func ExportBackup(ks *keystore.Store, uiPath string) ([]byte, error) {
 	return backupJSON(ks, al, pos)
 }
 
+// parseBackupUI pulls aliases + positions out of a backup JSON (absent -> nil -> empty).
+func parseBackupUI(b []byte) (map[string]string, map[string][]float64) {
+	var bk struct {
+		Aliases   map[string]string    `json:"aliases"`
+		Positions map[string][]float64 `json:"positions"`
+	}
+	_ = json.Unmarshal(b, &bk)
+	return bk.Aliases, bk.Positions
+}
+
+// RestoreToDisk restores a backup (key + aliases + positions) into keydir on a fresh
+// install — for the CLI `-restore`, no running server. Returns the restored pubkey.
+func RestoreToDisk(keydir, uiPath string, backup []byte) (string, error) {
+	ks, err := keystore.RestoreKey(keydir, backup)
+	if err != nil {
+		return "", err
+	}
+	al, pos := parseBackupUI(backup)
+	loadUI(uiPath).replaceAll(al, pos)
+	return ks.PubHex(), nil
+}
+
 func hexID(s string) uint32 {
 	v, _ := strconv.ParseUint(s, 16, 32)
 	return uint32(v)
@@ -215,6 +238,30 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+BackupName+`"`)
 		_, _ = w.Write(b)
+	})
+	mux.HandleFunc("/api/restore", func(w http.ResponseWriter, r *http.Request) {
+		// Live restore: swap in the backup's key (in-place — engine/REPL/dashboard all see
+		// it) and bulk-restore aliases/positions. Localhost-only (it accepts a private key).
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.ks == nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "this controller has no key store — restore on a fresh install with the CLI: agnctl -restore backup.json"})
+			return
+		}
+		b, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "read: " + err.Error()})
+			return
+		}
+		if err := s.ks.Adopt(b); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": err.Error()})
+			return
+		}
+		al, pos := parseBackupUI(b)
+		s.ui.replaceAll(al, pos)
+		writeJSON(w, map[string]any{"ok": true, "msg": "restored — controller key " + s.ks.PubHex()[:12] + "… + " + strconv.Itoa(len(al)) + " aliases"})
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()

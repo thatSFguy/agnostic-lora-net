@@ -71,10 +71,10 @@
   <div class="tab" id="tab-map">Map</div>
   <div class="tab" id="tab-config">Configure</div>
   <div class="tab" id="tab-flash">Flash</div>
+  <div class="tab" id="tab-settings">Settings</div>
   <div>gw <span id="gw" class="gw">—</span></div>
   <div id="count" class="kv"></div>
   <div id="key" class="kv"></div>
-  <a id="backup" class="kv" href="/api/backup" download="agnlora-controller-backup.json" title="download controller key + nodes (aliases/positions) backup" style="color:var(--acc);text-decoration:none">⤓ backup</a>
   <div id="upd" class="kv"></div>
   <div id="stale"></div>
 </header>
@@ -187,6 +187,23 @@
   </div>
 </div></div>
 
+<!-- ===================== SETTINGS (controller key · backup · restore) ===================== -->
+<div id="settingsview" class="tabview hide"><div class="col">
+  <div class="cfgcard"><h3>Controller key</h3>
+    <div class="kv">pubkey: <b id="set_pub" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all">—</b></div>
+    <div class="kv" style="margin-top:.4rem">Provision nodes with this key (Configure → Provisioning, or <code>ctrlkey &lt;pubkey&gt;</code> on the node).</div>
+  </div>
+  <div class="cfgcard"><h3>Backup</h3>
+    <div class="kv">Download the controller key + replay counter + node aliases/positions as one JSON. <b>Keep it secret</b> — it's the network's WRITE key.</div>
+    <a class="primary" style="display:inline-block;margin-top:.5rem;padding:4px 10px;border:1px solid var(--acc);border-radius:6px;text-decoration:none;color:var(--txt)" href="/api/backup" download="agnlora-controller-backup.json">⤓ Download backup</a>
+  </div>
+  <div class="cfgcard"><h3>Restore</h3>
+    <div class="kv">Load a backup JSON: adopts its controller key (replay counter re-seeds so it clears each node's floor) and restores node aliases/positions. Applies live to this running controller. On a brand-new install with no key, use the CLI instead: <code>agnctl -restore backup.json</code>.</div>
+    <div class="row" style="margin-top:.5rem"><input id="set_file" type="file" accept="application/json,.json"><button id="set_restore" class="primary">Restore</button></div>
+    <div class="kv" id="set_status" style="margin-top:.4rem"></div>
+  </div>
+</div></div>
+
 <div id="toast"></div>
 <script src="/nrf-dfu.js"></script>
 <script>
@@ -205,7 +222,7 @@ async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST'
 function uiPost(b){ fetch('/api/ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
 function setAlias(id,name){ if(name)aliases[id]=name; else delete aliases[id]; uiPost({type:'alias',id,name}); }
 
-const VIEWS={dash:'#grid', map:'#mapview', config:'#configview', flash:'#flashview'};
+const VIEWS={dash:'#grid', map:'#mapview', config:'#configview', flash:'#flashview', settings:'#settingsview'};
 function setView(v){ view=v;
   for(const k in VIEWS){ $('#tab-'+k).classList.toggle('on',k===v); $(VIEWS[k]).classList.toggle('hide',k!==v); }
   if(state) render(state); }
@@ -376,8 +393,9 @@ function render(st){
   if(!dragging){ aliases=st.aliases||{}; positions=st.positions||{}; }
   $('#gw').textContent=gateway?nm(gateway):'—'; $('#count').textContent=(st.snapshot?.nodes?.length||0)+' nodes';
   $('#key').textContent=hasKey?'key '+(st.pub||'').slice(0,12)+'…':'⚠ no key (read-only)';
-  $('#backup').style.display=hasKey?'':'none';   // export only meaningful with a key
-  ctrlPub=st.pub||''; $('#prov_pub').textContent=ctrlPub||'(controller has no key — mint/import one)';
+  ctrlPub=st.pub||'';
+  $('#prov_pub').textContent=ctrlPub||'(controller has no key — mint/import one)';
+  $('#set_pub').textContent=ctrlPub||'(no key — read-only)';
   $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';
   if(view==='map'){ renderMap(st); } else if(view==='dash'){ renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
 }
@@ -511,6 +529,15 @@ async function flFinish(){ if(!flDfu){ flState('run ① first','bad'); return; }
   let port; try{ port=await navigator.serial.requestPort(); }catch(e){ flState('cancelled'); return; }
   await flDoFlash(port); }
 $('#fl_go').onclick=flStart; $('#fl_finish').onclick=flFinish;
+
+// ===================== SETTINGS: restore from backup (live) =====================
+$('#set_restore').onclick=async()=>{ const f=$('#set_file').files[0];
+  if(!f){ $('#set_status').textContent='choose a backup file first'; return; }
+  $('#set_status').textContent='restoring…';
+  try{ const txt=await f.text();
+    const r=await fetch('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:txt});
+    const j=await r.json(); $('#set_status').textContent=(j.ok?'✓ ':'✗ ')+j.msg; if(j.ok) toast('✓ '+j.msg);
+  }catch(e){ $('#set_status').textContent='✗ '+e; } };
 
 tick(); setInterval(tick,1500);
 </script>

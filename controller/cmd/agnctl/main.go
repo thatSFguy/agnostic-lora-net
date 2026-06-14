@@ -65,8 +65,26 @@ func main() {
 		httpAddr  = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
 		fwDir     = flag.String("fwdir", "../web/fw", "directory of firmware packages to serve at /fw/ for the dashboard Flash tab")
 		export    = flag.String("export", "", "write a map-app-compatible controller backup (key+counter+aliases+positions) to this file and exit")
+		restore   = flag.String("restore", "", "restore a controller backup (key + aliases + positions) into -keydir and exit (fresh install)")
 	)
 	flag.Parse()
+
+	// Standalone restore: write the key + nodes from a backup into keydir, then exit. Run
+	// this on a fresh install before starting normally.
+	if *restore != "" {
+		b, err := os.ReadFile(*restore)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "-restore: %v\n", err)
+			os.Exit(1)
+		}
+		pub, err := httpd.RestoreToDisk(*keydir, filepath.Join(*keydir, "ui.json"), b)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "-restore: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "restored controller key %s + nodes → %s/ (replay counter re-seeded). Start normally to run.\n", pub, *keydir)
+		os.Exit(0)
+	}
 
 	// Standalone export: dump the controller key + nodes and exit (no node needed).
 	if *export != "" {
