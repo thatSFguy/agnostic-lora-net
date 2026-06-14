@@ -20,6 +20,7 @@ type Engine struct {
 	log       *Logger
 	ks        *keystore.Store
 	send      func(string) error
+	mobile    func(string) bool // operator flag: a moving node (never trim its power); may be nil
 	apply     bool
 	fresh     time.Duration
 	heartbeat time.Duration // re-assert a held node this often (keeps its #3 watchdog fresh)
@@ -30,9 +31,9 @@ type Engine struct {
 	lastSent map[string]time.Time // last time we sent any command to a node
 }
 
-func NewEngine(cfg Config, log *Logger, ks *keystore.Store, send func(string) error, apply bool, fresh, heartbeat time.Duration) *Engine {
+func NewEngine(cfg Config, log *Logger, ks *keystore.Store, send func(string) error, apply bool, fresh, heartbeat time.Duration, mobile func(string) bool) *Engine {
 	return &Engine{
-		cfg: cfg, log: log, ks: ks, send: send, apply: apply, fresh: fresh, heartbeat: heartbeat,
+		cfg: cfg, log: log, ks: ks, send: send, mobile: mobile, apply: apply, fresh: fresh, heartbeat: heartbeat,
 		targets: map[string]int8{}, pending: map[string]int8{}, miss: map[string]int{},
 		lastSent: map[string]time.Time{},
 	}
@@ -130,6 +131,7 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 			sf = e.cfg.DefaultSF
 		}
 		obs := observe(snap, n.ID, sf, now, e.fresh)
+		obs.Mobile = e.mobile != nil && e.mobile(n.ID)
 
 		cur, seeded := e.targets[n.ID]
 		if !seeded {

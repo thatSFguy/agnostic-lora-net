@@ -61,6 +61,7 @@ type Observation struct {
 	Margin  float64 // worst (minimum) SNR margin across the node's outbound links (dB)
 	SNR     float64 // SNR of that governing link — measured, or estimated from quality
 	Soft    bool    // governing link is quality-only (estimate saturates; not safe to trim on)
+	Mobile  bool    // operator-flagged moving node — keep headroom, never trim its power
 	GovPeer string  // receiver of the governing (weakest) link, for the audit log
 }
 
@@ -87,6 +88,7 @@ type Decision struct {
 	NewTarget int8    `json:"new_target"`
 	Reason    string  `json:"reason"`
 	Soft      bool    `json:"soft,omitempty"`    // governing margin estimated from quality, not measured SNR
+	Mobile    bool    `json:"mobile,omitempty"`  // node flagged mobile — power held up for movement headroom
 	Governs   string  `json:"governs,omitempty"` // receiver of the weakest outbound link
 }
 
@@ -104,7 +106,7 @@ func clampI8(v, lo, hi int8) int8 {
 // currently targets for this node, return the (explained) next step. No I/O, no state.
 func Decide(obs Observation, curTarget int8, cfg Config) Decision {
 	d := Decision{Node: obs.Node, SF: obs.SF, HasSNR: obs.HasObs, CurTarget: curTarget, NewTarget: curTarget,
-		Soft: obs.Soft, Governs: obs.GovPeer}
+		Soft: obs.Soft, Mobile: obs.Mobile, Governs: obs.GovPeer}
 	if !obs.HasObs {
 		d.Action = Skip
 		d.Reason = "no fresh outbound link observed — no neighbour currently hears this node"
@@ -120,9 +122,16 @@ func Decide(obs Observation, curTarget int8, cfg Config) Decision {
 		want := int8(math.Round(cfg.mid() - margin))
 		d.Delta = clampI8(want, 0, cfg.MaxStep)
 	case margin > cfg.MarginHigh:
-		// Every neighbour hears it too loudly — we could trim power. But only on a *measured*
-		// SNR: the quality->SNR estimate saturates at the top, so a "loud" quality reading
-		// can't tell +8 dB from +30 dB. Don't trim blind.
+		// Every neighbour hears it too loudly — we could trim power, but two cases hold instead:
+		//  - mobile node: its margin reflects where it is *now*; trimming risks losing the link
+		//    when it moves, so keep the headroom and never trim a moving node.
+		//  - quality-only governing link: the q->SNR estimate saturates at the top, so a "loud"
+		//    reading can't tell +8 dB from +30 dB — don't trim blind.
+		if obs.Mobile {
+			d.Action = Hold
+			d.Reason = "margin above band but node is mobile — holding power for movement headroom"
+			return d
+		}
 		if obs.Soft {
 			d.Action = Hold
 			d.Reason = "margin above band but governing link is quality-only (estimate saturates) — hold rather than trim blind"

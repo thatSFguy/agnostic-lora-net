@@ -70,6 +70,9 @@ func (l *Logger) Decision(now time.Time, d Decision, applied bool, ctr uint32, m
 			gov += " (q-est)"
 		}
 	}
+	if d.Mobile {
+		gov += " [mobile]"
+	}
 	var human string
 	switch d.Action {
 	case Hold:

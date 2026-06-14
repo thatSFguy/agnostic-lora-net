@@ -49,7 +49,7 @@ func find(ds []Decision, node string) Decision {
 }
 
 func TestEngineDryRun(t *testing.T) {
-	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour, nil)
 	ds := eng.Tick(snap(time.Now()), time.Now())
 	if d := find(ds, "AAAA0001"); d.Action != Lower || d.NewTarget != 19 {
 		t.Fatalf("loud node: %+v want Lower->19", d)
@@ -75,7 +75,7 @@ func TestEngineWorstLinkGoverns(t *testing.T) {
 			{From: "MESH0001", To: "FARN0002", Q: 0.3, At: now},            // marginal to far node
 		},
 	}
-	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour, nil)
 	d := find(eng.Tick(s, now), "MESH0001")
 	if d.Action != Raise || d.Governs != "FARN0002" {
 		t.Fatalf("worst-link should govern: %+v want Raise governed by FARN0002", d)
@@ -99,13 +99,32 @@ func TestEngineQualityOnlyLinks(t *testing.T) {
 			{From: "LOUD0001", To: "PEER0009", Q: 1.0, At: now},
 		},
 	}
-	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour, nil)
 	ds := eng.Tick(s, now)
 	if d := find(ds, "WEAK0001"); d.Action != Raise || !d.Soft {
 		t.Fatalf("weak quality-only node: %+v want Raise (soft)", d)
 	}
 	if d := find(ds, "LOUD0001"); d.Action != Hold || !d.Soft {
 		t.Fatalf("loud quality-only node must hold (no blind trim): %+v", d)
+	}
+}
+
+// A loud node that a fixed peer would get trimmed must instead HOLD when flagged mobile —
+// its margin reflects where it is now, and trimming risks losing it when it moves.
+func TestEngineMobileNotTrimmed(t *testing.T) {
+	now := time.Now()
+	s := topo.Snapshot{
+		Gateway: "GW000001",
+		Nodes: []topo.Node{
+			{ID: "GW000001", IsGateway: true},
+			{ID: "MOVE0001", SF: 9, Power: 22}, // loud to gateway -> would Lower if fixed
+		},
+		Links: []topo.Link{{From: "MOVE0001", To: "GW000001", RSSI: -42, SNR: 9, At: now}},
+	}
+	mobile := func(id string) bool { return id == "MOVE0001" }
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour, mobile)
+	if d := find(eng.Tick(s, now), "MOVE0001"); d.Action != Hold || !d.Mobile {
+		t.Fatalf("mobile node must hold (keep movement headroom), not lower: %+v", d)
 	}
 }
 
@@ -135,7 +154,7 @@ func TestEngineApplyAndConfirm(t *testing.T) {
 	}
 	var sent []string
 	send := func(s string) error { sent = append(sent, s); return nil }
-	eng := NewEngine(DefaultConfig(), newLogger(t), ks, send, true, time.Minute, time.Hour)
+	eng := NewEngine(DefaultConfig(), newLogger(t), ks, send, true, time.Minute, time.Hour, nil)
 	pub := ks.Pub()
 
 	// Cycle 1: expect a signed POWER 22->19 to the loud node.
