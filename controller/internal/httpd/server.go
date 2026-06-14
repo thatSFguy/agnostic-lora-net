@@ -24,6 +24,12 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+// nrf-dfu.js is vendored from web/nrf-dfu.js so the consolidated dashboard can flash a
+// locally-attached node over Web Serial. Keep it in sync with web/nrf-dfu.js.
+//
+//go:embed nrf-dfu.js
+var dfuJS []byte
+
 const maxEvents = 300
 
 var errNoKey = errors.New("no controller key — start with -import-backup or -mint")
@@ -143,6 +149,10 @@ func (s *Server) Handler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
+	})
+	mux.HandleFunc("/nrf-dfu.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(dfuJS)
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()

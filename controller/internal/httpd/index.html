@@ -42,6 +42,25 @@
   .mapinfo h3{ margin:0 0 6px; font-size:13px; } .mapinfo .x{ float:right; cursor:pointer; color:var(--dim); }
   .mapinfo table{ width:100%; border-collapse:collapse; font-size:11.5px; } .mapinfo td{ padding:2px 3px; border-top:1px solid var(--line); }
   .mapinfo .dim{ color:var(--dim); } .mapinfo .sees{ color:var(--raise); } .mapinfo .heard{ color:var(--acc); }
+  .tabview{ height:calc(100vh - 43px); overflow:auto; padding:16px; } .col{ max-width:820px; margin:0 auto; }
+  .connbar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px 10px; margin-bottom:12px;
+            background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+  .ok{ color:var(--confirm); } .bad{ color:var(--revert); }
+  .cfgcard{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .cfgcard h3{ margin:0 0 8px; font-size:13px; color:var(--acc); }
+  .cfgcard select,.cfgcard input{ background:#0d1117; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:4px 7px; font:inherit; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(12rem,1fr)); gap:.6rem 1rem; margin:.4rem 0; }
+  .grid label{ display:flex; flex-direction:column; gap:4px; color:var(--dim); font-size:11px; }
+  .powerbox{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; background:#13233b; border-radius:8px; padding:8px 12px; margin:.4rem 0; }
+  .powerbox input[type=range]{ flex:1; min-width:12rem; } .pwrval{ font-weight:700; font-size:1.4rem; min-width:5rem; text-align:right; }
+  .warn{ color:var(--lower); background:#2a2113; border-radius:6px; padding:5px 8px; margin-bottom:8px; font-size:12px; }
+  .pinbox{ background:#0a2540; border-radius:8px; padding:8px 12px; margin:.3rem 0; } .pin{ font-weight:700; letter-spacing:.25rem; }
+  fieldset{ border:none; padding:0; margin:0; } fieldset[disabled]{ opacity:.45; }
+  button.primary{ background:#13314f; border-color:var(--acc); } label.chk{ color:var(--dim); font-size:12px; }
+  .pill{ font-size:11px; padding:2px 8px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
+  .pill.ok{ color:var(--confirm); border-color:var(--confirm); } .pill.bad{ color:var(--revert); border-color:var(--revert); }
+  .termlog{ background:#0a0d12; color:#7fdc8f; font-family:ui-monospace,monospace; font-size:11px; height:11rem;
+            overflow:auto; padding:6px 8px; border-radius:6px; white-space:pre-wrap; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -49,6 +68,8 @@
   <div><b>AGN Controller</b></div>
   <div class="tab on" id="tab-dash">Dashboard</div>
   <div class="tab" id="tab-map">Map</div>
+  <div class="tab" id="tab-config">Configure</div>
+  <div class="tab" id="tab-flash">Flash</div>
   <div>gw <span id="gw" class="gw">—</span></div>
   <div id="count" class="kv"></div>
   <div id="key" class="kv"></div>
@@ -63,7 +84,97 @@
   </section>
 </div>
 <div id="mapview" class="hide" style="position:relative"></div>
+
+<!-- ===================== CONFIGURE (local node over Web Serial / BLE) ===================== -->
+<div id="configview" class="tabview hide"><div class="col">
+  <div class="connbar">
+    <button id="cfgUsb">Connect (USB)</button>
+    <button id="cfgBle">Connect (BLE)</button>
+    <span id="cfgStatus" class="bad">disconnected</span>
+    <span class="kv">node <b id="cfgNode">—</b></span>
+    <span class="kv">fw <b id="cfgFw">—</b></span>
+    <span class="kv" style="margin-left:auto">talks directly to a node plugged into THIS machine — not over the mesh</span>
+  </div>
+
+  <div class="cfgcard"><h3>Radio (PHY)</h3>
+    <div class="warn">⚠ Changing frequency, bandwidth or SF retunes this node — it drops off-air from any node still on the old settings. TX power is safe to change alone.</div>
+    <div class="powerbox"><span>TX&nbsp;Power</span>
+      <input id="rf_pwr" type="range" min="-9" max="22" step="1" value="14" disabled>
+      <span class="pwrval"><span id="rf_pwr_val">14</span> dBm</span></div>
+    <fieldset id="rffs" disabled>
+      <div class="grid">
+        <label>Frequency (MHz)<input id="rf_freq" type="number" step="0.001" min="137" max="1020"></label>
+        <label>Bandwidth (kHz)<select id="rf_bw"><option>7.81</option><option>10.42</option><option>15.63</option><option>20.83</option><option>31.25</option><option>41.67</option><option>62.5</option><option>125</option><option>250</option><option>500</option></select></label>
+        <label>Spreading factor<select id="rf_sf"><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select></label>
+        <label>Coding rate<select id="rf_cr"><option value="5">4/5</option><option value="6">4/6</option><option value="7">4/7</option><option value="8">4/8</option></select></label>
+        <label>Sync word (hex)<input id="rf_sync" maxlength="2" placeholder="4D"></label>
+        <label>Preamble (symbols)<input id="rf_pre" type="number" min="6" max="255"></label>
+      </div>
+      <button id="rf_apply" class="primary">Apply radio settings</button>
+      <button id="rf_reload">Reload from node</button>
+    </fieldset>
+  </div>
+
+  <div class="cfgcard"><h3>Battery</h3>
+    <div class="kv" style="margin:.3rem 0">reading: <b id="batt_val">—</b></div>
+    <fieldset id="battfs" disabled>
+      <button id="batt_read">Read now</button>
+      <input id="batt_mv" type="number" step="0.01" placeholder="measured V or mV (4.02 / 4020)" style="width:13rem">
+      <button id="batt_cal">Calibrate</button>
+    </fieldset>
+  </div>
+
+  <div class="cfgcard"><h3>BLE pairing</h3>
+    <div class="pinbox">BLE pairing PIN <span class="pin" id="pin">— — — — — —</span> <span class="kv" id="advstate">BLE: off</span></div>
+    <fieldset id="blefs" disabled>
+      <button id="enable">Enable BLE</button><button id="disable">Disable BLE</button>
+      <button id="newpin">New random PIN</button>
+      <input id="setpin" placeholder="6 digits" maxlength="6" inputmode="numeric" style="width:6rem">
+      <button id="setbtn">Set PIN</button>
+    </fieldset>
+  </div>
+
+  <div class="cfgcard"><h3>Mobility</h3>
+    <div class="kv" style="margin:.3rem 0">this node is: <b id="mob_val">—</b></div>
+    <fieldset id="mobfs" disabled>
+      <button id="mob_fixed">Fixed</button><button id="mob_mobile">📍 Mobile</button>
+      <span class="kv">controller keeps a mobile node's TX-power headroom (never trims it)</span>
+    </fieldset>
+  </div>
+
+  <div class="cfgcard"><h3>Console</h3>
+    <div class="row"><input id="cfgCmd" placeholder="console command (info, rf show, help…)" style="flex:1" disabled><button id="cfgSend" disabled>Send</button></div>
+    <div id="cfgLog" class="termlog"></div>
+  </div>
+</div></div>
+
+<!-- ===================== FLASH (serial DFU to a locally-attached node) ===================== -->
+<div id="flashview" class="tabview hide"><div class="col">
+  <div class="cfgcard"><h3>Flash firmware (nRF52 serial DFU)</h3>
+    <div class="kv">Flashes a node plugged into THIS machine over Web Serial. The node reboots into its bootloader (1200-baud touch) and re-enumerates — pick the bootloader port when prompted.</div>
+    <div class="grid" style="margin-top:.6rem">
+      <label>Board<select id="fl_board">
+        <option value="rak">RAK4631 (nRF52840 + SX1262)</option>
+        <option value="xiao">XIAO nRF52840 + Wio-SX1262</option>
+        <option value="promicro">Pro Micro nRF52840 ("faketec")</option>
+        <option value="t1000">SenseCAP T1000-E (LR1110)</option>
+        <option value="heltec-v4">Heltec V4 (ESP32 — flash via CLI)</option>
+      </select></label>
+      <label>Firmware base URL<input id="fl_base" style="width:100%" placeholder="(GitHub latest release)"></label>
+    </div>
+    <div class="row" style="margin:.5rem 0">
+      <label class="chk"><input id="fl_isboot" type="checkbox"> node is already in bootloader (skip the touch)</label>
+    </div>
+    <div class="row"><button id="fl_go" class="primary">Connect &amp; flash →</button>
+      <span id="fl_state" class="pill">idle</span>
+      <button id="fl_uf2" class="hide">Download UF2 (drag-drop fallback)</button></div>
+    <div class="bar" style="height:8px;margin:.6rem 0"><span id="fl_prog" style="width:0"></span></div>
+    <div id="fl_log" class="termlog"></div>
+  </div>
+</div></div>
+
 <div id="toast"></div>
+<script src="/nrf-dfu.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
@@ -80,9 +191,11 @@ async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST'
 function uiPost(b){ fetch('/api/ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
 function setAlias(id,name){ if(name)aliases[id]=name; else delete aliases[id]; uiPost({type:'alias',id,name}); }
 
-function setView(v){ view=v; $('#tab-dash').classList.toggle('on',v==='dash'); $('#tab-map').classList.toggle('on',v==='map');
-  $('#grid').classList.toggle('hide',v!=='dash'); $('#mapview').classList.toggle('hide',v!=='map'); if(state) render(state); }
-$('#tab-dash').onclick=()=>setView('dash'); $('#tab-map').onclick=()=>setView('map');
+const VIEWS={dash:'#grid', map:'#mapview', config:'#configview', flash:'#flashview'};
+function setView(v){ view=v;
+  for(const k in VIEWS){ $('#tab-'+k).classList.toggle('on',k===v); $(VIEWS[k]).classList.toggle('hide',k!==v); }
+  if(state) render(state); }
+for(const k in VIEWS) $('#tab-'+k).onclick=()=>setView(k);
 
 function editingNodes(){ const a=document.activeElement; return a&&a.tagName==='INPUT'&&$('#nodelist').contains(a); }
 
@@ -250,11 +363,105 @@ function render(st){
   $('#gw').textContent=gateway?nm(gateway):'—'; $('#count').textContent=(st.snapshot?.nodes?.length||0)+' nodes';
   $('#key').textContent=hasKey?'key '+(st.pub||'').slice(0,12)+'…':'⚠ no key (read-only)';
   $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';
-  if(view==='map'){ renderMap(st); } else { renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
+  if(view==='map'){ renderMap(st); } else if(view==='dash'){ renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
 }
 async function tick(){ try{ const r=await fetch('/api/state'); if(r.ok) render(await r.json()); }catch(e){} if(Date.now()-lastOk>6000)$('#stale').textContent='● controller not responding'; }
 $('#consend').onclick=()=>{ const v=$('#conline').value.trim(); if(v){api('raw',{line:v});$('#conline').value='';} };
 $('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').click(); });
+// ===================== CONFIGURE: direct Web Serial / BLE to a local node =====================
+// Ported from web/manage.html. This talks to a node plugged into THIS machine, not the mesh.
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e', NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e', NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+let cfgPort=null, cfgWriter=null, cfgBleDev=null, cfgReader=null, cfgSendRaw=null, cfgRxbuf='', loadedRf=null;
+function clog(m){ const l=$('#cfgLog'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-300).join('\n'); l.scrollTop=l.scrollHeight; }
+function cfgFeed(t){ cfgRxbuf+=t; let i; while((i=cfgRxbuf.indexOf('\n'))>=0){ cfgLine(cfgRxbuf.slice(0,i).replace(/\r$/,'')); cfgRxbuf=cfgRxbuf.slice(i+1); } }
+async function cfgSend(s){ if(cfgSendRaw) await cfgSendRaw(s+'\n'); else clog('not connected'); }
+function cfgEnable(on){ for(const f of ['#rffs','#battfs','#blefs','#mobfs']) $(f).disabled=!on;
+  $('#rf_pwr').disabled=!on; $('#cfgCmd').disabled=!on; $('#cfgSend').disabled=!on; }
+function cfgFillRf(r){ $('#rf_freq').value=(r.freq_hz/1e6).toFixed(3).replace(/\.?0+$/,'');
+  for(const o of $('#rf_bw').options){ if(Math.round(parseFloat(o.value)*1000)===r.bw_hz){ $('#rf_bw').value=o.value; break; } }
+  $('#rf_sf').value=String(r.sf); $('#rf_cr').value=String(r.cr); $('#rf_sync').value=r.sync.toString(16).toUpperCase().padStart(2,'0');
+  $('#rf_pre').value=String(r.preamble); $('#rf_pwr').value=String(r.power_dbm); $('#rf_pwr_val').textContent=r.power_dbm; }
+function cfgLine(line){ clog(line); let m;
+  if((m=line.match(/^fw[= ](\S+)(?:\s+built[= ](.+))?/))) $('#cfgFw').textContent=m[1]+(m[2]?' ('+m[2]+')':'');
+  if((m=line.match(/PIN=(\d{6})/))) $('#pin').textContent=m[1].split('').join(' ');
+  if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('#cfgNode').textContent=m[1].toUpperCase();
+  if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('#cfgNode').textContent=m[1].toUpperCase();
+  if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
+    $('#mob_val').textContent = m[1]==='on'?'📍 mobile (controller holds power)':'fixed (power optimised)';
+  if((m=line.match(/^batt raw=(\d+) mv=(\d+) pct=(\d+)/))) $('#batt_val').textContent=m[2]+' mV — '+m[3]+'%  (raw '+m[1]+')';
+  else if((m=line.match(/^batt raw=(\d+) UNCALIBRATED/))) $('#batt_val').textContent='raw '+m[1]+' — UNCALIBRATED';
+  else if((m=line.match(/^batt mv=(\d+) pct=(\d+)/))) $('#batt_val').textContent=m[1]+' mV — '+m[2]+'%';
+  if((m=line.match(/batt=(\d+)mV\/(\d+)%/))) $('#batt_val').textContent=m[1]+' mV — '+m[2]+'%';
+  if((m=line.match(/adv(?:ertising)?=([01])/))) $('#advstate').textContent='BLE: '+(m[1]==='1'?'ON — advertising as AgnLoRa-'+$('#cfgNode').textContent:'off');
+  if(line.startsWith('[rf]') && line.includes('(active)')){
+    const g=k=>{ const mm=line.match(new RegExp(k+'=(-?(?:0x)?[0-9A-Fa-f]+)')); return mm?mm[1]:null; };
+    const r={ freq_hz:+g('freq_hz'), bw_hz:+g('bw_hz'), sf:+g('sf'), cr:+g('cr'), power_dbm:+g('power_dbm'), sync:parseInt(g('sync'),16), preamble:+g('preamble') };
+    if(!isNaN(r.freq_hz)){ loadedRf=r; cfgFillRf(r); } } }
+function cfgMarkConnected(kind){ $('#cfgStatus').textContent='connected ('+kind+')'; $('#cfgStatus').className='ok'; cfgEnable(true);
+  clog('connected over '+kind+' — reading…');
+  setTimeout(()=>cfgSend('ble'),500); setTimeout(()=>cfgSend('rf show'),900);
+  setTimeout(()=>cfgSend('info'),1300); setTimeout(()=>cfgSend('mobile'),1600); }
+async function cfgReadLoop(){ cfgReader=cfgPort.readable.getReader();
+  try{ for(;;){ const {value,done}=await cfgReader.read(); if(done) break; cfgFeed(new TextDecoder().decode(value)); } }
+  catch(e){ clog('read end: '+e); } finally{ try{cfgReader.releaseLock();}catch(e){} cfgReader=null; } }
+async function cfgCloseUsb(){ try{ if(cfgReader) await cfgReader.cancel(); }catch(e){}
+  try{ cfgWriter&&cfgWriter.releaseLock(); }catch(e){} cfgWriter=null;
+  try{ cfgPort&&await cfgPort.close(); }catch(e){} cfgPort=null; cfgSendRaw=null; }
+async function cfgConnectUsb(){ if(!navigator.serial){ clog('Web Serial unavailable — use Chrome/Edge over localhost.'); return; }
+  try{ await cfgCloseUsb(); cfgPort=await navigator.serial.requestPort(); await cfgPort.open({baudRate:115200});
+    cfgWriter=cfgPort.writable.getWriter(); cfgSendRaw=async s=>cfgWriter.write(new TextEncoder().encode(s));
+    cfgReadLoop(); cfgMarkConnected('USB'); }catch(e){ clog('USB connect error: '+e); } }
+async function cfgConnectBle(){ if(!navigator.bluetooth){ clog('Web Bluetooth unavailable — use Chrome/Edge.'); return; }
+  try{ cfgBleDev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'AgnLoRa-'}],optionalServices:[NUS]});
+    cfgBleDev.addEventListener('gattserverdisconnected',()=>{ $('#cfgStatus').textContent='disconnected'; $('#cfgStatus').className='bad'; cfgSendRaw=null; clog('BLE disconnected'); });
+    const srv=await (await cfgBleDev.gatt.connect()).getPrimaryService(NUS);
+    const rx=await srv.getCharacteristic(NUS_RX), tx=await srv.getCharacteristic(NUS_TX);
+    await tx.startNotifications(); tx.addEventListener('characteristicvaluechanged',e=>cfgFeed(new TextDecoder().decode(e.target.value)));
+    cfgSendRaw=async s=>{ const d=new TextEncoder().encode(s); for(let i=0;i<d.length;i+=20) await rx.writeValueWithoutResponse(d.slice(i,i+20)); };
+    cfgMarkConnected('BLE'); }catch(e){ clog('BLE connect error: '+e+' (node paired + BLE enabled?)'); } }
+function cfgFormRf(){ return { freq_hz:Math.round(parseFloat($('#rf_freq').value)*1e6), bw_hz:Math.round(parseFloat($('#rf_bw').value)*1000),
+  sf:+$('#rf_sf').value, cr:+$('#rf_cr').value, power_dbm:+$('#rf_pwr').value, sync:parseInt($('#rf_sync').value||'0',16), preamble:+$('#rf_pre').value }; }
+async function cfgApplyRf(){ const r=cfgFormRf(); if(isNaN(r.freq_hz)||isNaN(r.sync)){ clog('radio: bad freq/sync'); return; }
+  const crit=!loadedRf||r.freq_hz!==loadedRf.freq_hz||r.bw_hz!==loadedRf.bw_hz||r.sf!==loadedRf.sf;
+  if(crit && !confirm('This changes a network-wide PHY parameter (frequency/bandwidth/SF).\n\nThis node will RETUNE and stop hearing any node still on the old settings.\n\nApply anyway?')) return;
+  const hex=r.sync.toString(16).toUpperCase().padStart(2,'0');
+  await cfgSend('rf freq '+r.freq_hz); await cfgSend('rf bw '+$('#rf_bw').value); await cfgSend('rf sf '+r.sf); await cfgSend('rf cr '+r.cr);
+  await cfgSend('rf power '+r.power_dbm); await cfgSend('rf sync 0x'+hex); await cfgSend('rf preamble '+r.preamble); await cfgSend('rf apply');
+  setTimeout(()=>cfgSend('rf show'),400); clog('radio: staged + apply sent'+(crit?' (RETUNE)':' (power/minor)')); }
+$('#cfgUsb').onclick=cfgConnectUsb; $('#cfgBle').onclick=cfgConnectBle;
+$('#cfgSend').onclick=()=>{ const v=$('#cfgCmd').value.trim(); if(v){ cfgSend(v); $('#cfgCmd').value=''; } };
+$('#cfgCmd').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#cfgSend').onclick(); });
+$('#enable').onclick=()=>cfgSend('ble on'); $('#disable').onclick=()=>cfgSend('ble off');
+$('#newpin').onclick=()=>cfgSend('blepin random'); $('#setbtn').onclick=()=>{ const p=$('#setpin').value; if(/^\d{6}$/.test(p)) cfgSend('blepin '+p); else clog('PIN must be 6 digits'); };
+$('#rf_pwr').oninput=()=>$('#rf_pwr_val').textContent=$('#rf_pwr').value;
+$('#rf_apply').onclick=cfgApplyRf; $('#rf_reload').onclick=()=>cfgSend('rf show');
+$('#batt_read').onclick=()=>cfgSend('batt');
+$('#batt_cal').onclick=()=>{ let v=+$('#batt_mv').value; if(v>0&&v<10) v=Math.round(v*1000);
+  if(v>=1000&&v<=6000) cfgSend('batt cal '+v); else clog('enter measured battery (volts e.g. 4.02, or mV e.g. 4020)'); };
+$('#mob_fixed').onclick=()=>cfgSend('mobile off'); $('#mob_mobile').onclick=()=>cfgSend('mobile on');
+window.addEventListener('pagehide',()=>cfgCloseUsb());
+
+// ===================== FLASH: nRF52 serial DFU to a local node (ported from hub.js) =====================
+const FL_BOARD={rak:'agn-rak',xiao:'agn-xiao',promicro:'agn-promicro',t1000:'agn-t1000'}, FL_ESP={'heltec-v4':'agn-heltec-v4'};
+const FL_RELEASE='https://github.com/thatSFguy/agnostic-lora-net/releases/latest/download/';
+function flog(m){ const l=$('#fl_log'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-200).join('\n'); l.scrollTop=l.scrollHeight; }
+function flState(t,cls){ const e=$('#fl_state'); e.textContent=t; e.className='pill'+(cls?' '+cls:''); }
+function flBase(){ return $('#fl_base').value.trim()||FL_RELEASE; }
+async function flFlash(){ const board=$('#fl_board').value;
+  if(board in FL_ESP){ flState('ESP32 — flash via CLI'); flog('Heltec V4 is ESP32-S3; the nRF52 serial-DFU path does not apply.'); flog('Flash it with:  pio run -e heltec_v4 -t upload'); return; }
+  $('#fl_uf2').classList.remove('hide'); $('#fl_uf2').onclick=()=>window.open(flBase()+FL_BOARD[board]+'.uf2','_blank'); $('#fl_prog').style.width='0';
+  if(typeof DFU==='undefined'){ flState('DFU module not loaded','bad'); return; }
+  if(!navigator.serial){ flState('Web Serial unsupported — use Chrome/Edge','bad'); return; }
+  let dfu;
+  try{ flState('fetching firmware…'); const r=await fetch(flBase()+FL_BOARD[board]+'.dfu.json'); if(!r.ok) throw new Error('HTTP '+r.status); dfu=await r.json(); flog('firmware: '+dfu.app_size+' B'); }
+  catch(e){ flState('fetch failed','bad'); flog('Could not fetch firmware ('+e+'). Use the UF2 fallback.'); return; }
+  let port; try{ port=await navigator.serial.requestPort(); }catch(e){ flState('cancelled'); return; }
+  try{ if(!$('#fl_isboot').checked){ flState('rebooting to bootloader…'); flog('1200-baud touch'); await DFU.touch(port); }
+    flState('flashing…'); await DFU.flash(port,dfu,{ log:flog, prog:p=>{ $('#fl_prog').style.width=p+'%'; flState('flashing… '+p+'%'); } });
+    flState('flashed ✓','ok'); flog('done — node rebooting'); }
+  catch(e){ flog('DFU error: '+e); flState('failed — use UF2 fallback','bad'); } }
+$('#fl_go').onclick=flFlash;
+
 tick(); setInterval(tick,1500);
 </script>
 </body>
