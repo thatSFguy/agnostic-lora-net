@@ -7,6 +7,7 @@ package topo
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +26,9 @@ type Node struct {
 	Blocked   bool      `json:"blocked,omitempty"` // blocked by the gateway/controller
 	Mobile    bool      `json:"mobile,omitempty"`  // node self-reports it moves (telemetry mob=1)
 	BLE       *bool     `json:"ble,omitempty"`     // node-reported BLE/BT advertising state (nil = unknown until firmware reports ble=)
+	Pub       string    `json:"pub,omitempty"`     // verified node pubkey hex (upper), from a gateway-verified announce
+	Verified  bool      `json:"verified"`          // gateway reported sig=ok for this node's announce
+	ACL       string    `json:"acl,omitempty"`     // "allowed"|"pending"|"unverified" (derived; "" = no ACL configured)
 	LastSeen  time.Time `json:"last_seen"`
 }
 
@@ -52,10 +56,62 @@ type Graph struct {
 	// the gateway after its `node …` info header, or a remote node after its `[status] N`
 	// telemetry reply. Lets one parser shape build real node<->node links, not just spokes.
 	reportOwner string
+
+	// allow is the membership check (keystore.IsAllowed) injected by the server. nil means
+	// no ACL is configured (replay / no controller key) → the graph is permissive: every
+	// verified-or-not node is manageable, exactly as before identity landed. When set, only
+	// verified-and-allowed nodes are managed/commandable (self-certifying-identity §6).
+	allow func(pubHex string) bool
 }
 
 func New() *Graph {
 	return &Graph{nodes: map[string]*Node{}, links: map[string]*Link{}}
+}
+
+// SetAllowFunc installs the membership check (typically keystore.IsAllowed). Call once at
+// startup before commands/optimisation run. nil leaves the graph permissive (no ACL).
+func (g *Graph) SetAllowFunc(f func(pubHex string) bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.allow = f
+}
+
+// aclLabel derives a node's membership label. "" when no ACL is configured. Caller holds mu.
+func (g *Graph) aclLabel(n *Node) string {
+	if g.allow == nil {
+		return ""
+	}
+	switch {
+	case n.Verified && g.allow(n.Pub):
+		return "allowed"
+	case n.Verified:
+		return "pending"
+	default:
+		return "unverified"
+	}
+}
+
+// manageable reports whether the controller may tune/command this node. Permissive without
+// an ACL; otherwise requires verified + allowlisted. Caller holds mu.
+func (g *Graph) manageable(n *Node) bool {
+	return g.allow == nil || (n.Verified && g.allow(n.Pub))
+}
+
+// CommandAllowed reports whether a signed command may be issued to node id, returning the
+// resolved pubkey for messaging. Permissive when no ACL is configured; otherwise the target
+// must be verified and on the allowlist. The HTTP/CLI command paths gate on this before
+// advancing the replay counter (so a rejected command never burns a counter).
+func (g *Graph) CommandAllowed(id string) (pub string, ok bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.allow == nil {
+		return "", true
+	}
+	n := g.nodes[strings.ToUpper(id)]
+	if n == nil || !n.Verified {
+		return "", false
+	}
+	return n.Pub, g.allow(n.Pub)
 }
 
 func (g *Graph) node(id string) *Node {
@@ -169,6 +225,18 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 			n.BattMv, n.BattPct = v, e.Num["pct"]
 		}
 
+	case ingest.KindIdentity:
+		// Gateway-verified id↔pubkey binding. We trust the gateway's verdict (Model A): it ran
+		// ed25519_check + id==hash(pubkey) before printing sig=ok. ACL is derived at Snapshot
+		// time from the live allowlist, so an approve/revoke reflects without a fresh announce.
+		n := g.node(e.ID)
+		n.LastSeen = at
+		if e.SigOK && e.Pub != "" {
+			n.Pub, n.Verified = e.Pub, true
+		} else {
+			n.Verified = false
+		}
+
 	case ingest.KindNodeBatt:
 		n := g.node(e.ID)
 		n.LastSeen = at
@@ -222,6 +290,9 @@ func (g *Graph) ManagedIDs() []string {
 		if id == g.Gateway || n.IsGateway {
 			continue
 		}
+		if !g.manageable(n) { // ACL configured & node not verified+allowed → don't poll/tune it
+			continue
+		}
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -241,7 +312,9 @@ func (g *Graph) Snapshot() Snapshot {
 	defer g.mu.RUnlock()
 	s := Snapshot{Gateway: g.Gateway, BeaconSec: g.BeaconSec}
 	for _, n := range g.nodes {
-		s.Nodes = append(s.Nodes, *n)
+		c := *n
+		c.ACL = g.aclLabel(n) // derive fresh so approve/revoke reflects without a new announce
+		s.Nodes = append(s.Nodes, c)
 	}
 	for _, l := range g.links {
 		s.Links = append(s.Links, *l)

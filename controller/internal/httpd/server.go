@@ -11,15 +11,18 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"agnostic-lora-net/controller/internal/commander"
 	"agnostic-lora-net/controller/internal/keystore"
 	"agnostic-lora-net/controller/internal/policy"
+	"agnostic-lora-net/controller/internal/sign"
 	"agnostic-lora-net/controller/internal/topo"
 )
 
@@ -101,6 +104,7 @@ func backupJSON(ks *keystore.Store, aliases map[string]string, positions map[str
 		ControllerCounter uint32               `json:"controllerCounter"`
 		Aliases           map[string]string    `json:"aliases"`
 		Positions         map[string][]float64 `json:"positions"`
+		Allowlist         map[string]int64     `json:"allowlist,omitempty"`
 	}{
 		Warning:           "agnostic-lora-net controller backup — contains the network WRITE key. Keep it secret; re-importing seeds a fresh replay counter.",
 		Exported:          time.Now().UTC().Format(time.RFC3339),
@@ -108,6 +112,7 @@ func backupJSON(ks *keystore.Store, aliases map[string]string, positions map[str
 		ControllerCounter: ctr,
 		Aliases:           aliases,
 		Positions:         positions,
+		Allowlist:         ks.Allowlist(),
 	}, "", "  ")
 }
 
@@ -128,6 +133,15 @@ func parseBackupUI(b []byte) (map[string]string, map[string][]float64) {
 	return bk.Aliases, bk.Positions
 }
 
+// parseBackupAllowlist pulls the membership allowlist out of a backup JSON (absent -> nil).
+func parseBackupAllowlist(b []byte) map[string]int64 {
+	var bk struct {
+		Allowlist map[string]int64 `json:"allowlist"`
+	}
+	_ = json.Unmarshal(b, &bk)
+	return bk.Allowlist
+}
+
 // RestoreToDisk restores a backup (key + aliases + positions) into keydir on a fresh
 // install — for the CLI `-restore`, no running server. Returns the restored pubkey.
 func RestoreToDisk(keydir, uiPath string, backup []byte) (string, error) {
@@ -137,12 +151,17 @@ func RestoreToDisk(keydir, uiPath string, backup []byte) (string, error) {
 	}
 	al, pos := parseBackupUI(backup)
 	loadUI(uiPath).replaceAll(al, pos)
+	if acl := parseBackupAllowlist(backup); len(acl) > 0 {
+		_ = ks.LoadAllowlist(acl)
+	}
 	return ks.PubHex(), nil
 }
 
-func hexID(s string) uint32 {
-	v, _ := strconv.ParseUint(s, 16, 32)
-	return uint32(v)
+// hexID decodes a 32-hex node id (v2). A malformed id yields the zero NodeID, which the
+// commander builders reject (ErrBadTarget) — so a bad id surfaces as an error, never a command.
+func hexID(s string) sign.NodeID {
+	id, _ := sign.ParseNodeID(s)
+	return id
 }
 
 // issue signs (where needed) and sends one command. `raw` console lines need only the
@@ -167,6 +186,20 @@ func (s *Server) issue(c cmdReq) (string, error) {
 	if s.ks == nil {
 		return "", errNoKey
 	}
+	// Membership gate: refuse to command a node that isn't a verified, approved member —
+	// BEFORE advancing the replay counter, so a rejected command never burns a counter.
+	// Permissive when no ACL is configured (graph.CommandAllowed returns ok). `raw` and the
+	// gateway-direct BLE path above are operator-direct and intentionally skip this gate.
+	if pub, ok := s.graph.CommandAllowed(c.Node); !ok {
+		if pub == "" {
+			return "", fmt.Errorf("node %s is not a verified member (no valid signed announce seen yet)", c.Node)
+		}
+		short := pub
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		return "", fmt.Errorf("node %s is verified but not approved — approve pubkey %s… in the Security tab", c.Node, short)
+	}
 	ctr, err := s.ks.Next()
 	if err != nil {
 		return "", err
@@ -185,6 +218,13 @@ func (s *Server) issue(c cmdReq) (string, error) {
 		// Remote node: signed CTRL_BLE (gateway was handled directly above). Needs the
 		// firmware CTRL_BLE handler (todo #2 firmware half) to take effect on-device.
 		line, err = commander.Ble(hexID(c.Node), c.On, ctr, s.ks.Priv())
+	case "retune":
+		// Signed CTRL_RETUNE: change the node's PHY over the air (PHY only — power stays under
+		// CTRL_POWER). The node validates + acks on the new PHY; recovery is the BLE-rescue flow.
+		line, err = commander.Retune(hexID(c.Node), sign.RetuneCfg{
+			FreqHz: uint32(c.FreqHz), BwHz: uint32(c.BwHz),
+			SF: uint8(c.SF), CR: uint8(c.CR), Sync: uint8(c.Sync), Preamble: uint16(c.Preamble),
+		}, ctr, s.ks.Priv())
 	default:
 		return "", errors.New("unknown action " + c.Action)
 	}
@@ -200,8 +240,15 @@ type cmdReq struct {
 	Victim string `json:"victim"` // hex id (block/unblock)
 	Dbm    int    `json:"dbm"`
 	Ttl    int    `json:"ttl"`
-	On     bool   `json:"on"`   // ble: true = enable advertising, false = disable
-	Line   string `json:"line"` // raw console line
+	On     bool   `json:"on"` // ble: true = enable advertising, false = disable
+	// retune: the PHY to apply (PHY only — TX power stays under power/confirm).
+	FreqHz   int    `json:"freq_hz"`
+	BwHz     int    `json:"bw_hz"`
+	SF       int    `json:"sf"`
+	CR       int    `json:"cr"`
+	Sync     int    `json:"sync"`
+	Preamble int    `json:"preamble"`
+	Line     string `json:"line"` // raw console line
 }
 
 type stateJSON struct {
@@ -212,6 +259,7 @@ type stateJSON struct {
 	Positions map[string][]float64 `json:"positions"`
 	HasKey    bool                 `json:"has_key"`
 	Pub       string               `json:"pub,omitempty"`
+	Allowlist map[string]int64     `json:"allowlist,omitempty"` // approved pubkeyHex → approval unix-secs
 }
 
 type uiReq struct {
@@ -276,7 +324,9 @@ func (s *Server) Handler() http.Handler {
 		}
 		al, pos := parseBackupUI(b)
 		s.ui.replaceAll(al, pos)
-		writeJSON(w, map[string]any{"ok": true, "msg": "restored — controller key " + s.ks.PubHex()[:12] + "… + " + strconv.Itoa(len(al)) + " aliases"})
+		acl := parseBackupAllowlist(b)
+		_ = s.ks.LoadAllowlist(acl) // restore membership too (nil -> empties it)
+		writeJSON(w, map[string]any{"ok": true, "msg": "restored — controller key " + s.ks.PubHex()[:12] + "… + " + strconv.Itoa(len(al)) + " aliases + " + strconv.Itoa(len(acl)) + " approved nodes"})
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -290,6 +340,7 @@ func (s *Server) Handler() http.Handler {
 			Aliases: al, Positions: pos, HasKey: s.ks != nil}
 		if s.ks != nil {
 			st.Pub = s.ks.PubHex()
+			st.Allowlist = s.ks.Allowlist()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
@@ -332,7 +383,50 @@ func (s *Server) Handler() http.Handler {
 		}
 		writeJSON(w, map[string]any{"ok": true, "msg": msg})
 	})
+	mux.HandleFunc("/api/acl", func(w http.ResponseWriter, r *http.Request) {
+		// Membership management: approve/revoke a node pubkey on the allowlist. Localhost-only
+		// by the SECURITY note (it mutates the WRITE-key's policy). Approval is keyed on the
+		// verified pubkey, not the node id, so spoofing an id can't grant membership.
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.ks == nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": errNoKey.Error()})
+			return
+		}
+		var a aclReq
+		if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "bad json: " + err.Error()})
+			return
+		}
+		pub := strings.ToUpper(strings.TrimSpace(a.Pub))
+		if len(pub) != 64 {
+			writeJSON(w, map[string]any{"ok": false, "msg": "pub must be a 64-hex node pubkey"})
+			return
+		}
+		var err error
+		switch a.Action {
+		case "approve":
+			err = s.ks.Approve(pub, time.Now().Unix())
+		case "revoke":
+			err = s.ks.Revoke(pub)
+		default:
+			writeJSON(w, map[string]any{"ok": false, "msg": "unknown acl action " + a.Action})
+			return
+		}
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "msg": a.Action + " " + pub[:12] + "…"})
+	})
 	return mux
+}
+
+type aclReq struct {
+	Action string `json:"action"` // approve | revoke
+	Pub    string `json:"pub"`    // node pubkey hex (64 chars)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

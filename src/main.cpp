@@ -27,6 +27,9 @@
 #include "control.h"
 #include "sar.h"
 #include "locator_dir.h"
+#include "node_table.h"            // nid_from_pubkey for the self-certifying node id
+#include "monocypher.h"            // node keypair: keygen + (later) announce signing
+#include "monocypher-ed25519.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
 // compiled in (radio config is not BLE-specific). fs_compat.h gives us the same
 // InternalFS/File surface on nRF52 (Adafruit LittleFS) and ESP32 (core LittleFS).
@@ -123,7 +126,7 @@ static uint32_t  sar_len      = 0;              // bytes loaded
 static uint32_t  sar_crc      = 0;              // expected CRC of the load
 static uint16_t  sar_xfer_id  = 0;              // increments per transfer
 static bool      sar_tx_active = false;
-static node_id_t sar_tx_dst   = 0;
+static node_id_t sar_tx_dst   = {};
 static uint16_t  sar_tx_idx   = 0;
 static uint16_t  sar_tx_count = 0;
 static mesh::SarReassembler sar_rx;             // inbound reassembly
@@ -142,7 +145,7 @@ static bool      trace_beacons = true;
 // (`kiss <node8hex>`, persisted — the node boots straight into TNC mode). BLE keeps
 // the normal console/tunnel, so a KISS node stays manageable over BLE.
 static bool      kiss_mode = false;
-static node_id_t kiss_dst  = 0;
+static node_id_t kiss_dst  = {};
 static mesh::KissDecoder kiss_rx;
 static const char     KISS_PATH[]  = "/agn_kiss.cfg";
 static const uint32_t KISS_MAGIC   = 0x534B4741;   // "AGKS"
@@ -285,7 +288,7 @@ static void kiss_cfg_load() {
     f.close();
     if (n == (int)sizeof(rec) && rec.magic == KISS_MAGIC) {
         kiss_dst = rec.dst;
-        kiss_mode = rec.enabled && rec.dst != 0;
+        kiss_mode = rec.enabled && !rec.dst.is_zero();
     }
 }
 static void kiss_cfg_save() {
@@ -454,7 +457,7 @@ static void ble_evt_drain() {
 
 // Generate a fresh 6-digit pairing PIN.
 static void ble_gen_pin() {
-    randomSeed((uint32_t)micros() ^ my_id ^ (uint32_t)(millis() << 3));
+    randomSeed((uint32_t)micros() ^ nid_fold(my_id) ^ (uint32_t)(millis() << 3));
     snprintf(ble_pin, sizeof(ble_pin), "%06lu", (unsigned long)random(0, 1000000));
 }
 
@@ -524,7 +527,8 @@ static void ble_setup() {
     Bluefruit.begin();                              // start the SoftDevice (before radio.begin)
     Bluefruit.autoConnLed(false);                   // no blinking conn LED — solar power budget
     Bluefruit.setTxPower(4);
-    char nm[24]; snprintf(nm, sizeof(nm), "AgnLoRa-%08lX", (unsigned long)my_id);
+    char nm[48]; char idhx[33]; nid_hex(my_id, idhx);
+    snprintf(nm, sizeof(nm), "AgnLoRa-%s", idhx);
     Bluefruit.setName(nm);
     Bluefruit.Security.setPIN(ble_pin);             // static passkey -> phone must enter it
     Bluefruit.Periph.setConnectCallback(ble_connect_cb);
@@ -590,7 +594,7 @@ static uint16_t  sar_resend_n   = 0;
 static uint16_t  sar_resend_idx = 0;
 static bool      sar_resend_active = false;
 // missing-fragment request (receiver side)
-static node_id_t sar_rx_sender   = 0;
+static node_id_t sar_rx_sender   = {};
 static uint32_t  sar_rx_last_ms  = 0;
 static uint16_t  sar_rx_last_xfer = 0xFFFF;
 static uint8_t   sar_nack_rounds = 0;
@@ -603,7 +607,7 @@ static const uint8_t  SAR_MAX_NACK_ROUNDS = 6;
 static uint32_t sar_nack_jit = 0;
 static void sar_nack_rearm() {
     sar_rx_last_ms = millis();
-    sar_nack_jit   = (my_id & 0x3FF) + (uint32_t)random(0, 2000);
+    sar_nack_jit   = (nid_fold(my_id) & 0x3FF) + (uint32_t)random(0, 2000);
 }
 // While mid-receiving a transfer, our own initial-pass TX is deferred (half-duplex:
 // talking means not hearing the fragments we're missing) — but only while the inbound
@@ -678,22 +682,86 @@ static void net_cfg_save() {
     if (f.open(NET_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
 }
 
-// Provisional 4-byte node ID. The real ID is derived from the node's public key
-// (self-certifying, §3); until crypto lands we use a per-chip stable value from
-// the nRF52 FICR DEVICEID, or an explicit build-time override (-DAGN_NODE_ID=...).
-static node_id_t derive_node_id() {
-    if ((uint32_t)AGN_NODE_ID != 0u) return (node_id_t)AGN_NODE_ID;
-#if defined(NRF_FICR)
-    return (node_id_t)(NRF_FICR->DEVICEID[0] ^ NRF_FICR->DEVICEID[1]);
+// --- Node identity keypair (self-certifying id; docs/node-keygen-signed-announce-impl.md) ---
+// Each node mints its OWN Ed25519 keypair once, at first boot, and persists it. The node id
+// is blake2b(pubkey)[0:16] — self-certifying and collision-free. The secret key never leaves
+// the node; it signs the node's own announces (see signed-announce work). This is independent
+// of the *controller* pubkey (ctrl_pubkey), which authenticates inbound commands.
+static const char     KEY_PATH[]  = "/agn_key.cfg";
+static const uint32_t KEY_MAGIC   = 0x59454B41;   // "AKEY"
+struct __attribute__((packed)) KeyStore { uint32_t magic; uint8_t sk[64]; uint8_t pk[32]; };
+static uint8_t node_sk[64];
+static uint8_t node_pk[32];
+static bool    node_have_key = false;
+
+// Fill `buf` with hardware-TRNG entropy. A node with no real RNG must NOT mint a guessable
+// key, so an unsupported target fails to BUILD rather than silently fall back to a PRNG.
+// Called before the SoftDevice is enabled, so direct NRF_RNG access is safe (no sd_rand).
+static void entropy_fill(uint8_t* buf, size_t n) {
+#if defined(NRF_RNG)
+    NRF_RNG->CONFIG = RNG_CONFIG_DERCEN_Msk;          // bias correction on
+    NRF_RNG->TASKS_START = 1;
+    for (size_t i = 0; i < n; i++) {
+        NRF_RNG->EVENTS_VALRDY = 0;
+        while (!NRF_RNG->EVENTS_VALRDY) { /* wait for a byte */ }
+        buf[i] = (uint8_t)NRF_RNG->VALUE;
+    }
+    NRF_RNG->TASKS_STOP = 1;
 #elif defined(ESP32)
-    // No FICR on ESP32; fold the 48-bit factory eFuse MAC down to 32 bits (same
-    // "stable per-chip, non-authenticating" role as the nRF52 DEVICEID, §3).
-    uint64_t mac = ESP.getEfuseMac();
-    return (node_id_t)((uint32_t)mac ^ (uint32_t)(mac >> 32));
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t r = esp_random();
+        size_t c = (n - i >= 4) ? 4 : (n - i);
+        memcpy(buf + i, &r, c);
+    }
 #else
-    return 0xDEADBEEFu;  // non-nRF/ESP target (e.g. host tooling) — fixed placeholder
+    #error "no hardware TRNG for this target — node keygen would be insecure"
 #endif
 }
+
+static bool key_cfg_load() {
+    InternalFS.begin();
+    KeyStore rec; File f(InternalFS);
+    if (!f.open(KEY_PATH, FILE_O_READ)) return false;
+    int n = f.read((void*)&rec, sizeof(rec)); f.close();
+    if (n == (int)sizeof(rec) && rec.magic == KEY_MAGIC) {
+        memcpy(node_sk, rec.sk, 64); memcpy(node_pk, rec.pk, 32);
+        return true;
+    }
+    return false;
+}
+
+static void key_cfg_save() {
+    KeyStore want; want.magic = KEY_MAGIC;
+    memcpy(want.sk, node_sk, 64); memcpy(want.pk, node_pk, 32);
+    InternalFS.remove(KEY_PATH);
+    File f(InternalFS);
+    if (f.open(KEY_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+// Load the persisted keypair, or mint one on first boot, and return the self-certifying
+// node id. A build-time -DAGN_NODE_ID=... still overrides for bench/debug (no keypair: the
+// node can't sign its announces, but routing works).
+static node_id_t node_key_init() {
+    if ((uint32_t)AGN_NODE_ID != 0u) return nid_from_u32((uint32_t)AGN_NODE_ID);
+    if (!key_cfg_load()) {
+        uint8_t seed[32];
+        entropy_fill(seed, sizeof(seed));
+        crypto_ed25519_key_pair(node_sk, node_pk, seed);   // consumes (wipes) seed
+        key_cfg_save();
+    }
+    node_have_key = true;
+    return mesh::nid_from_pubkey(node_pk);
+}
+
+// --- Signed announces (docs/node-keygen-signed-announce-impl.md §5/6) -----------
+// A node signs its own announce (announce_sign/announce_verify in the codec) so peers —
+// and, via the gateway console, the controller — can verify the id<->pubkey binding:
+// id == blake2b(pubkey) AND a valid Ed25519 sig over the announce body.
+//
+// Identity directory: each id is verified ONCE (verify-once — the crypto runs only when a
+// new/unverified id is first heard, not on every beacon). Separate from the routing tables
+// (which still key on full NodeId); this is the firmware-local verified set.
+static mesh::NodeTable id_table;
 
 static uint32_t schedule_next_beacon() {
     return millis() + beacon_period_ms() + (uint32_t)random(0, beacon_jitter_ms());
@@ -809,18 +877,28 @@ static void send_beacon() {
     // Piggyback this node's announce so distance-vector + reverse-link quality
     // propagate (Agent.md §6).
     uint16_t ann_len = 0;
+    // Reserve room for the identity tail when we can sign, so the announce never
+    // crowds it out (graceful: fewer routes per beacon, never an overflow).
+    const uint16_t ann_cap = (uint16_t)(sizeof(frame) - base
+                                        - (node_have_key ? mesh::ANNOUNCE_SIG_TAIL : 0));
     if (router) {
         mesh::Announce ann;
         router->build_announce(ann);
-        ann_len = mesh::announce_serialize(ann, frame + base, (uint16_t)(sizeof(frame) - base));
+        ann_len = mesh::announce_serialize(ann, frame + base, ann_cap);
     }
-    const uint16_t frame_len = base + ann_len;
+    uint16_t frame_len = base + ann_len;
+
+    // Append [pubkey][sig] — the self-certifying identity tail (signed announce).
+    if (node_have_key) {
+        mesh::announce_sign(frame + base, ann_len, node_pk, node_sk, frame + frame_len);
+        frame_len += mesh::ANNOUNCE_SIG_TAIL;
+    }
 
     if (txq_push(frame, frame_len)) {
         if (trace_beacons) {
-            char hdr[72];
-            snprintf(hdr, sizeof(hdr), "[TX] beacon seq=%u from %08lX  +announce %uB",
-                     (unsigned)beacon_seq, (unsigned long)my_id, (unsigned)ann_len);
+            char hdr[88]; char myidhx[33]; nid_hex(my_id, myidhx);
+            snprintf(hdr, sizeof(hdr), "[TX] beacon seq=%u from %s  +announce %uB",
+                     (unsigned)beacon_seq, myidhx, (unsigned)ann_len);
             Serial.println(hdr);
         }
         beacon_seq++;
@@ -838,10 +916,10 @@ static void send_data_bytes(node_id_t dst, const uint8_t* payload, uint16_t plen
     // Directed link addressing: stamp the next hop's alias so only it acts. The
     // next hop toward dst is a direct neighbour; if its alias isn't negotiated yet,
     // fall back to broadcast so the frame still propagates during convergence.
-    node_id_t   nh = router ? router->next_hop(dst) : 0;
-    link_addr_t na = (router && nh) ? router->link_addr_for(nh) : LINK_ADDR_NONE;
+    node_id_t   nh = router ? router->next_hop(dst) : node_id_t{};
+    link_addr_t na = (router && !nh.is_zero()) ? router->link_addr_for(nh) : LINK_ADDR_NONE;
     LinkHeader  link;
-    link.prev_hop = (router && nh) ? router->my_alias_for(nh) : LINK_ADDR_NONE;
+    link.prev_hop = (router && !nh.is_zero()) ? router->my_alias_for(nh) : LINK_ADDR_NONE;
     link.next_hop = (na != LINK_ADDR_NONE) ? na : LINK_ADDR_BROADCAST;
     link.link_seq = (uint8_t)data_seq;
     link.flags    = 0;
@@ -861,9 +939,9 @@ static void send_data_bytes(node_id_t dst, const uint8_t* payload, uint16_t plen
     if (forwarder) forwarder->mark_seen(my_id, data_seq);  // ignore our own rebroadcast
 
     if (verbose) {
-        char hdr[88];
-        snprintf(hdr, sizeof(hdr), "[TX] data  id=%u -> %08lX  (next hop %08lX alias %u)",
-                 (unsigned)data_seq, (unsigned long)dst, (unsigned long)nh, (unsigned)link.next_hop);
+        char hdr[120]; char dsthx[33]; nid_hex(dst, dsthx); char nhhx[33]; nid_hex(nh, nhhx);
+        snprintf(hdr, sizeof(hdr), "[TX] data  id=%u -> %s  (next hop %s alias %u)",
+                 (unsigned)data_seq, dsthx, nhhx, (unsigned)link.next_hop);
         Serial.println(hdr);
     }
     tx_unicast(frame, HEADER_BYTES + plen, nh);   // ARQ-tracked when directed
@@ -974,10 +1052,10 @@ static void send_loc_unicast(node_id_t dst, const uint8_t* msg, uint16_t mlen,
                              PacketType pt = PKT_LOC) {
     uint8_t frame[1 + MAX_PAYLOAD];
     if (mlen > MAX_PAYLOAD - HEADER_BYTES) return;
-    node_id_t   nh = router ? router->next_hop(dst) : 0;
-    link_addr_t na = (router && nh) ? router->link_addr_for(nh) : LINK_ADDR_NONE;
+    node_id_t   nh = router ? router->next_hop(dst) : node_id_t{};
+    link_addr_t na = (router && !nh.is_zero()) ? router->link_addr_for(nh) : LINK_ADDR_NONE;
     LinkHeader link;
-    link.prev_hop = (router && nh) ? router->my_alias_for(nh) : LINK_ADDR_NONE;
+    link.prev_hop = (router && !nh.is_zero()) ? router->my_alias_for(nh) : LINK_ADDR_NONE;
     link.next_hop = (na != LINK_ADDR_NONE) ? na : LINK_ADDR_BROADCAST;
     link.link_seq = (uint8_t)loc_pktid; link.flags = 0;
     NetHeader net; net.ver_type = net_ver_type(pt); net.flags = 0; net.ttl = DEFAULT_TTL;
@@ -993,7 +1071,7 @@ static void send_loc_unicast(node_id_t dst, const uint8_t* msg, uint16_t mlen,
 // Register an opaque id as served by THIS node: cache locally + flood a REGISTER.
 static void loc_register(const uint8_t* id, uint8_t id_len) {
     if (id_len == 0 || id_len > mesh::LOC_ID_MAX) return;
-    if (loc_epoch == 0) { loc_epoch = (uint16_t)((uint32_t)micros() ^ my_id); if (!loc_epoch) loc_epoch = 1; }
+    if (loc_epoch == 0) { loc_epoch = (uint16_t)((uint32_t)micros() ^ nid_fold(my_id)); if (!loc_epoch) loc_epoch = 1; }
     uint16_t seq = ++loc_seq;
     int slot = -1;
     for (int i = 0; i < 4; i++) {
@@ -1010,10 +1088,11 @@ static void loc_register(const uint8_t* id, uint8_t id_len) {
 // Resolve an id to its serving node. Cache hit -> answer `sink` now; miss -> flood a
 // QUERY (the REPLY prints `loc <id> <node>` asynchronously via on_rx).
 static void loc_resolve(const uint8_t* id, uint8_t id_len, Print* sink) {
-    node_id_t loc = 0;
+    node_id_t loc = {};
     if (locdir.lookup(id, id_len, &loc, millis())) {
         char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(id, id_len, hx);
-        char line[80]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)loc);
+        char lochx[33]; nid_hex(loc, lochx);
+        char line[96]; snprintf(line, sizeof(line), "loc %s %s", hx, lochx);
         sink->println(line);
         return;
     }
@@ -1030,7 +1109,8 @@ static void loc_dirdump(Print* sink) {
     char line[96]; snprintf(line, sizeof(line), "[dir] %u binding(s):", (unsigned)n); sink->println(line);
     for (uint16_t i = 0; i < n; i++) {
         char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(v[i].id, v[i].id_len, hx);
-        snprintf(line, sizeof(line), "  %s -> %08lX  ttl=%us", hx, (unsigned long)v[i].loc, (unsigned)v[i].ttl_s);
+        char lochx[33]; nid_hex(v[i].loc, lochx);
+        snprintf(line, sizeof(line), "  %s -> %s  ttl=%us", hx, lochx, (unsigned)v[i].ttl_s);
         sink->println(line);
     }
 }
@@ -1042,7 +1122,8 @@ static void loc_dirdump(Print* sink) {
 // when one is connected AND always to USB (the desktop interface parses the same line).
 static void loc_push_notify(const uint8_t* id, uint8_t id_len, node_id_t loc) {
     char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(id, id_len, hx);
-    char line[64]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)loc);
+    char lochx[33]; nid_hex(loc, lochx);
+    char line[96]; snprintf(line, sizeof(line), "loc %s %s", hx, lochx);
 #ifdef AGN_BLE
     if (ble_connected) bleuart.println(line);
 #endif
@@ -1067,7 +1148,8 @@ static void loc_dump_to_client() {
             if (r.used && r.id_len == v[i].id_len && memcmp(r.id, v[i].id, r.id_len) == 0) { own = true; break; }
         if (own) continue;
         char hx[2 * mesh::LOC_ID_MAX + 1]; loc_id_hex(v[i].id, v[i].id_len, hx);
-        char line[64]; snprintf(line, sizeof(line), "loc %s %08lX", hx, (unsigned long)v[i].loc);
+        char lochx[33]; nid_hex(v[i].loc, lochx);
+        char line[96]; snprintf(line, sizeof(line), "loc %s %s", hx, lochx);
         bleuart.println(line);
     }
 #endif
@@ -1122,7 +1204,7 @@ static void ctrl_blk_set(node_id_t victim, uint8_t ttl_min) {
 
 static void ctrl_blk_clear(node_id_t victim) {
     for (uint8_t i = 0; i < mesh::MAX_BLOCKED; i++)
-        if (ctrl_blk[i].victim == victim) { ctrl_blk[i].victim = 0; ctrl_blk[i].expiry_ms = 0; }
+        if (ctrl_blk[i].victim == victim) { ctrl_blk[i].victim = node_id_t{}; ctrl_blk[i].expiry_ms = 0; }
 }
 
 // Called each loop: drop blocks whose TTL elapsed (the dead-man firing).
@@ -1132,11 +1214,10 @@ static void ctrl_blk_sweep() {
     for (uint8_t i = 0; i < mesh::MAX_BLOCKED; i++) {
         if (ctrl_blk[i].expiry_ms && (int32_t)(now - ctrl_blk[i].expiry_ms) >= 0) {
             router->unblock(ctrl_blk[i].victim);
-            char l[64];
-            snprintf(l, sizeof(l), "[ctrl] BLOCK ttl expired -> unblocked %08lX",
-                     (unsigned long)ctrl_blk[i].victim);
+            char l[80]; char vichx[33]; nid_hex(ctrl_blk[i].victim, vichx);
+            snprintf(l, sizeof(l), "[ctrl] BLOCK ttl expired -> unblocked %s", vichx);
             g_con->println(l);
-            ctrl_blk[i].victim = 0; ctrl_blk[i].expiry_ms = 0;
+            ctrl_blk[i].victim = node_id_t{}; ctrl_blk[i].expiry_ms = 0;
         }
     }
 }
@@ -1237,24 +1318,72 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
         // Block the recipient's link to the victim (m.aux), TTL-bounded so a stale block
         // can never permanently partition the mesh. Renewed by re-BLOCK; cleared by
         // UNBLOCK or expiry (ctrl_blk_sweep). provisional=1 advertises the auto-revert.
-        if (router && m.aux && m.aux != my_id) {
+        if (router && !m.aux.is_zero() && m.aux != my_id) {
             uint8_t ttl = m.arg > 0 ? (uint8_t)m.arg : CTRL_BLOCK_TTL_DEFAULT_MIN;
             if (ttl > CTRL_BLOCK_TTL_MAX_MIN) ttl = CTRL_BLOCK_TTL_MAX_MIN;
             bool ok = router->block(m.aux);
             if (ok) ctrl_blk_set(m.aux, ttl);
-            snprintf(line, sizeof(line), "[ctrl] BLOCK %08lX %s (ttl %um, counter=%lu)",
-                     (unsigned long)m.aux, ok ? "applied" : "FAILED(full)",
+            char auxhx[33]; nid_hex(m.aux, auxhx);
+            snprintf(line, sizeof(line), "[ctrl] BLOCK %s %s (ttl %um, counter=%lu)",
+                     auxhx, ok ? "applied" : "FAILED(full)",
                      (unsigned)ttl, (unsigned long)m.counter);
             Serial.println(line);
             ack(ok ? 1 : 0, 1);
         }
     } else if (m.cmd == mesh::CTRL_UNBLOCK) {
-        if (router && m.aux) {
+        if (router && !m.aux.is_zero()) {
             router->unblock(m.aux);
             ctrl_blk_clear(m.aux);
-            snprintf(line, sizeof(line), "[ctrl] UNBLOCK %08lX (counter=%lu)",
-                     (unsigned long)m.aux, (unsigned long)m.counter);
+            char auxhx[33]; nid_hex(m.aux, auxhx);
+            snprintf(line, sizeof(line), "[ctrl] UNBLOCK %s (counter=%lu)",
+                     auxhx, (unsigned long)m.counter);
             Serial.println(line);
+            ack(0, 0);
+        }
+    } else if (m.cmd == mesh::CTRL_BLE) {
+        // Remote BLE toggle (arg: 1=on, 0=off). NOT a dead-man: the firmware just obeys;
+        // the "only disable after proof-of-config" gate lives in the controller (todo.md).
+        // Replicates the local `ble on/off` console path verbatim (incl. flash persist).
+#ifdef AGN_BLE
+        bool on = (m.arg != 0);
+        if (on) ble_start_adv(); else ble_stop_adv();
+        cfg_save();
+        snprintf(line, sizeof(line), "[ctrl] BLE %s (counter=%lu)",
+                 on ? "on" : "off", (unsigned long)m.counter);
+        Serial.println(line);
+        ack(on ? 1 : 0, 0);
+#endif
+        // (targets without AGN_BLE have no SoftDevice — command is a no-op, no ack)
+    } else if (m.cmd == mesh::CTRL_RETUNE) {
+        // Remote PHY retune (docs/remote-config.md §3). Atomic: unpack the signed PHY blob,
+        // apply via the same seam the console uses, persist. PHY only — power stays under
+        // CTRL_POWER. NO firmware auto-revert: a failed retune is recovered by the operational
+        // BLE-rescue + reconcile + field-fix (§4), the gate the controller drives.
+        const uint8_t* p = m.cfg;
+        RadioCfg c = radio.config();          // start from current so power_dbm is preserved
+        c.freq_hz  = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        c.bw_hz    = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+        c.sf       = p[8];
+        c.cr       = p[9];
+        c.sync     = p[10];
+        c.preamble = (uint16_t)(p[11] | (p[12] << 8));
+        char l[128];
+        // Validate critical params — a malformed (but validly signed) retune must not brick the radio.
+        if (!(c.sf >= 5 && c.sf <= 12 && c.cr >= 5 && c.cr <= 8 && c.freq_hz && c.bw_hz)) {
+            snprintf(l, sizeof(l), "[ctrl] RETUNE rejected: bad PHY (sf=%u cr=%u freq=%lu bw=%lu)",
+                     (unsigned)c.sf, (unsigned)c.cr, (unsigned long)c.freq_hz, (unsigned long)c.bw_hz);
+            Serial.println(l);
+            ack(0, 0);
+        } else if (radio.apply_config(c) == RADIOLIB_ERR_NONE) {
+            rf_save(radio.config());          // persist on success (save-if-dirty)
+            // The radio is now on the NEW PHY — this log + the ack ride it (the reconcile signal).
+            snprintf(l, sizeof(l), "[ctrl] RETUNE applied freq=%lu bw=%lu sf=%u cr=%u sync=0x%02X pre=%u (counter=%lu)",
+                     (unsigned long)c.freq_hz, (unsigned long)c.bw_hz, (unsigned)c.sf, (unsigned)c.cr,
+                     (unsigned)c.sync, (unsigned)c.preamble, (unsigned long)m.counter);
+            Serial.println(l);
+            ack(1, 0);
+        } else {
+            Serial.println("[ctrl] RETUNE apply FAILED (radio error) — PHY unchanged");
             ack(0, 0);
         }
     }
@@ -1299,8 +1428,9 @@ static void on_control_rx(const uint8_t* buf, uint16_t len, const NetHeader& net
     if (d.action == mesh::Action::DELIVER) {
         mesh::CtrlAck a;
         if (mesh::ctrl_parse_ack(pay, plen, &a)) {
-            snprintf(line, sizeof(line), "[ctrl] ack %08lX cmd=%u applied=%d provisional=%u counter=%lu",
-                     (unsigned long)a.origin, (unsigned)a.cmd, (int)a.applied,
+            char orighx[33]; nid_hex(a.origin, orighx);
+            snprintf(line, sizeof(line), "[ctrl] ack %s cmd=%u applied=%d provisional=%u counter=%lu",
+                     orighx, (unsigned)a.cmd, (int)a.applied,
                      (unsigned)a.provisional, (unsigned long)a.counter);
 #ifdef AGN_BLE
             if (ble_connected) bleuart.println(line);
@@ -1329,27 +1459,29 @@ static void telem_flood_batt() {
 }
 
 static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
-    char line[104];
+    char line[128]; char orighx[33]; nid_hex(origin, orighx);
     unsigned mob = (m.flags & mesh::TELEM_FLAG_MOBILE) ? 1u : 0u;
+    unsigned ble = (m.flags & mesh::TELEM_FLAG_BLE) ? 1u : 0u;
     if (m.pct_plus1)
-        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u",
-                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf,
-                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob);
+        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u ble=%u",
+                 orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf,
+                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob, ble);
     else
-        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u",
-                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob);
+        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u ble=%u",
+                 orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob, ble);
 #ifdef AGN_BLE
     if (ble_connected) bleuart.println(line);
 #endif
     Serial.println(line);
     for (uint8_t i = 0; i < m.n_nbrs; i++) {
+        char nbrhx[33]; nid_hex(m.nbrs[i].id, nbrhx);
         if (m.nbrs[i].rssi != 0)   // measured RF present -> controller treats it as a real SNR link
-            snprintf(line, sizeof(line), "  nbr %08lX q_rx=%u q_tx=%u rssi=%d snr=%d",
-                     (unsigned long)m.nbrs[i].id, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx,
+            snprintf(line, sizeof(line), "  nbr %s q_rx=%u q_tx=%u rssi=%d snr=%d",
+                     nbrhx, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx,
                      (int)m.nbrs[i].rssi, (int)m.nbrs[i].snr);
         else
-            snprintf(line, sizeof(line), "  nbr %08lX q_rx=%u q_tx=%u",
-                     (unsigned long)m.nbrs[i].id, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx);
+            snprintf(line, sizeof(line), "  nbr %s q_rx=%u q_tx=%u",
+                     nbrhx, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx);
 #ifdef AGN_BLE
         if (ble_connected) bleuart.println(line);
 #endif
@@ -1394,9 +1526,12 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                         nn++;
                     }
                 }
-                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 9];
+                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 21];  // nbr entry is 21 B (16-byte id)
                 uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
                 uint8_t flags = node_mobile ? mesh::TELEM_FLAG_MOBILE : 0;
+#ifdef AGN_BLE
+                if (ble_advertising) flags |= mesh::TELEM_FLAG_BLE;   // proof-of-config: report advertising state
+#endif
                 uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
                         (uint16_t)((millis() - boot_ms) / 60000u),
                         radio.config().power_dbm, radio.config().sf, flags, AGN_FW_VERSION,
@@ -1493,12 +1628,42 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     if (router && type == PKT_BEACON) {
         mesh::Announce ann;              // cleared to empty by default
         const uint16_t base = HEADER_BYTES + sizeof(BeaconPayload);
+        bool ann_ok = false;
         if (len > base) {
             // Untrusted radio data — deserialize is bounds-checked and just leaves
             // `ann` empty if the bytes are malformed.
-            mesh::announce_deserialize(buf + base, (uint16_t)(len - base), ann);
+            ann_ok = mesh::announce_deserialize(buf + base, (uint16_t)(len - base), ann);
         }
         router->on_beacon(net.src, q, ann, millis());
+
+        // Verify the sender's self-certifying identity ONCE (verify-once): the announce
+        // body is followed by [pubkey][sig]. Confirm id == blake2b(pubkey) and the sig,
+        // then emit the gateway->controller binding line. Crypto runs only on first hear.
+        if (ann_ok) {
+            const uint8_t* region = buf + base;
+            uint16_t region_len = (uint16_t)(len - base);
+            uint16_t bl = mesh::announce_body_len(ann);
+            if (region_len >= (uint16_t)(bl + mesh::ANNOUNCE_SIG_TAIL)) {
+                node_ref r = id_table.intern(net.src, millis());
+                if (!id_table.verified(r)) {       // verify-once: crypto only on first hear
+                    uint8_t pub[32];
+                    bool ok = mesh::announce_verify(region, bl, region + bl, pub)
+                              && (mesh::nid_from_pubkey(pub) == net.src);
+                    char idhx[33]; nid_hex(net.src, idhx);
+                    if (ok) {
+                        id_table.mark_verified(r);
+                        char pubhx[65]; loc_id_hex(pub, 32, pubhx);
+                        char l[120];
+                        snprintf(l, sizeof(l), "[ann] %s pub=%s sig=ok", idhx, pubhx);
+                        g_con->println(l);
+                    } else {
+                        char l[64];
+                        snprintf(l, sizeof(l), "[ann] %s sig=bad", idhx);
+                        g_con->println(l);
+                    }
+                }
+            }
+        }
         uint8_t bpp = 0;                 // battery byte from the beacon payload
         if (len >= HEADER_BYTES + (uint16_t)sizeof(BeaconPayload)) {
             BeaconPayload bp;
@@ -1518,10 +1683,10 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
     // corrupted ARQ state and collapsed 3-node throughput ~10x).
     LinkHeader lh;
     memcpy(&lh, buf, sizeof(lh));
-    node_id_t link_from = 0;
+    node_id_t link_from = {};
     if (lh.next_hop != LINK_ADDR_BROADCAST) {
-        link_from = router ? router->link_sender(lh.next_hop, lh.prev_hop) : 0;
-        if (!link_from) return;          // someone else's link — not ours to act on
+        link_from = router ? router->link_sender(lh.next_hop, lh.prev_hop) : node_id_t{};
+        if (link_from.is_zero()) return; // someone else's link — not ours to act on
     }
 
     // A link-layer ACK addressed to us: clear the matching pending frame, done.
@@ -1532,7 +1697,7 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
 
     // A directed frame that requested an ACK: acknowledge the previous hop now —
     // even for a duplicate, so the sender's retransmit stops.
-    if ((lh.flags & LINK_FLAG_ACK_REQ) && link_from) {
+    if ((lh.flags & LINK_FLAG_ACK_REQ) && !link_from.is_zero()) {
         send_ack(link_from, lh.link_seq);
     }
 
@@ -1589,8 +1754,9 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                         memcpy(sar_resend, req, nr * sizeof(uint16_t));
                         sar_resend_n = nr; sar_resend_idx = 0; sar_resend_active = true;
                         sar_tx_dst = net.src;
-                        snprintf(line, sizeof(line), "[SAR] NACK from %08lX: resending %u frag(s)",
-                                 (unsigned long)net.src, (unsigned)nr);
+                        char srchx[33]; nid_hex(net.src, srchx);
+                        snprintf(line, sizeof(line), "[SAR] NACK from %s: resending %u frag(s)",
+                                 srchx, (unsigned)nr);
                         Serial.println(line);
                     }
                     break;
@@ -1635,8 +1801,9 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                     uint16_t n = plen < sizeof(payload) - 1 ? plen : (uint16_t)(sizeof(payload) - 1);
                     memcpy(payload, pay, n);
                     payload[n] = '\0';
-                    snprintf(line, sizeof(line), "[RX] DATA delivered from %08lX id=%u: \"%s\"",
-                             (unsigned long)net.src, (unsigned)net.pkt_id, payload);
+                    char srchx[33]; nid_hex(net.src, srchx);
+                    snprintf(line, sizeof(line), "[RX] DATA delivered from %s id=%u: \"%s\"",
+                             srchx, (unsigned)net.pkt_id, payload);
                     Serial.println(line);
                 }
                 break;
@@ -1653,11 +1820,14 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                 }
                 forward_frame(buf, len, d.next_hop, d.out_ttl);
                 sar_quiet_until = millis() + 8000;   // relay stays quiet while data flows through it
-                char line[96];
+                char line[128];
+                char srchx[33]; nid_hex(net.src, srchx);
+                char dsthx[33]; nid_hex(net.dst, dsthx);
+                char nhhx[33];  nid_hex(d.next_hop, nhhx);
                 snprintf(line, sizeof(line),
-                         "[FWD] %08lX->%08lX id=%u via %08lX ttl=%u",
-                         (unsigned long)net.src, (unsigned long)net.dst,
-                         (unsigned)net.pkt_id, (unsigned long)d.next_hop, (unsigned)d.out_ttl);
+                         "[FWD] %s->%s id=%u via %s ttl=%u",
+                         srchx, dsthx,
+                         (unsigned)net.pkt_id, nhhx, (unsigned)d.out_ttl);
                 Serial.println(line);
                 break;
             }
@@ -1675,17 +1845,17 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
 
     // --- BEACON / other: log link metrics + table sizes ---
     if (!trace_beacons && type == PKT_BEACON) return;
-    char line[96];
+    char line[112]; char srchx[33]; nid_hex(net.src, srchx);
     if (type == PKT_BEACON && len >= HEADER_BYTES + (uint16_t)sizeof(BeaconPayload)) {
         BeaconPayload pl;
         memcpy(&pl, buf + HEADER_BYTES, sizeof(pl));
         snprintf(line, sizeof(line),
-                 "[RX] beacon  src=%08lX seq=%u up=%us  rssi=",
-                 (unsigned long)net.src, (unsigned)net.pkt_id, (unsigned)pl.uptime_s);
+                 "[RX] beacon  src=%s seq=%u up=%us  rssi=",
+                 srchx, (unsigned)net.pkt_id, (unsigned)pl.uptime_s);
     } else {
         snprintf(line, sizeof(line),
-                 "[RX] type=%u  src=%08lX seq=%u len=%u  rssi=",
-                 (unsigned)type, (unsigned long)net.src, (unsigned)net.pkt_id,
+                 "[RX] type=%u  src=%s seq=%u len=%u  rssi=",
+                 (unsigned)type, srchx, (unsigned)net.pkt_id,
                  (unsigned)len);
     }
 
@@ -1802,25 +1972,27 @@ static void tunnel_rx_frame(const uint8_t* f, uint16_t n) {
 // ingested payload — without it a SAR-sized send is fully invisible (fragments are
 // verbose=false) and a healthy transfer is indistinguishable from a silent drop.
 static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen) {
-    char m[56];
+    char m[80];
     if (dst == my_id) {
         // Self-addressed: deliver straight back to the attached host, never the radio.
         // Transmitting would just echo into the own-packet filter — a silent black hole
         // that burned real airtime when an app mistook its own registration for a peer
         // and unicast announces/proofs at its own node on repeat (BR-5).
         tunnel_emit(my_id, payload, plen);
-        snprintf(m, sizeof(m), "[tun] >%08lX %uB loopback", (unsigned long)dst, (unsigned)plen);
+        char dsthx[33]; nid_hex(dst, dsthx);
+        snprintf(m, sizeof(m), "[tun] >%s %uB loopback", dsthx, (unsigned)plen);
         Serial.println(m);
         return;
     }
+    char dsthx[33]; nid_hex(dst, dsthx);
     if (plen <= MAX_PAYLOAD - HEADER_BYTES) {
         send_data_bytes(dst, payload, plen, false);   // fits one frame
-        snprintf(m, sizeof(m), "[tun] >%08lX %uB 1-frame", (unsigned long)dst, (unsigned)plen);
+        snprintf(m, sizeof(m), "[tun] >%s %uB 1-frame", dsthx, (unsigned)plen);
     } else if (!sar_tx_active && !sar_resend_active && tq_count == 0 && plen <= mesh::SAR_MAX_FILE) {
         sar_start(dst, payload, plen);                 // larger: segment over the mesh
-        snprintf(m, sizeof(m), "[tun] >%08lX %uB sar=%u", (unsigned long)dst, (unsigned)plen,
+        snprintf(m, sizeof(m), "[tun] >%s %uB sar=%u", dsthx, (unsigned)plen,
                  (unsigned)sar_tx_count);
-    } else if (tq_count < TQ_CAP && plen <= TUN_HOST_MAX) {
+    } else if (tq_count < TQ_CAP && plen <= TUN_HOST_MAX) {  // dsthx in scope
         // An identical payload already airing or queued is an app-layer retry of a
         // packet we haven't delivered yet — a second copy would only double airtime
         // (the original's delivery proof satisfies the retry: same packet, same hash).
@@ -1831,7 +2003,7 @@ static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen) {
             dup = q.dst == dst && q.len == plen && memcmp(q.buf, payload, plen) == 0;
         }
         if (dup) {
-            snprintf(m, sizeof(m), "[tun] >%08lX %uB dup-drop", (unsigned long)dst, (unsigned)plen);
+            snprintf(m, sizeof(m), "[tun] >%s %uB dup-drop", dsthx, (unsigned)plen);
         } else {
             // big packet while a transfer is busy — hold it; tun_queue_tick starts it
             // after the active transfer (and its NACK window) ends
@@ -1839,11 +2011,11 @@ static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen) {
             tq[tail].dst = dst; tq[tail].len = plen;
             memcpy(tq[tail].buf, payload, plen);
             tq_count++;
-            snprintf(m, sizeof(m), "[tun] >%08lX %uB queued=%u", (unsigned long)dst, (unsigned)plen,
+            snprintf(m, sizeof(m), "[tun] >%s %uB queued=%u", dsthx, (unsigned)plen,
                      (unsigned)tq_count);
         }
     } else {
-        snprintf(m, sizeof(m), "[tun] >%08lX %uB DROPPED qfull", (unsigned long)dst, (unsigned)plen);
+        snprintf(m, sizeof(m), "[tun] >%s %uB DROPPED qfull", dsthx, (unsigned)plen);
     }
     Serial.println(m);
 }
@@ -1852,7 +2024,7 @@ static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen) {
 // The local control surface. `send` originates app data; `block`/`unblock` drive
 // the Tier-1 link-block setting at runtime. When the controller lands (Phase 4),
 // the same Router calls are invoked by signed control packets instead of typed in.
-static node_id_t parse_id(const char* s) { return (node_id_t)strtoul(s, nullptr, 16); }
+static node_id_t parse_id(const char* s) { return nid_from_u32((uint32_t)strtoul(s, nullptr, 16)); }
 
 static int hexnyb(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -1913,8 +2085,8 @@ static void tun_queue_tick() {
     if (sar_rx_busy()) return;   // don't claim the slot while an inbound transfer needs the air
     TunPending& p = tq[tq_head];
     sar_start(p.dst, p.buf, p.len);
-    char m[56];
-    snprintf(m, sizeof(m), "[tun] >%08lX %uB sar=%u dequeued", (unsigned long)p.dst,
+    char m[80]; char dsthx[33]; nid_hex(p.dst, dsthx);
+    snprintf(m, sizeof(m), "[tun] >%s %uB sar=%u dequeued", dsthx,
              (unsigned)p.len, (unsigned)sar_tx_count);
     Serial.println(m);
     tq_head = (uint8_t)((tq_head + 1) % TQ_CAP); tq_count--;
@@ -1945,20 +2117,23 @@ static void sar_rx_tick() {
 static void print_info() {
     if (!router) return;
     Print& Serial = *g_con;   // route to the active console sink (USB or BLE)
-    char l[100];
+    char l[160];
     snprintf(l, sizeof(l), "fw %s  built %s", AGN_FW_VERSION, FW_BUILD);
     Serial.println(l);
-    snprintf(l, sizeof(l), "node %08lX  neighbors=%u routes=%u blocked=%u  mobile=%s",
-             (unsigned long)my_id, (unsigned)router->neighbors().count(),
+    char myidhx[33]; nid_hex(my_id, myidhx);
+    snprintf(l, sizeof(l), "node %s  neighbors=%u routes=%u blocked=%u  mobile=%s",
+             myidhx, (unsigned)router->neighbors().count(),
              (unsigned)router->routes().count(), (unsigned)router->blocked_count(),
              node_mobile ? "on" : "off");
     Serial.println(l);
     // Authoritative block list (always printed, even when empty) so the map can sync
     // exactly which links this node is blocking. MAX_BLOCKED (8) ids fit one line.
     {
-        char b[100]; int o = snprintf(b, sizeof(b), "[blocked]");
-        for (uint8_t i = 0; i < router->blocked_count() && o < (int)sizeof(b) - 10; i++)
-            o += snprintf(b + o, sizeof(b) - o, " %08lX", (unsigned long)router->blocked_at(i));
+        char b[300]; int o = snprintf(b, sizeof(b), "[blocked]");
+        for (uint8_t i = 0; i < router->blocked_count() && o < (int)sizeof(b) - 34; i++) {
+            char bhx[33]; nid_hex(router->blocked_at(i), bhx);
+            o += snprintf(b + o, sizeof(b) - o, " %s", bhx);
+        }
         Serial.println(b);
     }
     snprintf(l, sizeof(l), "cad %s  busy=%lu forced=%lu",
@@ -1977,13 +2152,14 @@ static void print_info() {
         const mesh::Neighbor* n = nt.at(i);
         if (!n->used) continue;
         const AnnCache* ac = ann_cache_find(n->id);
+        char nidhx[33]; nid_hex(n->id, nidhx);
         if (ac) {
-            snprintf(l, sizeof(l), "  nbr %08lX  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u rssi=%d snr=%d",
-                     (unsigned long)n->id, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
+            snprintf(l, sizeof(l), "  nbr %s  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u rssi=%d snr=%d",
+                     nidhx, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
                      (unsigned)n->my_alias, (unsigned)n->their_alias, (int)ac->rssi, (int)ac->snr);
         } else {
-            snprintf(l, sizeof(l), "  nbr %08lX  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u",
-                     (unsigned long)n->id, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
+            snprintf(l, sizeof(l), "  nbr %s  q_rx=%d q_tx=%d (x100)  myAlias=%u theirAlias=%u",
+                     nidhx, (int)(n->q_rx * 100), (int)(n->q_tx * 100),
                      (unsigned)n->my_alias, (unsigned)n->their_alias);
         }
         Serial.println(l);
@@ -1992,8 +2168,9 @@ static void print_info() {
     for (uint8_t i = 0; i < mesh::MAX_ROUTES; i++) {
         const mesh::Route* r = rt.at(i);
         if (!r->used) continue;
-        snprintf(l, sizeof(l), "  route dst=%08lX via=%08lX cost=%d hops=%u",
-                 (unsigned long)r->dst, (unsigned long)r->next_hop,
+        char dsthx[33]; nid_hex(r->dst, dsthx); char viahx[33]; nid_hex(r->next_hop, viahx);
+        snprintf(l, sizeof(l), "  route dst=%s via=%s cost=%d hops=%u",
+                 dsthx, viahx,
                  (int)(r->cost * 16), (unsigned)r->hops);
         Serial.println(l);
     }
@@ -2013,11 +2190,11 @@ static void handle_command(char* line) {
         char* ids = strtok(nullptr, " ");
         if (!ids) { Serial.println("usage: block/unblock <hexid>"); return; }
         node_id_t id = parse_id(ids);
-        char l[48];
+        char l[64]; char idhx[33]; nid_hex(id, idhx);
         if (cmd[0] == 'b') { bool ok = router && router->block(id);
-            snprintf(l, sizeof(l), "block %08lX -> %s", (unsigned long)id, ok ? "ok" : "fail"); }
+            snprintf(l, sizeof(l), "block %s -> %s", idhx, ok ? "ok" : "fail"); }
         else { if (router) router->unblock(id);
-            snprintf(l, sizeof(l), "unblock %08lX", (unsigned long)id); }
+            snprintf(l, sizeof(l), "unblock %s", idhx); }
         Serial.println(l);
     } else if (!strcmp(cmd, "info")) {
         print_info();
@@ -2042,8 +2219,9 @@ static void handle_command(char* line) {
         if (!ids) { Serial.println("usage: xfer <hexid>"); return; }
         sar_tx_dst = parse_id(ids); sar_xfer_id++;
         sar_tx_count = mesh::sar_frag_count(sar_len); sar_tx_idx = 0; sar_tx_active = true;
-        char l[64]; snprintf(l, sizeof(l), "[SAR] xfer start -> %08lX len=%lu frags=%u",
-                             (unsigned long)sar_tx_dst, (unsigned long)sar_len, (unsigned)sar_tx_count);
+        char l[80]; char dsthx[33]; nid_hex(sar_tx_dst, dsthx);
+        snprintf(l, sizeof(l), "[SAR] xfer start -> %s len=%lu frags=%u",
+                             dsthx, (unsigned long)sar_len, (unsigned)sar_tx_count);
         Serial.println(l);
     } else if (!strcmp(cmd, "dump")) {              // print the received blob as hex
         if (!sar_rx.complete()) { Serial.println("[DUMP] no complete transfer"); return; }
@@ -2076,9 +2254,9 @@ static void handle_command(char* line) {
             if (ble_advertising) ble_start_adv();  // restart clean advertising
             Serial.println("BLE bonds cleared — re-pair from the phone now");
         }
-        char m[80];
-        snprintf(m, sizeof(m), "BLE name=AgnLoRa-%08lX advertising=%d connected=%d PIN=%s",
-                 (unsigned long)my_id, (int)ble_advertising, (int)ble_connected, ble_pin);
+        char m[96]; char myidhx[33]; nid_hex(my_id, myidhx);
+        snprintf(m, sizeof(m), "BLE name=AgnLoRa-%s advertising=%d connected=%d PIN=%s",
+                 myidhx, (int)ble_advertising, (int)ble_connected, ble_pin);
         Serial.println(m);
     } else if (!strcmp(cmd, "blepin")) {     // blepin | blepin random | blepin <6 digits>
         char* a = strtok(nullptr, " ");
@@ -2147,6 +2325,16 @@ static void handle_command(char* line) {
         }
         Serial.println(l);
 #endif
+    } else if (!strcmp(cmd, "pub")) {          // pub — this node's own pubkey + id (provisioning)
+        char idhx[33]; nid_hex(my_id, idhx);
+        if (node_have_key) {
+            char pubhx[65]; loc_id_hex(node_pk, 32, pubhx);
+            char l[120]; snprintf(l, sizeof(l), "pub %s  id=%s", pubhx, idhx);
+            Serial.println(l);
+        } else {
+            char l[64]; snprintf(l, sizeof(l), "pub (none — AGN_NODE_ID override)  id=%s", idhx);
+            Serial.println(l);
+        }
     } else if (!strcmp(cmd, "ctrlkey")) {      // ctrlkey <64hex>|clear — controller pubkey
         char* a = strtok(nullptr, " ");
         if (a && !strcmp(a, "clear")) {
@@ -2194,23 +2382,23 @@ static void handle_command(char* line) {
             Serial.println("KISS off (persisted)");
         } else if (a) {
             node_id_t d = parse_id(a);
-            if (!d) { Serial.println("usage: kiss <dest node id, 8 hex> | kiss off"); return; }
+            if (d.is_zero()) { Serial.println("usage: kiss <dest node id, 8 hex> | kiss off"); return; }
             kiss_dst = d; kiss_mode = true; kiss_cfg_save();
-            char l[96];
-            snprintf(l, sizeof(l), "KISS ON (persisted): USB is now a TNC, data -> %08lX.",
-                     (unsigned long)kiss_dst);
+            char l[96]; char dsthx[33]; nid_hex(kiss_dst, dsthx);
+            snprintf(l, sizeof(l), "KISS ON (persisted): USB is now a TNC, data -> %s.",
+                     dsthx);
             Serial.println(l);
             Serial.println("Exit: KISS cmd 0xFF (runtime), or `kiss off` over BLE console.");
         } else {
-            char l[80];
-            snprintf(l, sizeof(l), "kiss %s dst=%08lX", kiss_mode ? "on" : "off",
-                     (unsigned long)kiss_dst);
+            char l[80]; char dsthx[33]; nid_hex(kiss_dst, dsthx);
+            snprintf(l, sizeof(l), "kiss %s dst=%s", kiss_mode ? "on" : "off",
+                     dsthx);
             Serial.println(l);
         }
     } else if (!strcmp(cmd, "status")) {       // status <node8hex> — on-demand remote telemetry
         char* a = strtok(nullptr, " ");
-        node_id_t t = a ? parse_id(a) : 0;
-        if (!t) { Serial.println("usage: status <node id, 8 hex>"); return; }
+        node_id_t t = a ? parse_id(a) : node_id_t{};
+        if (t.is_zero()) { Serial.println("usage: status <node id, 8 hex>"); return; }
         if (t == my_id) { Serial.println("that's this node — see `info`"); return; }
         uint8_t q[8];
         uint16_t n = mesh::telem_build_query(t, q, sizeof(q));
@@ -2218,32 +2406,35 @@ static void handle_command(char* line) {
     } else if (!strcmp(cmd, "battdump")) {     // last-known battery for every node (cached)
         mesh::TelemCache::View v[mesh::TELEM_CACHE_CAP];
         uint16_t n = telem_cache.snapshot(v, mesh::TELEM_CACHE_CAP, millis());
-        char l[72];
+        char l[96];
         for (uint16_t i = 0; i < n; i++) {
+            char orighx[33]; nid_hex(v[i].origin, orighx);
             if (v[i].pct_plus1)
-                snprintf(l, sizeof(l), "[batt] %08lX mv=%u pct=%u age=%lus",
-                         (unsigned long)v[i].origin, (unsigned)v[i].mv,
+                snprintf(l, sizeof(l), "[batt] %s mv=%u pct=%u age=%lus",
+                         orighx, (unsigned)v[i].mv,
                          (unsigned)(v[i].pct_plus1 - 1), (unsigned long)(v[i].age_ms / 1000u));
             else
-                snprintf(l, sizeof(l), "[batt] %08lX UNKNOWN age=%lus",
-                         (unsigned long)v[i].origin, (unsigned long)(v[i].age_ms / 1000u));
+                snprintf(l, sizeof(l), "[batt] %s UNKNOWN age=%lus",
+                         orighx, (unsigned long)(v[i].age_ms / 1000u));
             Serial.println(l);
         }
         if (!n) Serial.println("[batt] no reports cached yet");
     } else if (!strcmp(cmd, "nbrdump")) {      // announce-derived 1-hop topology (map app)
-        char l[96];
+        char l[112];
         for (auto& c : ann_cache) {
             if (!c.used) continue;
+            char srchx[33]; nid_hex(c.src, srchx);
             if (c.batt_pct_plus1)
-                snprintf(l, sizeof(l), "[nbrs] %08lX age=%lus rssi=%d snr=%d batt=%u%%",
-                         (unsigned long)c.src, (unsigned long)((millis() - c.ms) / 1000u),
+                snprintf(l, sizeof(l), "[nbrs] %s age=%lus rssi=%d snr=%d batt=%u%%",
+                         srchx, (unsigned long)((millis() - c.ms) / 1000u),
                          (int)c.rssi, (int)c.snr, (unsigned)(c.batt_pct_plus1 - 1));
             else
-                snprintf(l, sizeof(l), "[nbrs] %08lX age=%lus rssi=%d snr=%d", (unsigned long)c.src,
+                snprintf(l, sizeof(l), "[nbrs] %s age=%lus rssi=%d snr=%d", srchx,
                          (unsigned long)((millis() - c.ms) / 1000u), (int)c.rssi, (int)c.snr);
             Serial.println(l);
             for (uint8_t i = 0; i < c.n; i++) {
-                snprintf(l, sizeof(l), "  nbr %08lX q_rx=%d alias=%u", (unsigned long)c.rep[i].id,
+                char rephx[33]; nid_hex(c.rep[i].id, rephx);
+                snprintf(l, sizeof(l), "  nbr %s q_rx=%d alias=%u", rephx,
                          (int)(c.rep[i].q * 100), (unsigned)c.rep[i].alias);
                 Serial.println(l);
             }
@@ -2306,8 +2497,9 @@ static void handle_command(char* line) {
             loc_register(id, (uint8_t)n);
             reg_burst_left = 2;
             reg_burst_ms   = millis() + 2000 + (uint32_t)random(0, 2000);
-            char l[56]; snprintf(l, sizeof(l), "registered %u-byte id at %08lX",
-                                 (unsigned)n, (unsigned long)my_id); Serial.println(l);
+            char l[72]; char myidhx[33]; nid_hex(my_id, myidhx);
+            snprintf(l, sizeof(l), "registered %u-byte id at %s",
+                                 (unsigned)n, myidhx); Serial.println(l);
         }
     } else if (!strcmp(cmd, "resolve")) {      // resolve <idhex> — find the serving node
         char* a = strtok(nullptr, " ");
@@ -2321,7 +2513,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | pub | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
@@ -2409,8 +2601,8 @@ void setup() {
     uint32_t t0 = millis();
     while (!Serial && (millis() - t0) < 2000) { /* wait for monitor, briefly */ }
 
-    my_id = derive_node_id();
-    randomSeed(my_id);
+    my_id = node_key_init();   // load or mint the node's Ed25519 keypair; id = blake2b(pubkey)
+    randomSeed(nid_fold(my_id));
     static mesh::Router router_inst(my_id);   // static storage, no heap
     router = &router_inst;
     static mesh::Forwarder fwd_inst(my_id, router_inst);
@@ -2418,9 +2610,9 @@ void setup() {
 
     Serial.println();
     Serial.println("=== LoRa Mesh Backbone — Phase 0 link prober ===");
-    char banner[80];
-    snprintf(banner, sizeof(banner), "fw=%s  built=%s  node=%08lX",
-             AGN_FW_VERSION, FW_BUILD, (unsigned long)my_id);
+    char banner[96]; char myidhx[33]; nid_hex(my_id, myidhx);
+    snprintf(banner, sizeof(banner), "fw=%s  built=%s  node=%s",
+             AGN_FW_VERSION, FW_BUILD, myidhx);
     Serial.println(banner);
     snprintf(banner, sizeof(banner), "PHY: %d.%03d MHz BW250 SF%d CR4/%d sync=0x%02X",
              (int)PHY_FREQ_MHZ, (int)((PHY_FREQ_MHZ - (int)PHY_FREQ_MHZ) * 1000 + 0.5f),
@@ -2490,9 +2682,10 @@ static void agn_loop_once() {
         next_batt_ms = millis() + 60000;
     }
     if ((int32_t)(millis() - next_hb_ms) >= 0) {
-        static char hb[112];  // static: keep the hot loop's stack frame minimal
-        int hn = snprintf(hb, sizeof(hb), "[hb] up=%lus  node=%08lX  nbrs=%u routes=%u txq=%u stk=%u",
-                 (unsigned long)((millis() - boot_ms) / 1000u), (unsigned long)my_id,
+        static char hb[140];  // static: keep the hot loop's stack frame minimal
+        char myidhx[33]; nid_hex(my_id, myidhx);
+        int hn = snprintf(hb, sizeof(hb), "[hb] up=%lus  node=%s  nbrs=%u routes=%u txq=%u stk=%u",
+                 (unsigned long)((millis() - boot_ms) / 1000u), myidhx,
                  (unsigned)(router ? router->neighbors().count() : 0),
                  (unsigned)(router ? router->routes().count() : 0),
                  (unsigned)txq_count,

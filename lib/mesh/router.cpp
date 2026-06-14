@@ -8,7 +8,7 @@ Router::Router(node_id_t my_id) : my_id_(my_id) {
 }
 
 bool Router::block(node_id_t id) {
-    if (id == 0 || id == my_id_) return false;
+    if (id.is_zero() || id == my_id_) return false;
     if (is_blocked(id)) return true;
     if (n_blocked_ >= MAX_BLOCKED) return false;
     blocked_[n_blocked_++] = id;

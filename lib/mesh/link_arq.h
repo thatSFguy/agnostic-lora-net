@@ -54,7 +54,7 @@ private:
     struct Pending {
         bool      used         = false;
         uint8_t   seq          = 0;
-        node_id_t next_hop     = 0;
+        node_id_t next_hop     = {};
         uint8_t   retries_left = 0;
         uint32_t  next_tx_ms   = 0;
         uint32_t  timeout_ms   = 0;

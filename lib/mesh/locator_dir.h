@@ -39,7 +39,7 @@ struct LocMsg {
     uint16_t  epoch    = 0;   // REGISTER / REPLY — per-boot nonce of the id owner
     uint16_t  seq      = 0;   // REGISTER / REPLY — monotonic within an epoch
     uint16_t  ttl_s    = 0;   // REGISTER / REPLY — binding lifetime, seconds
-    node_id_t loc      = 0;   // REPLY — serving node (locator)
+    node_id_t loc      = {};  // REPLY — serving node (locator)
     uint8_t   id_len   = 0;
     uint8_t   id[LOC_ID_MAX] = {};
 };
@@ -98,7 +98,7 @@ private:
         uint8_t   id[LOC_ID_MAX];
         uint8_t   id_len = 0;
         bool      used   = false;
-        node_id_t loc    = 0;
+        node_id_t loc    = {};
         uint16_t  epoch  = 0;
         uint16_t  seq    = 0;
         uint32_t  expiry_ms = 0;

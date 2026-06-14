@@ -34,7 +34,7 @@ relay node still routes/forwards correctly on the bench.
 
 ---
 
-## Remote BLE enable/disable for fixed nodes
+## Runtime BLE enable/disable for fixed nodes
 
 - [ ] Make BLE **off by default** on fixed nodes, enabled only for a provisioning/retune window,
       then disabled again — but gated on *positive confirmation*, never on a timer.
@@ -56,46 +56,17 @@ is the gate, not elapsed time.
 This is deliberately the **inverse** of the power-command dead-man rail: power fails *safe* by
 auto-reverting to loud; BLE must **not** fail to "off", because off = remotely unrecoverable.
 
-**What already exists (2026-06-14 audit).** The *node-side runtime toggle is already built* —
-`ble on` / `ble off` / `ble unbond` console commands (`src/main.cpp:2065`), **lazy SoftDevice
-bring-up** (`ble_setup()` only enables the stack on first `ble on`, so a node that never enables
-BLE pays zero runtime/RAM-at-init cost — `src/main.cpp:517`), and **enabled-state persisted to
-flash** and restored on reboot (`cfg_ble_enabled`, `src/main.cpp:2444`). This confirms the note's
-hunch: the SoftDevice is *not* torn down — it's gated via lazy init + advertising start/stop.
-So the original "runtime BLE start/stop" sub-part is **done**. What is missing is the **remote**
-path: the signed control plane has only four commands —
-`CTRL_POWER/CONFIRM/BLOCK/UNBLOCK` (`lib/mesh/control.h:32`), **no `CTRL_BLE`** — so the toggle is
-reachable today only over the **local serial console** (i.e. only on the tethered gateway).
-Remote nodes cannot be flipped over the air. The remaining work is therefore mostly *wiring the
-existing toggle to the signed control plane* + the confirmation gate, not new BLE plumbing.
-
-### Controller work (this is independently buildable now)
-
-- [x] Manual BLE on/off from the **node list** on the dashboard — a clickable pill (color =
-      state: green on / grey off / dim "?" unknown). Tethered **gateway** is driven directly via
-      the existing `ble on/off` console line (works today); remote nodes send a signed `CTRL_BLE`
-      (works once the firmware half lands). *(commander `Ble`, sign `CmdBle=5`/`BuildBle`,
-      `/api/cmd` action `ble`, pill in `index.html`.)*
-- [ ] **Proof-of-config gate** (pure controller policy): never auto-send "BLE off"; only enable
-      the "off" affordance / auto-disable after telemetry proves the node is up on the *expected*
-      config. Build against the `ble=` telemetry field (parser already extended to read it).
-- [ ] Surface node BLE state in the list/map from telemetry once firmware reports it (controller
-      already parses `ble=` from the `[status]` line and carries `Node.BLE` tri-state).
-
-### Firmware work (the other half — pairs with the controller above)
-
-- [x] Runtime BLE start/stop (lazy SoftDevice + advertising gate) — **already done**, see audit
-      above (`ble_start_adv`/`ble_stop_adv`, `cfg_ble_enabled` persistence).
-- [ ] Add `CTRL_BLE = 5` to `lib/mesh/control.h` + a node handler that maps arg 1/0 →
-      `ble_start_adv()` / `ble_stop_adv()` and persists. Mirror the controller wire format
-      (11-byte unsigned header + 64-byte sig, arg = enable flag — same layout as POWER).
-- [ ] Enable trigger — the signed `CTRL_BLE on` *is* the "enter provisioning mode" remote opener;
-      keep a physical-button fallback for the field.
-- [ ] **Proof-of-config**: add `ble=N` to the `[status]` telemetry line (`src/main.cpp:1335`) so
-      the controller can confirm the node's actual advertising state. (Controller-side regex +
-      `Node.BLE` already in place to consume it.)
-- [ ] Explicit signed "BLE off" honored only as a normal command (the *gate* lives in the
-      controller, per above — firmware just obeys).
+**Sub-parts.**
+- [ ] Runtime BLE start/stop (Bluefruit advertising + SoftDevice gating) — verify the SoftDevice
+      can be quiesced/re-activated cleanly within one boot (it likely cannot be torn down; gating
+      advertising/connectability is the pragmatic path).
+- [ ] Enable trigger — preferred: a **signed control-plane command** ("enter provisioning mode"),
+      so a node can be opened for retune remotely without physical access. Physical-button fallback
+      for the field.
+- [ ] **Proof-of-config**: node reports its current PHY/config (telemetry REPLY already carries
+      `sf`/`power_dbm`; extend as needed); controller compares against the pushed config and only
+      marks the node "confirmed on new config" on a match.
+- [ ] Explicit **signed "BLE off"** command, issued only after proof-of-config succeeds.
 - [ ] Dependency: the **retune push itself should be a signed control command** (see
       [`docs/remote-config.md`](docs/remote-config.md) — signing was noted pending).
 

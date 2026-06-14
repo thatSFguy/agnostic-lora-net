@@ -28,17 +28,27 @@ import (
 const stateFile = "controller.json"
 
 type persisted struct {
-	SeedHex string `json:"seed_hex"`
-	Counter uint32 `json:"counter"`
+	SeedHex   string           `json:"seed_hex"`
+	Counter   uint32           `json:"counter"`
+	Allowlist map[string]int64 `json:"allowlist,omitempty"` // pubkeyHex(upper) → approved unix-secs
 }
 
-// Store is the in-memory key + counter, backed by <dir>/controller.json.
+// Store is the in-memory key + counter + membership allowlist, backed by
+// <dir>/controller.json. The allowlist gates which nodes the controller will manage: a
+// node is "allowed" only if its verified pubkey appears here (see self-certifying-identity
+// plan §6). It is controller policy, persisted with the key and carried in backups.
 type Store struct {
 	mu      sync.Mutex
 	dir     string
 	priv    ed25519.PrivateKey
 	counter uint32
+	allow   map[string]int64
 }
+
+// normPub canonicalises a pubkey hex for allowlist keys: upper-case, trimmed. The firmware
+// emits uppercase pubkeys (loc_id_hex %02X) and Export() uppercases too, so this keeps the
+// allowlist keyed consistently regardless of caller case.
+func normPub(pubHex string) string { return strings.ToUpper(strings.TrimSpace(pubHex)) }
 
 func path(dir string) string { return filepath.Join(dir, stateFile) }
 
@@ -56,7 +66,11 @@ func Open(dir string) (*Store, error) {
 	if err != nil || len(seed) != ed25519.SeedSize {
 		return nil, errors.New("keystore: bad seed in state file")
 	}
-	return &Store{dir: dir, priv: ed25519.NewKeyFromSeed(seed), counter: p.Counter}, nil
+	allow := p.Allowlist
+	if allow == nil {
+		allow = map[string]int64{}
+	}
+	return &Store{dir: dir, priv: ed25519.NewKeyFromSeed(seed), counter: p.Counter, allow: allow}, nil
 }
 
 // Mint generates a fresh key (production) and persists it with a wall-clock-seeded counter.
@@ -143,17 +157,72 @@ func (s *Store) Adopt(backup []byte) error {
 }
 
 func newStore(dir string, priv ed25519.PrivateKey) (*Store, error) {
-	s := &Store{dir: dir, priv: priv, counter: uint32(time.Now().Unix())}
+	s := &Store{dir: dir, priv: priv, counter: uint32(time.Now().Unix()), allow: map[string]int64{}}
 	if err := s.save(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
+// Approve adds (or refreshes) a pubkey on the membership allowlist with the given approval
+// time (unix secs; pass it in so the store stays testable). Persists immediately.
+func (s *Store) Approve(pubHex string, atUnix int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.allow == nil {
+		s.allow = map[string]int64{}
+	}
+	s.allow[normPub(pubHex)] = atUnix
+	return s.save()
+}
+
+// Revoke removes a pubkey from the allowlist. Persists immediately. No error if absent.
+func (s *Store) Revoke(pubHex string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.allow, normPub(pubHex))
+	return s.save()
+}
+
+// IsAllowed reports whether a pubkey is on the membership allowlist.
+func (s *Store) IsAllowed(pubHex string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.allow[normPub(pubHex)]
+	return ok
+}
+
+// Allowlist returns a copy of the allowlist (pubkeyHex → approved unix-secs) for the UI/CLI.
+func (s *Store) Allowlist() map[string]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int64, len(s.allow))
+	for k, v := range s.allow {
+		out[k] = v
+	}
+	return out
+}
+
+// LoadAllowlist replaces the allowlist wholesale (a backup restore) and persists. Keys are
+// re-normalised so a backup written by any case round-trips cleanly.
+func (s *Store) LoadAllowlist(al map[string]int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allow = make(map[string]int64, len(al))
+	for k, v := range al {
+		s.allow[normPub(k)] = v
+	}
+	return s.save()
+}
+
 // Pub is the controller public key — provision it on each node with `ctrlkey <hex>`.
 // Pub/PubHex/Priv lock so a live Adopt() can't tear the key field mid-read.
-func (s *Store) Pub() ed25519.PublicKey { s.mu.Lock(); defer s.mu.Unlock(); return s.priv.Public().(ed25519.PublicKey) }
-func (s *Store) PubHex() string         { return hex.EncodeToString(s.Pub()) }
+func (s *Store) Pub() ed25519.PublicKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.priv.Public().(ed25519.PublicKey)
+}
+func (s *Store) PubHex() string           { return hex.EncodeToString(s.Pub()) }
 func (s *Store) Priv() ed25519.PrivateKey { s.mu.Lock(); defer s.mu.Unlock(); return s.priv }
 
 // Export returns the key + replay counter in the same encoding the map app's backup uses
@@ -187,7 +256,7 @@ func (s *Store) save() error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
-	p := persisted{SeedHex: hex.EncodeToString(s.priv.Seed()), Counter: s.counter}
+	p := persisted{SeedHex: hex.EncodeToString(s.priv.Seed()), Counter: s.counter, Allowlist: s.allow}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err

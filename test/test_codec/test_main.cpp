@@ -7,17 +7,20 @@
 
 #include <unity.h>
 #include "announce_codec.h"
+#include "node_table.h"            // nid_from_pubkey
+#include "monocypher.h"
+#include "monocypher-ed25519.h"
 
 using namespace mesh;
 
 static Announce make_sample() {
     Announce a;
-    a.origin = 0x11111111u;
-    a.reports[0] = {0xAAAAAAAAu, 0.80f, 3};
-    a.reports[1] = {0xBBBBBBBBu, 0.20f, 7};
+    a.origin = nid_from_u32(0x11111111u);
+    a.reports[0] = {nid_from_u32(0xAAAAAAAAu), 0.80f, 3};
+    a.reports[1] = {nid_from_u32(0xBBBBBBBBu), 0.20f, 7};
     a.n_reports = 2;
-    a.routes[0] = {0xAAAAAAAAu, 0xAAAAAAAAu, 1.5f, 1};
-    a.routes[1] = {0xCCCCCCCCu, 0xBBBBBBBBu, 3.25f, 2};
+    a.routes[0] = {nid_from_u32(0xAAAAAAAAu), nid_from_u32(0xAAAAAAAAu), 1.5f, 1};
+    a.routes[1] = {nid_from_u32(0xCCCCCCCCu), nid_from_u32(0xBBBBBBBBu), 3.25f, 2};
     a.n_routes = 2;
     return a;
 }
@@ -34,14 +37,14 @@ static void test_roundtrip() {
     TEST_ASSERT_EQUAL_UINT8(2, b.n_reports);
     TEST_ASSERT_EQUAL_UINT8(2, b.n_routes);
 
-    TEST_ASSERT_EQUAL_HEX32(0xAAAAAAAAu, b.reports[0].id);
+    TEST_ASSERT_TRUE(b.reports[0].id == nid_from_u32(0xAAAAAAAAu));
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.80f, b.reports[0].q);   // 1/255 quantisation
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.20f, b.reports[1].q);
     TEST_ASSERT_EQUAL_UINT8(3, b.reports[0].alias);           // alias carried exactly
     TEST_ASSERT_EQUAL_UINT8(7, b.reports[1].alias);
 
-    TEST_ASSERT_EQUAL_HEX32(0xCCCCCCCCu, b.routes[1].dst);
-    TEST_ASSERT_EQUAL_HEX32(0xBBBBBBBBu, b.routes[1].next_hop);
+    TEST_ASSERT_TRUE(b.routes[1].dst == nid_from_u32(0xCCCCCCCCu));
+    TEST_ASSERT_TRUE(b.routes[1].next_hop == nid_from_u32(0xBBBBBBBBu));
     TEST_ASSERT_FLOAT_WITHIN(0.07f, 3.25f, b.routes[1].cost);  // 1/16 quantisation
     TEST_ASSERT_EQUAL_UINT8(2, b.routes[1].hops);
 }
@@ -85,7 +88,7 @@ static void test_output_truncation_is_graceful() {
     Announce a = make_sample();
     // Room for the header + both reports + exactly ONE route.
     uint16_t cap = ANNOUNCE_HDR_BYTES + 2 * ANNOUNCE_REPORT_BYTES + 1 * ANNOUNCE_ROUTE_BYTES;
-    uint8_t buf[64];
+    uint8_t buf[128];
     uint16_t n = announce_serialize(a, buf, cap);
     TEST_ASSERT_EQUAL_UINT16(cap, n);
 
@@ -98,6 +101,47 @@ static void test_output_truncation_is_graceful() {
     TEST_ASSERT_EQUAL_UINT16(0, announce_serialize(a, buf, 1));
 }
 
+// --- signed announce: sign -> verify round-trip, and the self-certifying id binding ---
+static void test_signed_announce_roundtrip() {
+    uint8_t sk[64], pk[32], seed[32];
+    for (int i = 0; i < 32; i++) seed[i] = (uint8_t)(i * 3 + 5);
+    crypto_ed25519_key_pair(sk, pk, seed);
+
+    Announce a = make_sample();
+    uint8_t buf[256];
+    uint16_t bl = announce_serialize(a, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_UINT16(announce_body_len(a), bl);
+
+    uint8_t tail[ANNOUNCE_SIG_TAIL];
+    announce_sign(buf, bl, pk, sk, tail);
+
+    uint8_t got_pub[32];
+    TEST_ASSERT_TRUE(announce_verify(buf, bl, tail, got_pub));     // sig checks out
+    TEST_ASSERT_EQUAL_MEMORY(pk, got_pub, 32);                    // recovers the signer's key
+    // The node id is the self-certifying hash of that key (the caller's binding check).
+    TEST_ASSERT_TRUE(nid_from_pubkey(got_pub) == nid_from_pubkey(pk));
+}
+
+// A flipped body byte (or a wrong key) must fail verification.
+static void test_signed_announce_tamper_rejected() {
+    uint8_t sk[64], pk[32], seed[32];
+    for (int i = 0; i < 32; i++) seed[i] = (uint8_t)(i * 7 + 1);
+    crypto_ed25519_key_pair(sk, pk, seed);
+
+    Announce a = make_sample();
+    uint8_t buf[256];
+    uint16_t bl = announce_serialize(a, buf, sizeof(buf));
+    uint8_t tail[ANNOUNCE_SIG_TAIL];
+    announce_sign(buf, bl, pk, sk, tail);
+
+    uint8_t got_pub[32];
+    buf[5] ^= 0x01;                                                // tamper the signed body
+    TEST_ASSERT_FALSE(announce_verify(buf, bl, tail, got_pub));
+    buf[5] ^= 0x01;                                                // restore, then tamper the sig
+    tail[40] ^= 0x01;
+    TEST_ASSERT_FALSE(announce_verify(buf, bl, tail, got_pub));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -108,5 +152,7 @@ int main(int, char**) {
     RUN_TEST(test_truncated_rejected);
     RUN_TEST(test_malformed_counts_rejected);
     RUN_TEST(test_output_truncation_is_graceful);
+    RUN_TEST(test_signed_announce_roundtrip);
+    RUN_TEST(test_signed_announce_tamper_rejected);
     return UNITY_END();
 }

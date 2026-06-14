@@ -4,36 +4,83 @@
 // 64-byte secret key is seed‖pub — identical to Go's ed25519.PrivateKey — a message built
 // here verifies on-device byte-for-byte. test/test_ctrl_interop proves exactly that.
 //
+// v2 (CtrlVer=2): node ids are the 16-byte self-certifying NodeId (= blake2b(pubkey)[0:16]),
+// carried raw (no endianness, matching nid_write). This is a hard wire break from v1's
+// 4-byte ids — a v1 controller cannot talk to v2 nodes.
+//
 // Wire layout (matches control.cpp):
 //
-//	unsigned[11] = ver(1) | cmd(1) | target(u32 LE) | arg(i8) | counter(u32 LE)
-//	msg[75]      = unsigned[11] ‖ Ed25519_sig[64]  over  "AGN-CTRL-1" ‖ unsigned[11]
+//	POWER/CONFIRM/BLE unsigned[23] = ver(1) | cmd(1) | target(16) | arg(i8) | counter(u32 LE)
+//	BLOCK/UNBLOCK     unsigned[39] = ver(1) | cmd(1) | target(16) | ttl(i8) | victim(16) | counter(u32 LE)
+//	msg = unsigned ‖ Ed25519_sig[64]  over  "AGN-CTRL-1" ‖ unsigned
 package sign
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 )
 
 const (
-	CtrlVer    = 1
+	CtrlVer    = 2
 	CmdPower   = 1 // CTRL_POWER
 	CmdConfirm = 2 // CTRL_CONFIRM
 	CmdBlock   = 3 // CTRL_BLOCK
 	CmdUnblock = 4 // CTRL_UNBLOCK
 	CmdBle     = 5 // CTRL_BLE — arg: 1 = enable BLE/BT advertising, 0 = disable
+	CmdRetune  = 6 // CTRL_RETUNE — cfg[13] = PHY to apply (PHY only; TX power stays under POWER)
 
-	unsignedBytes      = 11                                         // POWER/CONFIRM/BLE header
-	unsignedBytesBlock = 15                                         // BLOCK/UNBLOCK header (+ victim)
-	MsgBytes           = unsignedBytes + ed25519.SignatureSize      // 75
-	BlkBytes           = unsignedBytesBlock + ed25519.SignatureSize // 79
+	IDBytes            = 16                                         // a NodeId on the wire
+	RetuneCfgBytes     = 13                                         // freq_hz|bw_hz|sf|cr|sync|preamble (LE)
+	unsignedBytes      = 1 + 1 + IDBytes + 1 + 4                    // 23: ver|cmd|target|arg|counter
+	unsignedBytesBlock = 1 + 1 + IDBytes + 1 + IDBytes + 4          // 39: + victim before counter
+	unsignedBytesRtn   = 1 + 1 + IDBytes + RetuneCfgBytes + 4       // 35: + 13-byte PHY blob (no arg)
+	MsgBytes           = unsignedBytes + ed25519.SignatureSize      // 87
+	BlkBytes           = unsignedBytesBlock + ed25519.SignatureSize // 103
+	RtnBytes           = unsignedBytesRtn + ed25519.SignatureSize   // 99
 )
+
+// NodeID is the 16-byte self-certifying node id, carried raw on the wire (nid_write =
+// memcpy, no endianness). Its hex form is 32 lowercase chars, MSB-first — the same string
+// the firmware's nid_hex prints and the controller normalises (upper-cased) elsewhere.
+type NodeID [IDBytes]byte
+
+// IsZero reports the all-zero id (the wire "none" sentinel rejected by builders).
+func (n NodeID) IsZero() bool {
+	for _, b := range n {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Hex returns the 32-char lowercase hex form (matches firmware nid_hex).
+func (n NodeID) Hex() string { return hex.EncodeToString(n[:]) }
+
+// ParseNodeID decodes a 32-hex-char id (optionally 0x-prefixed, any case) into a NodeID.
+func ParseNodeID(s string) (NodeID, error) {
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return NodeID{}, fmt.Errorf("sign: bad node id %q: %w", s, err)
+	}
+	if len(b) != IDBytes {
+		return NodeID{}, fmt.Errorf("sign: node id must be %d hex chars, got %d", IDBytes*2, len(s))
+	}
+	var id NodeID
+	copy(id[:], b)
+	return id, nil
+}
 
 // domain tag — a control signature can never be confused with any other signed thing.
 var domain = []byte("AGN-CTRL-1")
 
 var (
-	ErrBadCmd    = errors.New("sign: cmd must be POWER or CONFIRM")
+	ErrBadCmd    = errors.New("sign: cmd must be POWER, CONFIRM or BLE")
 	ErrBadTarget = errors.New("sign: target must be non-zero")
 	ErrMalformed = errors.New("sign: malformed control message")
 	ErrBadSig    = errors.New("sign: signature check failed")
@@ -48,13 +95,14 @@ func u32LE(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
 
-func unsignedPart(cmd uint8, target uint32, arg int8, counter uint32) []byte {
+// unsignedPart builds the POWER/CONFIRM/BLE 23-byte header (target|arg|counter).
+func unsignedPart(cmd uint8, target NodeID, arg int8, counter uint32) []byte {
 	b := make([]byte, unsignedBytes)
 	b[0] = CtrlVer
 	b[1] = cmd
-	putU32LE(b[2:], target)
-	b[6] = byte(arg)
-	putU32LE(b[7:], counter)
+	copy(b[2:2+IDBytes], target[:])
+	b[2+IDBytes] = byte(arg)
+	putU32LE(b[3+IDBytes:], counter)
 	return b
 }
 
@@ -73,48 +121,79 @@ func KeyFromSeed(seed []byte) ed25519.PrivateKey {
 }
 
 func unsignedLen(cmd uint8) int {
-	if cmd == CmdBlock || cmd == CmdUnblock {
+	switch cmd {
+	case CmdBlock, CmdUnblock:
 		return unsignedBytesBlock
+	case CmdRetune:
+		return unsignedBytesRtn
+	default:
+		return unsignedBytes
 	}
-	return unsignedBytes
 }
 
 func knownCmd(cmd uint8) bool {
-	return cmd == CmdPower || cmd == CmdConfirm || cmd == CmdBlock || cmd == CmdUnblock || cmd == CmdBle
+	return cmd == CmdPower || cmd == CmdConfirm || cmd == CmdBlock || cmd == CmdUnblock ||
+		cmd == CmdBle || cmd == CmdRetune
+}
+
+// RetuneCfg is the 13-byte PHY blob CTRL_RETUNE carries (PHY only — TX power stays under
+// CTRL_POWER and its dead-man rail). Encode() packs it LE, matching the firmware's unpack.
+type RetuneCfg struct {
+	FreqHz   uint32
+	BwHz     uint32
+	SF       uint8
+	CR       uint8
+	Sync     uint8
+	Preamble uint16
+}
+
+// Encode packs the PHY blob: freq_hz(u32) | bw_hz(u32) | sf | cr | sync | preamble(u16), LE.
+func (c RetuneCfg) Encode() [RetuneCfgBytes]byte {
+	var b [RetuneCfgBytes]byte
+	putU32LE(b[0:], c.FreqHz)
+	putU32LE(b[4:], c.BwHz)
+	b[8], b[9], b[10] = c.SF, c.CR, c.Sync
+	b[11], b[12] = byte(c.Preamble), byte(c.Preamble>>8)
+	return b
+}
+
+// DecodeRetuneCfg is the inverse of Encode (for tests / introspection).
+func DecodeRetuneCfg(b [RetuneCfgBytes]byte) RetuneCfg {
+	return RetuneCfg{
+		FreqHz: u32LE(b[0:]), BwHz: u32LE(b[4:]),
+		SF: b[8], CR: b[9], Sync: b[10],
+		Preamble: uint16(b[11]) | uint16(b[12])<<8,
+	}
 }
 
 // Command is a decoded control command.
 type Command struct {
 	Cmd     uint8
-	Target  uint32 // recipient that applies the command
-	Arg     int8   // POWER: dBm. BLOCK: TTL minutes.
-	Aux     uint32 // BLOCK/UNBLOCK: victim id (else 0)
+	Target  NodeID               // recipient that applies the command
+	Arg     int8                 // POWER: dBm. BLOCK: TTL minutes. BLE: 1/0.
+	Aux     NodeID               // BLOCK/UNBLOCK: victim id (else zero)
+	Cfg     [RetuneCfgBytes]byte // RETUNE: the PHY blob (else zero)
 	Counter uint32
 }
 
-// BuildControl produces a 75-byte signed control command, byte-identical to the
+// BuildControl produces an 87-byte signed POWER/CONFIRM command, byte-identical to the
 // firmware's ctrl_build for the same key and fields.
-func BuildControl(cmd uint8, target uint32, arg int8, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
+func BuildControl(cmd uint8, target NodeID, arg int8, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
 	if cmd != CmdPower && cmd != CmdConfirm {
 		return nil, ErrBadCmd
 	}
-	if target == 0 {
+	if target.IsZero() {
 		return nil, ErrBadTarget
 	}
 	u := unsignedPart(cmd, target, arg, counter)
 	sig := ed25519.Sign(priv, signedView(u))
-	out := make([]byte, 0, MsgBytes)
-	out = append(out, u...)
-	out = append(out, sig...)
-	return out, nil
+	return append(u, sig...), nil
 }
 
 // BuildBle enables (on=true) or disables BLE/BT advertising on the target node. Same
-// 11-byte unsigned header + 64-byte signature as POWER/CONFIRM, with arg = 1/0. NOTE:
-// remote delivery requires firmware CTRL_BLE support (todo #2 firmware half); the tethered
-// gateway is driven directly via the `ble on/off` console line, not this builder.
-func BuildBle(target uint32, on bool, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
-	if target == 0 {
+// 23-byte POWER-style header (CTRL_BLE accepted by ctrl_build on-device), arg = 1/0.
+func BuildBle(target NodeID, on bool, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
+	if target.IsZero() {
 		return nil, ErrBadTarget
 	}
 	var arg int8
@@ -123,34 +202,45 @@ func BuildBle(target uint32, on bool, counter uint32, priv ed25519.PrivateKey) (
 	}
 	u := unsignedPart(CmdBle, target, arg, counter)
 	sig := ed25519.Sign(priv, signedView(u))
-	out := make([]byte, 0, MsgBytes)
-	out = append(out, u...)
-	out = append(out, sig...)
-	return out, nil
+	return append(u, sig...), nil
 }
 
-// BuildBlock produces a 79-byte signed BLOCK/UNBLOCK command, byte-identical to the
+// BuildRetune produces a 99-byte signed CTRL_RETUNE command (byte-identical to the
+// firmware's ctrl_build_retune): ver|cmd|target(16)|cfg(13)|counter(4)|sig(64). PHY only.
+func BuildRetune(target NodeID, cfg RetuneCfg, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
+	if target.IsZero() {
+		return nil, ErrBadTarget
+	}
+	b := make([]byte, unsignedBytesRtn)
+	b[0] = CtrlVer
+	b[1] = CmdRetune
+	copy(b[2:2+IDBytes], target[:])
+	enc := cfg.Encode()
+	copy(b[2+IDBytes:2+IDBytes+RetuneCfgBytes], enc[:])
+	putU32LE(b[2+IDBytes+RetuneCfgBytes:], counter)
+	sig := ed25519.Sign(priv, signedView(b))
+	return append(b, sig...), nil
+}
+
+// BuildBlock produces a 103-byte signed BLOCK/UNBLOCK command, byte-identical to the
 // firmware's ctrl_build_block. `target` is the recipient that applies it; `victim` is the
 // link to drop; `ttlMin` (BLOCK) is the node-enforced auto-expiry (0 = firmware default).
-func BuildBlock(cmd uint8, target, victim uint32, ttlMin int8, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
+func BuildBlock(cmd uint8, target, victim NodeID, ttlMin int8, counter uint32, priv ed25519.PrivateKey) ([]byte, error) {
 	if cmd != CmdBlock && cmd != CmdUnblock {
 		return nil, ErrBadCmd
 	}
-	if target == 0 || victim == 0 {
+	if target.IsZero() || victim.IsZero() {
 		return nil, ErrBadTarget
 	}
 	b := make([]byte, unsignedBytesBlock)
 	b[0] = CtrlVer
 	b[1] = cmd
-	putU32LE(b[2:], target)
-	b[6] = byte(ttlMin)
-	putU32LE(b[7:], victim)
-	putU32LE(b[11:], counter)
+	copy(b[2:2+IDBytes], target[:])
+	b[2+IDBytes] = byte(ttlMin)
+	copy(b[3+IDBytes:3+2*IDBytes], victim[:])
+	putU32LE(b[3+2*IDBytes:], counter)
 	sig := ed25519.Sign(priv, signedView(b))
-	out := make([]byte, 0, BlkBytes)
-	out = append(out, b...)
-	out = append(out, sig...)
-	return out, nil
+	return append(b, sig...), nil
 }
 
 // VerifyControl mirrors ctrl_verify for controller-side self-checks and tests: signature
@@ -174,9 +264,16 @@ func VerifyControl(msg []byte, pub ed25519.PublicKey, minCounter uint32) (Comman
 	if counter <= minCounter {
 		return Command{}, ErrReplay
 	}
-	c := Command{Cmd: cmd, Target: u32LE(msg[2:]), Arg: int8(msg[6]), Counter: counter}
-	if cmd == CmdBlock || cmd == CmdUnblock {
-		c.Aux = u32LE(msg[7:])
+	c := Command{Cmd: cmd, Counter: counter}
+	copy(c.Target[:], msg[2:2+IDBytes])
+	switch cmd {
+	case CmdBlock, CmdUnblock:
+		c.Arg = int8(msg[2+IDBytes]) // BLOCK: ttl minutes (same offset as POWER's arg)
+		copy(c.Aux[:], msg[3+IDBytes:3+2*IDBytes])
+	case CmdRetune:
+		copy(c.Cfg[:], msg[2+IDBytes:2+IDBytes+RetuneCfgBytes]) // PHY blob (no arg byte)
+	default:
+		c.Arg = int8(msg[2+IDBytes]) // POWER/CONFIRM/BLE
 	}
 	return c, nil
 }

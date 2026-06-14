@@ -32,7 +32,7 @@ struct Announce {
     struct Report { node_id_t id; float q; link_addr_t alias; };
     struct RouteAdv { node_id_t dst; node_id_t next_hop; float cost; uint8_t hops; };
 
-    node_id_t origin = 0;
+    node_id_t origin = {};
     Report    reports[MAX_NEIGHBORS];
     uint8_t   n_reports = 0;
     RouteAdv  routes[MAX_ROUTES];
@@ -73,7 +73,7 @@ public:
     // Enumerate the blocked ids (i in 0..blocked_count()). Lets the console/map report
     // the authoritative block list — a blocked neighbour is dropped from the neighbour
     // table, so "blocked" can't be inferred from the `nbr` lines.
-    node_id_t blocked_at(uint8_t i) const { return i < n_blocked_ ? blocked_[i] : 0; }
+    node_id_t blocked_at(uint8_t i) const { return i < n_blocked_ ? blocked_[i] : node_id_t{}; }
 
     // Link addressing (Agent.md §5): resolve aliases for directed sends.
     link_addr_t link_addr_for(node_id_t dst) const { return neighbors_.their_alias_for(dst); }

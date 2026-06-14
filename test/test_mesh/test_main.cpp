@@ -15,7 +15,7 @@
 using namespace mesh;
 
 // Node IDs used across the tests.
-static const node_id_t NA = 0xAu, NB = 0xBu, NC = 0xCu, ND = 0xDu;
+static const node_id_t NA = nid_from_u32(0xA), NB = nid_from_u32(0xB), NC = nid_from_u32(0xC), ND = nid_from_u32(0xD);
 
 // A tiny synchronous distance-vector simulator. `q(from,to)` is the DIRECTIONAL
 // receive quality of a frame sent by `from` and heard at `to` (0 == no link).
@@ -87,9 +87,9 @@ static void test_line_topology() {
     sim.converge({NA, NB, NC}, 8);
 
     // A reaches C only through B; the return is symmetric here.
-    TEST_ASSERT_EQUAL_HEX32(NB, A.next_hop(NC));
-    TEST_ASSERT_EQUAL_HEX32(NB, C.next_hop(NA));
-    TEST_ASSERT_EQUAL_HEX32(NB, A.next_hop(NB));   // direct neighbour
+    TEST_ASSERT_TRUE(NB == A.next_hop(NC));
+    TEST_ASSERT_TRUE(NB == C.next_hop(NA));
+    TEST_ASSERT_TRUE(NB == A.next_hop(NB));   // direct neighbour
 }
 
 // --- routing: asymmetric ring, independent per-direction paths (Req 3) -----
@@ -116,8 +116,8 @@ static void test_asymmetric_per_direction() {
     // Forward A->C goes the strong clockwise way (via B); return C->A goes the
     // strong clockwise way from C's perspective (via D). Different paths — exactly
     // the asymmetric-routing premise.
-    TEST_ASSERT_EQUAL_HEX32(NB, A.next_hop(NC));
-    TEST_ASSERT_EQUAL_HEX32(ND, C.next_hop(NA));
+    TEST_ASSERT_TRUE(NB == A.next_hop(NC));
+    TEST_ASSERT_TRUE(ND == C.next_hop(NA));
 }
 
 // --- routing: reroute when the preferred relay goes silent ------------------
@@ -136,7 +136,7 @@ static void test_reroute_on_relay_loss() {
     };
 
     sim.converge({NA, NB, NC, ND}, 12);
-    TEST_ASSERT_EQUAL_HEX32(NB, A.next_hop(NC));   // prefers the cheap path via B
+    TEST_ASSERT_TRUE(NB == A.next_hop(NC));   // prefers the cheap path via B
 
     // B goes silent. Age everyone past the neighbour timeout and let routes that
     // depended on B fall away.
@@ -144,8 +144,8 @@ static void test_reroute_on_relay_loss() {
     for (Router* n : sim.nodes) n->tick(sim.now);
 
     sim.converge({NA, NC, ND}, 12);                // B no longer transmits
-    TEST_ASSERT_EQUAL_HEX32(ND, A.next_hop(NC));   // rerouted onto the backup
-    TEST_ASSERT_EQUAL_HEX32(ND, C.next_hop(NA));
+    TEST_ASSERT_TRUE(ND == A.next_hop(NC));   // rerouted onto the backup
+    TEST_ASSERT_TRUE(ND == C.next_hop(NA));
 }
 
 // --- administrative link block forces a multi-hop path (Tier-1 "block a link") ---
@@ -171,9 +171,9 @@ static void test_blocked_link_forces_relay() {
     sim.converge({NA, NB, NC}, 8);
 
     // A and C now reach each other only via B; B still reaches both directly.
-    TEST_ASSERT_EQUAL_HEX32(NB, A.next_hop(NC));
-    TEST_ASSERT_EQUAL_HEX32(NB, C.next_hop(NA));
-    TEST_ASSERT_EQUAL_HEX32(NC, B.next_hop(NC));
+    TEST_ASSERT_TRUE(NB == A.next_hop(NC));
+    TEST_ASSERT_TRUE(NB == C.next_hop(NA));
+    TEST_ASSERT_TRUE(NC == B.next_hop(NC));
     TEST_ASSERT_TRUE(A.is_blocked(NC));
 }
 

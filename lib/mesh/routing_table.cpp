@@ -82,7 +82,7 @@ bool RoutingTable::offer(node_id_t dst, node_id_t next_hop, float cost,
 
 node_id_t RoutingTable::next_hop(node_id_t dst) const {
     const Route* r = find(dst);
-    return r ? r->next_hop : 0;
+    return r ? r->next_hop : node_id_t{};
 }
 
 void RoutingTable::prune(uint32_t now_ms, uint32_t timeout_ms) {

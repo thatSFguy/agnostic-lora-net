@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"agnostic-lora-net/controller/internal/ingest"
+	"agnostic-lora-net/controller/internal/keystore"
 	"agnostic-lora-net/controller/internal/policy"
 	"agnostic-lora-net/controller/internal/topo"
 )
@@ -68,5 +69,61 @@ func TestCmdAPI(t *testing.T) {
 	_ = json.Unmarshal(rr2.Body.Bytes(), &resp2)
 	if resp2["ok"] != false {
 		t.Fatalf("block without key should fail, got %v", resp2)
+	}
+}
+
+// The membership gate must reject a command to an unapproved node BEFORE advancing the
+// replay counter (no counter burn on reject), and accept once the pubkey is approved.
+func TestCmdACLGate(t *testing.T) {
+	ks, err := keystore.Mint(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := topo.New()
+	g.SetAllowFunc(ks.IsAllowed) // ACL now configured -> gate is live
+	const id = "9828F51B1122334455667788990011AA"
+	pub := strings.Repeat("AB", 32) // 64-hex pubkey
+	g.Apply(ingest.Event{Kind: ingest.KindIdentity, ID: id, Pub: pub, SigOK: true}, time.Now())
+
+	var sent []string
+	s := New(g, ks, func(l string) error { sent = append(sent, l); return nil }, "", "")
+	h := s.Handler()
+	post := func(body string) map[string]any {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest("POST", "/api/cmd", strings.NewReader(body)))
+		var resp map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		return resp
+	}
+	counter := func() uint32 { _, _, c, _ := ks.Export(); return c }
+
+	// Verified but NOT approved -> rejected, counter unchanged, nothing sent.
+	c0 := counter()
+	if r := post(`{"action":"power","node":"` + id + `","dbm":14}`); r["ok"] != false {
+		t.Fatalf("unapproved node: expected reject, got %v", r)
+	}
+	if counter() != c0 {
+		t.Fatalf("counter advanced on a rejected command: %d -> %d", c0, counter())
+	}
+	if len(sent) != 0 {
+		t.Fatalf("rejected command should send nothing, sent %v", sent)
+	}
+
+	// Approve the pubkey via /api/acl, then the same command must go through.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST", "/api/acl", strings.NewReader(`{"action":"approve","pub":"`+pub+`"}`)))
+	var aclResp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &aclResp)
+	if aclResp["ok"] != true {
+		t.Fatalf("approve failed: %v", aclResp)
+	}
+	if r := post(`{"action":"power","node":"` + id + `","dbm":14}`); r["ok"] != true {
+		t.Fatalf("approved node: expected accept, got %v", r)
+	}
+	if counter() == c0 {
+		t.Fatal("counter should advance after an accepted command")
+	}
+	if len(sent) != 1 || !strings.HasPrefix(sent[0], "ctrlsend ") {
+		t.Fatalf("approved command should send one ctrlsend, sent %v", sent)
 	}
 }

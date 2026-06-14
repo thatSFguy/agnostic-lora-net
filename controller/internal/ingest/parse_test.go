@@ -80,6 +80,39 @@ func TestParseLine(t *testing.T) {
 	}
 }
 
+// v2 identity: the `[ann]` contract line carries a gateway-verified id↔pubkey binding, with
+// 32-hex (16-byte) ids. sig=ok yields a pub + SigOK; sig=bad yields neither.
+func TestParseIdentity(t *testing.T) {
+	const id = "9828f51b1122334455667788990011aa" // 32 hex
+	const pub = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+	e, ok := ParseLine("[ann] " + id + " pub=" + pub + " sig=ok")
+	if !ok || e.Kind != KindIdentity {
+		t.Fatalf("ann sig=ok: ok=%v kind=%v", ok, e.Kind)
+	}
+	if e.ID != up(id) || e.Pub != pub || !e.SigOK {
+		t.Fatalf("ann sig=ok decoded: id=%q pub=%q sigok=%v", e.ID, e.Pub, e.SigOK)
+	}
+	eb, ok := ParseLine("[ann] " + id + " sig=bad")
+	if !ok || eb.Kind != KindIdentity || eb.SigOK || eb.Pub != "" {
+		t.Fatalf("ann sig=bad: ok=%v kind=%v sigok=%v pub=%q", ok, eb.Kind, eb.SigOK, eb.Pub)
+	}
+}
+
+// The id regexes accept both v1 (8-hex) and v2 (32-hex) widths during rollout. A 32-hex
+// status line must parse with the full id and all its fields (incl. ble=).
+func TestParseWideStatus(t *testing.T) {
+	const id = "1fae0dbdfeedfacecafebabe00ff0102"
+	e, ok := ParseLine("[status] " + id + " fw=0.12.0 up=42min sf=9 pwr=14 batt=3850mV/60% mob=0 ble=1")
+	if !ok || e.Kind != KindStatus || e.ID != up(id) {
+		t.Fatalf("wide status: ok=%v kind=%v id=%q", ok, e.Kind, e.ID)
+	}
+	for k, want := range map[string]int{"sf": 9, "power": 14, "mv": 3850, "pct": 60, "mob": 0, "ble": 1} {
+		if got, present := e.Num[k]; !present || got != want {
+			t.Fatalf("wide status Num[%q]=%d present=%v want %d", k, got, present, want)
+		}
+	}
+}
+
 // A blocked neighbour drops out of the `nbr` lines, so the topology can't infer it — the
 // authoritative source is the [blocked] line. Guard that it round-trips both ids.
 func TestBlockedList(t *testing.T) {
