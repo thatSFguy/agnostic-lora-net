@@ -5,7 +5,7 @@
 # then runs the SAR transfer and verifies byte-perfect integrity.
 import serial, glob, os, re, sys, time, zlib, hashlib
 
-IMG = os.path.join(os.path.dirname(__file__), '..', 'test_orig.png')
+IMG = os.path.join(os.path.dirname(__file__), '..', 'test', 'test_orig.png')
 
 def vid(t):
     p = os.path.realpath(f'/sys/class/tty/{os.path.basename(t)}/device')
@@ -94,7 +94,7 @@ def main():
         if t.startswith('[ENDDUMP]'): break
         if cap and re.fullmatch(r'[0-9A-Fa-f]+',t): hexs.append(t)
     recv=bytes.fromhex(''.join(hexs))
-    open(os.path.join(os.path.dirname(__file__),'..','test_recv_mh.png'),'wb').write(recv)
+    open(os.path.join(os.path.dirname(__file__),'..','test','test_recv_mh.png'),'wb').write(recv)
     try: open('/mnt/c/Users/rob/Downloads/test_recv_mh.png','wb').write(recv)
     except: pass
 

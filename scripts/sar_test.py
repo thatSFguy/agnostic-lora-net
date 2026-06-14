@@ -5,7 +5,7 @@
 # receiver, and compares SHA-256.
 import serial, glob, os, re, sys, time, zlib, hashlib
 
-IMG = os.path.join(os.path.dirname(__file__), '..', 'test_orig.png')
+IMG = os.path.join(os.path.dirname(__file__), '..', 'test', 'test_orig.png')
 
 def vid(t):
     p = os.path.realpath(f'/sys/class/tty/{os.path.basename(t)}/device')
@@ -94,14 +94,14 @@ def main():
     rsha = hashlib.sha256(recv).hexdigest()
     print(f"\nreceived: {len(recv)} bytes  crc32={zlib.crc32(recv)&0xffffffff:08X}  sha256={rsha[:16]}..")
     match = (recv == img)
-    out = os.path.join(os.path.dirname(__file__), '..', 'test_recv.png')
+    out = os.path.join(os.path.dirname(__file__), '..', 'test', 'test_recv.png')
     open(out, 'wb').write(recv)
     try: open('/mnt/c/Users/rob/Downloads/test_recv.png', 'wb').write(recv)
     except: pass
     print("\n==================== RESULT ====================")
     print(f"  bytes:  orig={len(img)}  recv={len(recv)}  {'EQUAL' if len(img)==len(recv) else 'DIFFER'}")
     print(f"  sha256: {'MATCH — byte-perfect transfer ✓' if match else 'MISMATCH ✗'}")
-    print(f"  saved received -> test_recv.png (and Downloads)")
+    print(f"  saved received -> test/test_recv.png (and Downloads)")
     TX.close(); RX.close()
     sys.exit(0 if match else 2)
 
