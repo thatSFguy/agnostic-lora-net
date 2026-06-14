@@ -28,13 +28,14 @@ type Engine struct {
 	pending  map[string]int8      // nodes whose decrease awaits a CONFIRM (value = power)
 	miss     map[string]int       // cycles a pending node has been unreachable
 	lastSent map[string]time.Time // last time we sent any command to a node
+	overband map[string]int       // mobile nodes: consecutive over-band cycles (slow-trim gate)
 }
 
 func NewEngine(cfg Config, log *Logger, ks *keystore.Store, send func(string) error, apply bool, fresh, heartbeat time.Duration) *Engine {
 	return &Engine{
 		cfg: cfg, log: log, ks: ks, send: send, apply: apply, fresh: fresh, heartbeat: heartbeat,
 		targets: map[string]int8{}, pending: map[string]int8{}, miss: map[string]int{},
-		lastSent: map[string]time.Time{},
+		lastSent: map[string]time.Time{}, overband: map[string]int{},
 	}
 }
 
@@ -144,6 +145,21 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		}
 
 		d := Decide(obs, cur, e.cfg)
+
+		// Mobile slow-trim hysteresis: only trim a mobile node after MobileLowerHold
+		// consecutive over-band cycles, so a transient strong reading from a moving node
+		// (it'll drift again) doesn't cut its movement headroom. Raises are never gated.
+		if obs.Mobile && d.Action == Lower {
+			e.overband[n.ID]++
+			if e.overband[n.ID] < e.cfg.MobileLowerHold {
+				d.Action, d.Delta, d.NewTarget = Hold, 0, cur
+				d.Reason = fmt.Sprintf("mobile: over band, holding for sustained strong margin (%d/%d cycles)", e.overband[n.ID], e.cfg.MobileLowerHold)
+			} else {
+				e.overband[n.ID] = 0 // sustained — allow this trim, reset the streak
+			}
+		} else {
+			delete(e.overband, n.ID)
+		}
 
 		var ctr uint32
 		applied := false

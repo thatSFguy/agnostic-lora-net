@@ -109,22 +109,50 @@ func TestEngineQualityOnlyLinks(t *testing.T) {
 	}
 }
 
-// A loud node that a fixed peer would get trimmed must instead HOLD when it self-reports
-// mobile (Node.Mobile, from telemetry mob=1) — its margin reflects where it is now, and
-// trimming risks losing it when it moves.
-func TestEngineMobileNotTrimmed(t *testing.T) {
+// Mobile strategy: a loud measured node holds for MobileLowerHold cycles (hysteresis), then
+// trims SLOWLY (by MobileLowerStep) — keeping movement headroom but not pinning it forever.
+func TestEngineMobileSlowTrim(t *testing.T) {
+	cfg := DefaultConfig()
 	now := time.Now()
 	s := topo.Snapshot{
 		Gateway: "GW000001",
 		Nodes: []topo.Node{
 			{ID: "GW000001", IsGateway: true},
-			{ID: "MOVE0001", SF: 9, Power: 22, Mobile: true}, // loud to gateway -> would Lower if fixed
+			{ID: "MOVE0001", SF: 9, Power: 22, Mobile: true}, // margin 21.5, measured -> over the reserve band
 		},
 		Links: []topo.Link{{From: "MOVE0001", To: "GW000001", RSSI: -42, SNR: 9, At: now}},
 	}
-	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
-	if d := find(eng.Tick(s, now), "MOVE0001"); d.Action != Hold || !d.Mobile {
-		t.Fatalf("mobile node must hold (keep movement headroom), not lower: %+v", d)
+	eng := NewEngine(cfg, newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	for i := 1; i < cfg.MobileLowerHold; i++ { // first N-1 cycles: hold (sustained-strong gate)
+		if d := find(eng.Tick(s, now), "MOVE0001"); d.Action != Hold {
+			t.Fatalf("cycle %d: mobile should hold for hysteresis, got %+v", i, d)
+		}
+	}
+	if d := find(eng.Tick(s, now), "MOVE0001"); d.Action != Lower || d.Delta != -cfg.MobileLowerStep {
+		t.Fatalf("after %d cycles mobile should trim by %d, got %+v", cfg.MobileLowerHold, cfg.MobileLowerStep, d)
+	}
+}
+
+// Mobile raises FAST and on a higher band: a node a fixed peer would hold (in [6,12]) is below
+// the mobile reserve band [12,18], so it raises — by up to MobileUpStep, not MaxStep.
+func TestEngineMobileRaisesFast(t *testing.T) {
+	cfg := DefaultConfig()
+	now := time.Now()
+	s := topo.Snapshot{
+		Gateway: "GW000001",
+		Nodes: []topo.Node{
+			{ID: "GW000001", IsGateway: true},
+			{ID: "MOVE0001", SF: 9, Power: 5, Mobile: true}, // snr -6 -> margin 6.5: in [6,12] (fixed holds) but < 12 (mobile raises)
+		},
+		Links: []topo.Link{{From: "MOVE0001", To: "GW000001", RSSI: -100, SNR: -6, At: now}},
+	}
+	eng := NewEngine(cfg, newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	d := find(eng.Tick(s, now), "MOVE0001")
+	if d.Action != Raise || !d.Mobile {
+		t.Fatalf("weak mobile should raise on the reserve band: %+v", d)
+	}
+	if d.Delta > cfg.MobileUpStep || d.Delta <= cfg.MaxStep {
+		t.Fatalf("mobile raise step %d should use MobileUpStep (%d), bigger than MaxStep (%d)", d.Delta, cfg.MobileUpStep, cfg.MaxStep)
 	}
 }
 

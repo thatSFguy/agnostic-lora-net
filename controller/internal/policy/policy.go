@@ -43,13 +43,23 @@ type Config struct {
 	PowerMax   int8
 	DefaultSF  int
 	SeedPower  int8 // assumed power for a node we haven't commanded yet (if unreported)
+
+	// Mobile nodes: fast feedback isn't possible over the mesh (cellular-style closed-loop
+	// power control runs at ~kHz; ours runs every cycle over a slow shared link), so we
+	// approximate it — a higher target margin (movement reserve, the cushion that absorbs
+	// motion between cycles) plus an asymmetric response: raise fast, trim slowly and only
+	// after the strong margin holds for several cycles (so a transient good reading from a
+	// moving node doesn't cut its headroom).
+	MobileReserve   float64 // dB added to both band edges for mobile nodes
+	MobileUpStep    int8    // raise step for mobile (fast up); <=0 falls back to MaxStep
+	MobileLowerStep int8    // trim step for mobile (slow down)
+	MobileLowerHold int     // consecutive over-band cycles before a mobile node is trimmed
 }
 
 func DefaultConfig() Config {
-	return Config{MarginLow: 6, MarginHigh: 12, MaxStep: 3, PowerMin: -9, PowerMax: 22, DefaultSF: 9, SeedPower: 22}
+	return Config{MarginLow: 6, MarginHigh: 12, MaxStep: 3, PowerMin: -9, PowerMax: 22, DefaultSF: 9, SeedPower: 22,
+		MobileReserve: 6, MobileUpStep: 5, MobileLowerStep: 1, MobileLowerHold: 3}
 }
-
-func (c Config) mid() float64 { return (c.MarginLow + c.MarginHigh) / 2 }
 
 // Observation is what we know about one managed node this cycle: the worst-case view of
 // how its neighbours hear it. Because a node has one shared TX power, the binding link is
@@ -61,7 +71,7 @@ type Observation struct {
 	Margin  float64 // worst (minimum) SNR margin across the node's outbound links (dB)
 	SNR     float64 // SNR of that governing link — measured, or estimated from quality
 	Soft    bool    // governing link is quality-only (estimate saturates; not safe to trim on)
-	Mobile  bool    // operator-flagged moving node — keep headroom, never trim its power
+	Mobile  bool    // node self-reports it moves — higher reserve band, raise fast / trim slow
 	GovPeer string  // receiver of the governing (weakest) link, for the audit log
 }
 
@@ -88,7 +98,7 @@ type Decision struct {
 	NewTarget int8    `json:"new_target"`
 	Reason    string  `json:"reason"`
 	Soft      bool    `json:"soft,omitempty"`    // governing margin estimated from quality, not measured SNR
-	Mobile    bool    `json:"mobile,omitempty"`  // node flagged mobile — power held up for movement headroom
+	Mobile    bool    `json:"mobile,omitempty"`  // node flagged mobile — reserve band, raise fast / trim slow
 	Governs   string  `json:"governs,omitempty"` // receiver of the weakest outbound link
 }
 
@@ -115,33 +125,45 @@ func Decide(obs Observation, curTarget int8, cfg Config) Decision {
 	margin := obs.Margin // already the worst-link margin (min over outbound links)
 	d.HeardSNR, d.Margin = obs.SNR, margin
 
-	switch {
-	case margin < cfg.MarginLow:
-		// The weakest neighbour that must hear this node is marginal — raise. Reliable even
-		// from quality (a low q unambiguously means a weak link).
-		want := int8(math.Round(cfg.mid() - margin))
-		d.Delta = clampI8(want, 0, cfg.MaxStep)
-	case margin > cfg.MarginHigh:
-		// Every neighbour hears it too loudly — we could trim power, but two cases hold instead:
-		//  - mobile node: its margin reflects where it is *now*; trimming risks losing the link
-		//    when it moves, so keep the headroom and never trim a moving node.
-		//  - quality-only governing link: the q->SNR estimate saturates at the top, so a "loud"
-		//    reading can't tell +8 dB from +30 dB — don't trim blind.
-		if obs.Mobile {
-			d.Action = Hold
-			d.Reason = "margin above band but node is mobile — holding power for movement headroom"
-			return d
+	// Mobile nodes target a higher band (movement reserve) and respond asymmetrically: raise
+	// fast (big step), trim slow (small step). The trim is further gated to N consecutive
+	// over-band cycles in the engine — this just sets the per-cycle band/steps.
+	low, high := cfg.MarginLow, cfg.MarginHigh
+	upStep, downStep := cfg.MaxStep, cfg.MaxStep
+	if obs.Mobile {
+		low += cfg.MobileReserve
+		high += cfg.MobileReserve
+		if cfg.MobileUpStep > 0 {
+			upStep = cfg.MobileUpStep
 		}
+		downStep = cfg.MobileLowerStep
+	}
+	mid := (low + high) / 2
+
+	switch {
+	case margin < low:
+		// The weakest neighbour that must hear this node is marginal — raise. Reliable even
+		// from quality (a low q unambiguously means a weak link). Mobile raises fast.
+		want := int8(math.Round(mid - margin))
+		d.Delta = clampI8(want, 0, upStep)
+	case margin > high:
+		// Heard too loudly — trim, EXCEPT a quality-only governing link: the q->SNR estimate
+		// saturates at the top, so a "loud" reading can't tell +8 from +30 dB — don't trim
+		// blind (fixed and mobile alike).
 		if obs.Soft {
 			d.Action = Hold
 			d.Reason = "margin above band but governing link is quality-only (estimate saturates) — hold rather than trim blind"
 			return d
 		}
-		want := int8(math.Round(margin - cfg.mid())) // ~1 dB power ≈ 1 dB SNR
-		d.Delta = -clampI8(want, 0, cfg.MaxStep)
+		want := int8(math.Round(margin - mid)) // ~1 dB power ≈ 1 dB SNR
+		d.Delta = -clampI8(want, 0, downStep)
 	default:
 		d.Action = Hold
-		d.Reason = "worst-link margin in band — hold"
+		if obs.Mobile {
+			d.Reason = "mobile: worst-link margin within the reserve band — hold"
+		} else {
+			d.Reason = "worst-link margin in band — hold"
+		}
 		return d
 	}
 

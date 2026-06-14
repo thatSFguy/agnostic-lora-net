@@ -129,9 +129,10 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
     <button id="mob_fixed">Fixed</button>
     <button id="mob_mobile">📍 Mobile</button>
     <div class="muted" style="margin-top:.3rem;">
-      Flag a node that moves around. The controller keeps its TX-power headroom and never
-      trims it (a fixed node gets its power optimised down). Stored in flash and reported in
-      telemetry, so any controller learns it.</div>
+      Flag a node that moves around. The controller gives it a higher margin reserve and an
+      asymmetric loop — raises power fast when the link weakens, trims slowly (and only after
+      the margin stays strong) — versus a fixed node, which it optimises straight down. Stored
+      in flash and reported in telemetry, so any controller learns it.</div>
   </fieldset>
 </div>
 
