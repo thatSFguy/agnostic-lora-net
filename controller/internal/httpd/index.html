@@ -91,6 +91,7 @@
   <div class="connbar">
     <button id="cfgUsb">Connect (USB)</button>
     <button id="cfgBle">Connect (BLE)</button>
+    <button id="cfgDisc">Disconnect</button>
     <span id="cfgStatus" class="bad">disconnected</span>
     <span class="kv">node <b id="cfgNode">—</b></span>
     <span class="kv">fw <b id="cfgFw">—</b></span>
@@ -430,7 +431,11 @@ async function cfgApplyRf(){ const r=cfgFormRf(); if(isNaN(r.freq_hz)||isNaN(r.s
   await cfgSend('rf freq '+r.freq_hz); await cfgSend('rf bw '+$('#rf_bw').value); await cfgSend('rf sf '+r.sf); await cfgSend('rf cr '+r.cr);
   await cfgSend('rf power '+r.power_dbm); await cfgSend('rf sync 0x'+hex); await cfgSend('rf preamble '+r.preamble); await cfgSend('rf apply');
   setTimeout(()=>cfgSend('rf show'),400); clog('radio: staged + apply sent'+(crit?' (RETUNE)':' (power/minor)')); }
-$('#cfgUsb').onclick=cfgConnectUsb; $('#cfgBle').onclick=cfgConnectBle;
+async function cfgDisconnect(){ await cfgCloseUsb();
+  try{ if(cfgBleDev && cfgBleDev.gatt.connected) cfgBleDev.gatt.disconnect(); }catch(e){}
+  cfgBleDev=null; cfgSendRaw=null;
+  $('#cfgStatus').textContent='disconnected'; $('#cfgStatus').className='bad'; cfgEnable(false); clog('disconnected.'); }
+$('#cfgUsb').onclick=cfgConnectUsb; $('#cfgBle').onclick=cfgConnectBle; $('#cfgDisc').onclick=cfgDisconnect;
 $('#cfgSend').onclick=()=>{ const v=$('#cfgCmd').value.trim(); if(v){ cfgSend(v); $('#cfgCmd').value=''; } };
 $('#cfgCmd').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#cfgSend').onclick(); });
 $('#enable').onclick=()=>cfgSend('ble on'); $('#disable').onclick=()=>cfgSend('ble off');
