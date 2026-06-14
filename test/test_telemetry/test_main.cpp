@@ -31,7 +31,8 @@ static void test_query_roundtrip() {
 }
 
 static void test_reply_roundtrip() {
-    TelemNbr nbrs[2] = { {0xD97EEC3Au, 99, 100}, {0xB51EEC13u, 87, 0} };
+    // nbr 0 carries measured RF (snr/rssi); nbr 1 is unmeasured (0/0).
+    TelemNbr nbrs[2] = { {0xD97EEC3Au, 99, 100, -4, -95}, {0xB51EEC13u, 87, 0, 0, 0} };
     uint8_t b[64];
     uint16_t n = telem_build_reply(4021, 86, 1234, 22, 9, "0.7.0", nbrs, 2, b, sizeof(b));
     TEST_ASSERT_TRUE(n > 0);
@@ -47,7 +48,11 @@ static void test_reply_roundtrip() {
     TEST_ASSERT_EQUAL_UINT8(2, m.n_nbrs);
     TEST_ASSERT_EQUAL_HEX32(0xD97EEC3Au, m.nbrs[0].id);
     TEST_ASSERT_EQUAL_UINT8(100, m.nbrs[0].q_tx);
+    TEST_ASSERT_EQUAL_INT8(-4, m.nbrs[0].snr);        // per-neighbour SNR survives the round-trip
+    TEST_ASSERT_EQUAL_INT16(-95, m.nbrs[0].rssi);     // negative rssi survives (signed i16)
     TEST_ASSERT_EQUAL_HEX32(0xB51EEC13u, m.nbrs[1].id);
+    TEST_ASSERT_EQUAL_INT8(0, m.nbrs[1].snr);         // unmeasured stays 0
+    TEST_ASSERT_EQUAL_INT16(0, m.nbrs[1].rssi);
 }
 
 static void test_parse_rejects_malformed() {
@@ -57,10 +62,10 @@ static void test_parse_rejects_malformed() {
     uint8_t bad[5] = { 99, 0, 0, 0, 0 };
     TEST_ASSERT_FALSE(telem_parse(bad, sizeof(bad), &m));       // unknown kind
     // reply whose nbr count overruns the buffer
-    TelemNbr nbrs[1] = { {1, 1, 1} };
+    TelemNbr nbrs[1] = { {1, 1, 1, 0, 0} };
     uint8_t b[64];
     uint16_t n = telem_build_reply(1, 1, 1, 10, 9, "x", nbrs, 1, b, sizeof(b));
-    b[n - 7] = 5;                                               // claim 5 nbrs, carry 1
+    b[n - 10] = 5;                                              // n_nbrs byte (one 9 B entry trails it): claim 5, carry 1
     TEST_ASSERT_FALSE(telem_parse(b, n, &m));
 }
 

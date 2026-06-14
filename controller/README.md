@@ -109,12 +109,13 @@ change, and only CONFIRMs a *decrease* after re-observing the node reachable —
 call (or the controller dying) self-heals via the on-device 60 s revert. *Scope
 (mesh-wide):* a node has one TX power, so it optimises against the **weakest outbound link
 the node must keep** — the neighbour that hears it worst — gathered from every link
-`node→X`. The tethered gateway's own links carry measured SNR; remote links arrive via
-round-robin `status <id>` telemetry polls as link *quality*, which is inverted to an
-approximate SNR. That estimate saturates at high SNR, so a quality-only link can trigger a
-**raise** (a weak link is unambiguous) but never a **lower** — power is only trimmed on a
-measured SNR. Per-link SNR everywhere (so remote links can be trimmed too) needs the
-telemetry-frame change in §4c.
+`node→X`. The tethered gateway's own links carry measured SNR; remote links arrive via round-robin
+`status <id>` telemetry polls. As of **fw 0.10.0** that telemetry carries per-neighbour
+SNR/RSSI (Phase 2), so remote links are measured too and can be **trimmed**, not just
+raised. A link still lacking RSSI (older fw, or a neighbour not yet RF-measured) falls back
+to link *quality*, inverted to an approximate SNR; that estimate saturates at high SNR, so a
+quality-only link can trigger a **raise** but never a **lower** — power is only trimmed on a
+measured SNR.
 
 Outputs: `capture.csv` (one row per console event; `airframe=1` marks real on-air
 frames — beacon TX/RX, forwards — visible with `trace on`) and an optional topology

@@ -4,14 +4,15 @@
 // it's heard too loudly (saves airtime/power, the "all nodes turned way down" fix done
 // *measured* instead of guessed), higher when it's marginal.
 //
-// Scope (Phase 1, mesh-wide): a node transmits at one power, so the binding constraint is
-// the *weakest outbound link it must keep* — the neighbour that hears it worst. The engine
+// Scope (mesh-wide): a node transmits at one power, so the binding constraint is the
+// *weakest outbound link it must keep* — the neighbour that hears it worst. The engine
 // gathers every link node->X (how each neighbour hears it) and optimises against the
-// minimum margin. Links the tethered gateway measures directly carry true SNR; remote
-// links come from routed telemetry as link *quality* (0..1), which we invert to an
-// approximate SNR. That estimate saturates at high SNR, so quality-only links can prove a
-// link is marginal (-> raise) but never that it is too loud (-> lower) — we only trim power
-// on a measured SNR. Per-link SNR everywhere waits on the telemetry-frame change in §4c.
+// minimum margin. As of fw 0.10.0 the telemetry frame carries per-neighbour SNR/RSSI
+// (Phase 2), so remote links arrive measured too — and can be trimmed, not just raised. Any
+// link still lacking RSSI (older fw, or a neighbour not yet RF-measured) falls back to link
+// *quality* (0..1), inverted to an approximate SNR; that estimate saturates at high SNR, so
+// a quality-only link can prove a link marginal (-> raise) but never too loud (-> lower) —
+// power is only trimmed on a measured SNR.
 //
 // Safety: the controller owns each node's power (POWER sets an absolute dBm), tracks its
 // own target per node, step-limits and clamps every change, and — because a power DECREASE

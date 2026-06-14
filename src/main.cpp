@@ -1321,8 +1321,13 @@ static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
 #endif
     Serial.println(line);
     for (uint8_t i = 0; i < m.n_nbrs; i++) {
-        snprintf(line, sizeof(line), "  nbr %08lX q_rx=%u q_tx=%u",
-                 (unsigned long)m.nbrs[i].id, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx);
+        if (m.nbrs[i].rssi != 0)   // measured RF present -> controller treats it as a real SNR link
+            snprintf(line, sizeof(line), "  nbr %08lX q_rx=%u q_tx=%u rssi=%d snr=%d",
+                     (unsigned long)m.nbrs[i].id, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx,
+                     (int)m.nbrs[i].rssi, (int)m.nbrs[i].snr);
+        else
+            snprintf(line, sizeof(line), "  nbr %08lX q_rx=%u q_tx=%u",
+                     (unsigned long)m.nbrs[i].id, (unsigned)m.nbrs[i].q_rx, (unsigned)m.nbrs[i].q_tx);
 #ifdef AGN_BLE
         if (ble_connected) bleuart.println(line);
 #endif
@@ -1357,10 +1362,17 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                         nbrs[nn].id   = nb->id;
                         nbrs[nn].q_rx = (uint8_t)(nb->q_rx > 0 ? nb->q_rx * 100 : 0);
                         nbrs[nn].q_tx = (uint8_t)(nb->q_tx > 0 ? nb->q_tx * 100 : 0);
+                        // Attach the RF we last heard this neighbour at (q_rx direction), so the
+                        // controller gets a true SNR margin for remote links (Phase 2). 0 = unmeasured.
+                        nbrs[nn].snr = 0; nbrs[nn].rssi = 0;
+                        if (const AnnCache* ac = ann_cache_find(nb->id)) {
+                            nbrs[nn].snr  = (int8_t)ac->snr;
+                            nbrs[nn].rssi = (int16_t)ac->rssi;
+                        }
                         nn++;
                     }
                 }
-                uint8_t r[8 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 6];
+                uint8_t r[9 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 9];
                 uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
                 uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
                         (uint16_t)((millis() - boot_ms) / 60000u),

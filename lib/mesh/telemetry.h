@@ -18,8 +18,15 @@
 //   BATT   : u8 kind=1 | u16 mv | u8 pct_plus1
 //   QUERY  : u8 kind=2 | u32 target
 //   REPLY  : u8 kind=3 | u16 mv | u8 pct_plus1 | u16 uptime_min |
-//            u8 fw_len | fw_len×char | u8 n_nbrs | n×{u32 id, u8 q_rx, u8 q_tx}
+//            u8 fw_len | fw_len×char | u8 n_nbrs |
+//            n×{u32 id, u8 q_rx, u8 q_tx, i8 snr, i16 rssi}
 // pct_plus1: 0 = unknown/uncalibrated, 1..101 = 0..100 % (matches the beacon byte).
+// snr/rssi: the RF at which the reporting node last heard this neighbour (the q_rx
+//   direction). 0/0 = unmeasured. Lets the controller put REMOTE links on a true SNR
+//   margin (Phase 2) so it can trim their power, not just raise — see controller/.
+// NOTE: the nbr entry grew 6->9 B in this revision; kind stays 3, so all nodes must run
+//   matching firmware (a star bench reflash). Mixed versions reject each other's replies
+//   via the length check rather than mis-parsing.
 #pragma once
 
 #include <stdint.h>
@@ -34,7 +41,13 @@ constexpr uint8_t  TELEM_FW_MAX   = 12;   // fw version string cap in a REPLY
 constexpr uint8_t  TELEM_NBR_MAX  = 16;   // neighbour entries cap in a REPLY
 constexpr uint16_t TELEM_CACHE_CAP = 16;  // battery reports cached per node
 
-struct TelemNbr { node_id_t id; uint8_t q_rx; uint8_t q_tx; };   // q ×100
+struct TelemNbr {
+    node_id_t id;
+    uint8_t   q_rx;          // q ×100
+    uint8_t   q_tx;          // q ×100
+    int8_t    snr  = 0;      // dB, q_rx direction (0 = unmeasured)
+    int16_t   rssi = 0;      // dBm, q_rx direction (0 = unmeasured)
+};
 
 // A parsed TELEM message (fields populated per kind).
 struct TelemMsg {
