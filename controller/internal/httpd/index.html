@@ -218,7 +218,7 @@ function renderNodes(state){
         ${n.blocked?`<button class="danger" data-unblock="${n.id}">Unblock</button>`:`<button class="danger" data-block="${n.id}">Block</button>`}</div>`;
     return `<div class="node ${n.blocked?'blocked':''}">
       <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${isGw?'<span class="pill">gateway</span>':''}${mob?'<span class="pill">📍 mobile</span>':''}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
-      <div class="kv">${n.id} · SF${n.sf||'?'}${typeof pwr==='number'?' · '+pwr+'dBm':''}${n.batt_pct?' · '+n.batt_pct+'%':''}${h?' · gw hears '+h.rssi+'/'+h.snr+'dB':''}</div>
+      <div class="kv">${n.id} · SF${n.sf||'?'}${typeof pwr==='number'?' · '+pwr+'dBm':''}${n.fw?' · fw '+n.fw:''}${n.batt_pct?' · '+n.batt_pct+'%':''}${h?' · gw hears '+h.rssi+'/'+h.snr+'dB':''}</div>
       ${margin!=null?`<div class="kv">margin ${margin.toFixed(1)} dB</div><div class="bar"><span style="width:${pct}%"></span></div>`:'<div class="kv">no SNR yet</div>'}
       <div class="row"><input class="alias" placeholder="alias" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" data-alias="${n.id}"></div>${ctrls}</div>`;
   }).join('') || '<div class="kv">waiting for the node…</div>';
