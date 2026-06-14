@@ -100,10 +100,11 @@
   </div>
 
   <div class="cfgcard"><h3>Provisioning</h3>
-    <div class="kv">Flashing writes firmware only — it does <b>not</b> provision. Do this once per node after flashing so the controller can sign commands to it (power/block): push <b>this controller's key</b>, then set a BLE PIN below if you'll manage it over BLE.</div>
+    <div class="kv">Binds this node to a controller's key so it accepts signed commands (power/block). The key persists in flash across reflashes (DFU doesn't wipe config), so a node provisioned once <b>stays</b> provisioned — connect to see its current state, and re-sync if it holds a different controller's key or none.</div>
+    <div class="kv" style="margin:.3rem 0">status: <b id="prov_status">connect to check…</b></div>
     <div class="kv" style="margin:.3rem 0">controller key: <b id="prov_pub" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all">—</b></div>
     <fieldset id="provfs" disabled>
-      <button id="prov_key">Provision controller key (ctrlkey)</button>
+      <button id="prov_key">Provision / re-sync controller key</button>
     </fieldset>
   </div>
 
@@ -163,7 +164,7 @@
 <div id="flashview" class="tabview hide"><div class="col">
   <div class="cfgcard"><h3>Flash firmware (nRF52 serial DFU)</h3>
     <div class="kv">Flashes a node plugged into THIS machine over Web Serial. The node reboots into its bootloader (1200-baud touch) and re-enumerates — pick the bootloader port when prompted.</div>
-    <div class="kv" style="color:var(--lower)">Firmware only — this does <b>not</b> provision. A freshly flashed node has no controller key, so the optimiser/commands can't reach it yet. After it reboots, go to <b>Configure → Provisioning</b> and push the controller key (and set a BLE PIN).</div>
+    <div class="kv" style="color:var(--lower)">Firmware only — flashing doesn't change provisioning. The controller key persists in flash across reflashes, so a previously-provisioned node stays provisioned; a brand-new node still needs it. After it reboots, check/sync on <b>Configure → Provisioning</b> (and set a BLE PIN there).</div>
     <div class="grid" style="margin-top:.6rem">
       <label>Board<select id="fl_board">
         <option value="rak">RAK4631 (nRF52840 + SX1262)</option>
@@ -388,6 +389,8 @@ $('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').c
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e', NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e', NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 let cfgPort=null, cfgWriter=null, cfgBleDev=null, cfgReader=null, cfgSendRaw=null, cfgRxbuf='', loadedRf=null, ctrlPub='';
 function clog(m){ const l=$('#cfgLog'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-300).join('\n'); l.scrollTop=l.scrollHeight; }
+function provSet(cls,text){ const e=$('#prov_status'); e.textContent=text;
+  e.style.color = cls==='ok'?'var(--confirm)':cls==='bad'?'var(--revert)':'var(--lower)'; }
 function cfgFeed(t){ cfgRxbuf+=t; let i; while((i=cfgRxbuf.indexOf('\n'))>=0){ cfgLine(cfgRxbuf.slice(0,i).replace(/\r$/,'')); cfgRxbuf=cfgRxbuf.slice(i+1); } }
 async function cfgSend(s){ if(cfgSendRaw) await cfgSendRaw(s+'\n'); else clog('not connected'); }
 function cfgEnable(on){ for(const f of ['#rffs','#battfs','#blefs','#mobfs','#provfs']) $(f).disabled=!on;
@@ -403,6 +406,14 @@ function cfgLine(line){ clog(line); let m;
   if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('#cfgNode').textContent=m[1].toUpperCase();
   if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
     $('#mob_val').textContent = m[1]==='on'?'🚗 mobile (reserve band, raise fast / trim slow)':'📍 fixed (power optimised)';
+  // provisioning state: node reports `ctrlkey AABB..YYZZ counter=N` | `ctrlkey: none` | set/clear acks
+  if((m=line.match(/^ctrlkey ([0-9A-Fa-f]{2})([0-9A-Fa-f]{2})\.\.([0-9A-Fa-f]{2})([0-9A-Fa-f]{2}) counter=(\d+)/))){
+    const f4=(m[1]+m[2]).toUpperCase(), l4=(m[3]+m[4]).toUpperCase(), pk=(ctrlPub||'').toUpperCase();
+    if(pk && f4===pk.slice(0,4) && l4===pk.slice(-4)) provSet('ok','✓ provisioned with THIS controller (counter '+m[5]+')');
+    else provSet('bad','⚠ holds a DIFFERENT controller key ('+f4+'..'+l4+') — click to re-sync'); }
+  else if(/^ctrlkey: none/.test(line)) provSet('bad','✗ not provisioned — click to provision');
+  else if(/^ctrlkey set \(persisted\)/.test(line)) provSet('warn','sent — verifying…');
+  else if(/^ctrlkey cleared/.test(line)) provSet('bad','cleared — not provisioned');
   if((m=line.match(/^batt raw=(\d+) mv=(\d+) pct=(\d+)/))) $('#batt_val').textContent=m[2]+' mV — '+m[3]+'%  (raw '+m[1]+')';
   else if((m=line.match(/^batt raw=(\d+) UNCALIBRATED/))) $('#batt_val').textContent='raw '+m[1]+' — UNCALIBRATED';
   else if((m=line.match(/^batt mv=(\d+) pct=(\d+)/))) $('#batt_val').textContent=m[1]+' mV — '+m[2]+'%';
@@ -415,7 +426,8 @@ function cfgLine(line){ clog(line); let m;
 function cfgMarkConnected(kind){ $('#cfgStatus').textContent='connected ('+kind+')'; $('#cfgStatus').className='ok'; cfgEnable(true);
   clog('connected over '+kind+' — reading…');
   setTimeout(()=>cfgSend('ble'),500); setTimeout(()=>cfgSend('rf show'),900);
-  setTimeout(()=>cfgSend('info'),1300); setTimeout(()=>cfgSend('mobile'),1600); }
+  setTimeout(()=>cfgSend('info'),1300); setTimeout(()=>cfgSend('mobile'),1600);
+  provSet('warn','checking…'); setTimeout(()=>cfgSend('ctrlkey'),1900); }   // query provisioning state
 async function cfgReadLoop(){ cfgReader=cfgPort.readable.getReader();
   try{ for(;;){ const {value,done}=await cfgReader.read(); if(done) break; cfgFeed(new TextDecoder().decode(value)); } }
   catch(e){ clog('read end: '+e); } finally{ try{cfgReader.releaseLock();}catch(e){} cfgReader=null; } }
@@ -459,7 +471,8 @@ $('#batt_cal').onclick=()=>{ let v=+$('#batt_mv').value; if(v>0&&v<10) v=Math.ro
   if(v>=1000&&v<=6000) cfgSend('batt cal '+v); else clog('enter measured battery (volts e.g. 4.02, or mV e.g. 4020)'); };
 $('#mob_fixed').onclick=()=>cfgSend('mobile off'); $('#mob_mobile').onclick=()=>cfgSend('mobile on');
 $('#prov_key').onclick=()=>{ if(!ctrlPub){ clog('controller has no key — mint or import one first'); return; }
-  cfgSend('ctrlkey '+ctrlPub); clog('→ ctrlkey '+ctrlPub.slice(0,12)+'… (provisioning this node)'); setTimeout(()=>cfgSend('ctrlkey'),600); };
+  provSet('warn','provisioning…'); cfgSend('ctrlkey '+ctrlPub); clog('→ ctrlkey '+ctrlPub.slice(0,12)+'… (provisioning this node)');
+  setTimeout(()=>cfgSend('ctrlkey'),700); };   // re-query -> status flips to ✓ provisioned with THIS controller
 window.addEventListener('pagehide',()=>cfgCloseUsb());
 
 // ===================== FLASH: nRF52 serial DFU to a local node (ported from hub.js) =====================
