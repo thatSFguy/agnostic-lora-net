@@ -22,19 +22,19 @@ void Forwarder::mark_seen(node_id_t src, uint16_t pkt_id) {
 
 Decision Forwarder::decide(const PacketRef& p) {
     // Our own packet came back to us (broadcast medium) — never act on it.
-    if (p.src == me_) return {Action::DROP_OWN, 0, 0};
+    if (p.src == me_) return {Action::DROP_OWN, {}, 0};
 
     // Dedup: drop anything we've already handled. Records it if new.
-    if (seen_or_insert(p.src, p.pkt_id)) return {Action::DROP_DUP, 0, 0};
+    if (seen_or_insert(p.src, p.pkt_id)) return {Action::DROP_DUP, {}, 0};
 
     // Destined for us (direct or broadcast) — deliver to the app.
-    if (p.dst == me_ || p.dst == BCAST_ID) return {Action::DELIVER, 0, 0};
+    if (p.dst == me_ || p.dst == BCAST_ID) return {Action::DELIVER, {}, 0};
 
     // Not ours: it must be relayed. A TTL of 0 or 1 can't make another hop.
-    if (p.ttl <= 1) return {Action::DROP_TTL, 0, 0};
+    if (p.ttl <= 1) return {Action::DROP_TTL, {}, 0};
 
     node_id_t nh = router_.next_hop(p.dst);
-    if (nh == 0) return {Action::DROP_NO_ROUTE, 0, 0};
+    if (nh.is_zero()) return {Action::DROP_NO_ROUTE, {}, 0};
 
     return {Action::FORWARD, nh, (uint8_t)(p.ttl - 1)};
 }

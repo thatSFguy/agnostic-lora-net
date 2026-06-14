@@ -23,8 +23,8 @@ constexpr uint8_t MAX_HOPS   = 16;     // hop ceiling == "infinity" for this DV
 constexpr float   COST_INF   = 1.0e6f; // unreachable
 
 struct Route {
-    node_id_t dst        = 0;
-    node_id_t next_hop   = 0;
+    node_id_t dst        = {};
+    node_id_t next_hop   = {};
     float     cost       = COST_INF;
     uint8_t   hops       = 0;
     uint32_t  updated_ms = 0;
@@ -61,7 +61,7 @@ private:
     Route*   find_mut(node_id_t dst);
     Route*   alloc(node_id_t dst);
 
-    node_id_t self_ = 0;
+    node_id_t self_ = {};
     Route     slots_[MAX_ROUTES];
 };
 

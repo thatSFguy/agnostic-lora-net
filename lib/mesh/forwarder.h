@@ -41,9 +41,9 @@ struct Decision {
     uint8_t   out_ttl;   // TTL to stamp on the forwarded frame
 };
 
-// Broadcast value matching packet.h's NODE_ID_BROADCAST (kept local so the mesh
-// library stays independent of the wire-format header).
-constexpr node_id_t BCAST_ID = 0xFFFFFFFFu;
+// Broadcast value matching packet.h's NODE_ID_BROADCAST (now sourced from
+// mesh_types.h, so the mesh library still doesn't depend on the wire-format header).
+constexpr node_id_t BCAST_ID = NODE_ID_BROADCAST;
 
 constexpr uint8_t SEEN_CACHE_SIZE = 64;
 

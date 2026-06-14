@@ -5,14 +5,14 @@
 // (FICR-derived, collidable): the signature + a persisted monotonic counter are
 // the entire trust model. No unsigned message may ever change node state.
 //
-// Wire layout (LE) inside a PKT_CONTROL payload:
-//   COMMAND: u8 ver=1 | u8 cmd | u32 target | i8 arg | u32 counter | sig[64]
+// Wire layout (LE) inside a PKT_CONTROL payload (v2: 16-byte node ids):
+//   COMMAND: u8 ver=2 | u8 cmd | id[16] target | i8 arg | u32 counter | sig[64]
 //     cmd 1 = POWER   (arg = TX dBm to apply)
 //     cmd 2 = CONFIRM (arg = the dBm being confirmed — disarms the revert)
-//   signature: Ed25519 over "AGN-CTRL-1" || the 11 unsigned bytes (domain-tagged
+//   signature: Ed25519 over "AGN-CTRL-1" || the 23 unsigned bytes (domain-tagged
 //   so a control signature can never be confused with any future signed thing).
 //
-//   ACK (UNSIGNED, success-only): u8 ver=1 | u8 cmd|0x80 | u32 origin | i8 applied
+//   ACK (UNSIGNED, success-only): u8 ver=2 | u8 cmd|0x80 | id[16] origin | i8 applied
 //                                 | u8 provisional | u32 counter
 //   Nodes hold no keypair, so ACKs are informational: they can be forged, but a
 //   forged "success" only lies to a UI — it cannot change state. Failures are
@@ -32,27 +32,26 @@ namespace mesh {
 enum CtrlCmd : uint8_t { CTRL_POWER = 1, CTRL_CONFIRM = 2, CTRL_BLOCK = 3, CTRL_UNBLOCK = 4 };
 enum CtrlVerdict : uint8_t { CTRL_OK = 0, CTRL_MALFORMED, CTRL_BAD_SIG, CTRL_REPLAY };
 
-constexpr uint8_t  CTRL_VER       = 1;
-// POWER/CONFIRM keep the original 11-byte unsigned header (ver|cmd|target|arg|counter).
-// BLOCK/UNBLOCK insert a 4-byte `aux` (the victim id) before the counter, so they carry
-// BOTH the recipient (target) and the link to drop (aux). Layouts branch on cmd so the
-// POWER wire format — and every already-provisioned signer — is untouched.
-constexpr uint16_t CTRL_MSG_BYTES = 11 + 64;   // POWER/CONFIRM: unsigned + signature
-constexpr uint16_t CTRL_BLK_BYTES = 15 + 64;   // BLOCK/UNBLOCK: + 4-byte victim id
+constexpr uint8_t  CTRL_VER       = 2;   // v2: 16-byte node ids (was 4-byte in v1)
+// POWER/CONFIRM unsigned header: ver|cmd|target(16)|arg|counter = 23 bytes.
+// BLOCK/UNBLOCK insert a 16-byte `aux` (the victim id) before the counter, so they carry
+// BOTH the recipient (target) and the link to drop (aux) -> 39 bytes. Layouts branch on cmd.
+constexpr uint16_t CTRL_MSG_BYTES = 23 + 64;   // POWER/CONFIRM: unsigned + signature
+constexpr uint16_t CTRL_BLK_BYTES = 39 + 64;   // BLOCK/UNBLOCK: + 16-byte victim id
 constexpr uint16_t CTRL_MAX_BYTES = CTRL_BLK_BYTES;   // size any command buffer with this
-constexpr uint16_t CTRL_ACK_BYTES = 12;
+constexpr uint16_t CTRL_ACK_BYTES = 24;        // ver|cmd|origin(16)|applied|provisional|counter
 
 struct CtrlMsg {
     uint8_t   cmd     = 0;
-    node_id_t target  = 0;     // recipient: the node that applies the command
+    node_id_t target  = {};    // recipient: the node that applies the command
     int8_t    arg     = 0;     // POWER: dBm. BLOCK: TTL minutes (0 = firmware default)
-    node_id_t aux     = 0;     // BLOCK/UNBLOCK: the victim id to block/unblock (else 0)
+    node_id_t aux     = {};    // BLOCK/UNBLOCK: the victim id to block/unblock (else 0)
     uint32_t  counter = 0;
 };
 
 struct CtrlAck {
     uint8_t   cmd         = 0;     // original cmd (high bit stripped)
-    node_id_t origin      = 0;
+    node_id_t origin      = {};
     int8_t    applied     = 0;
     uint8_t   provisional = 0;     // 1 = will revert unless confirmed
     uint32_t  counter     = 0;

@@ -5,15 +5,8 @@ namespace mesh {
 // --- little-endian byte helpers --------------------------------------------
 static inline void put_u8(uint8_t* p, uint8_t v)  { p[0] = v; }
 static inline void put_u16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
-static inline void put_u32(uint8_t* p, uint32_t v) {
-    p[0] = (uint8_t)v;         p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-}
 static inline uint8_t  get_u8(const uint8_t* p)  { return p[0]; }
 static inline uint16_t get_u16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static inline uint32_t get_u32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
 
 // --- quantisation ----------------------------------------------------------
 static inline uint8_t q_to_byte(float q) {
@@ -40,15 +33,15 @@ uint16_t announce_serialize(const Announce& a, uint8_t* buf, uint16_t cap) {
 
     for (uint8_t i = 0; i < a.n_reports; i++) {
         if (off + ANNOUNCE_REPORT_BYTES > cap) break;
-        put_u32(buf + off, a.reports[i].id);  off += 4;
+        nid_write(buf + off, a.reports[i].id);  off += 16;
         put_u8 (buf + off, q_to_byte(a.reports[i].q)); off += 1;
         put_u8 (buf + off, a.reports[i].alias); off += 1;
         n_reports++;
     }
     for (uint8_t i = 0; i < a.n_routes; i++) {
         if (off + ANNOUNCE_ROUTE_BYTES > cap) break;
-        put_u32(buf + off, a.routes[i].dst);      off += 4;
-        put_u32(buf + off, a.routes[i].next_hop); off += 4;
+        nid_write(buf + off, a.routes[i].dst);      off += 16;
+        nid_write(buf + off, a.routes[i].next_hop); off += 16;
         put_u16(buf + off, cost_to_u16(a.routes[i].cost)); off += 2;
         put_u8 (buf + off, a.routes[i].hops);     off += 1;
         n_routes++;
@@ -77,15 +70,15 @@ bool announce_deserialize(const uint8_t* buf, uint16_t len, Announce& out) {
 
     uint16_t off = ANNOUNCE_HDR_BYTES;
     for (uint8_t i = 0; i < n_reports; i++) {
-        out.reports[i].id    = get_u32(buf + off); off += 4;
+        out.reports[i].id    = nid_read(buf + off); off += 16;
         out.reports[i].q     = byte_to_q(get_u8(buf + off)); off += 1;
         out.reports[i].alias = get_u8(buf + off); off += 1;
     }
     out.n_reports = n_reports;
 
     for (uint8_t i = 0; i < n_routes; i++) {
-        out.routes[i].dst      = get_u32(buf + off); off += 4;
-        out.routes[i].next_hop = get_u32(buf + off); off += 4;
+        out.routes[i].dst      = nid_read(buf + off); off += 16;
+        out.routes[i].next_hop = nid_read(buf + off); off += 16;
         out.routes[i].cost     = u16_to_cost(get_u16(buf + off)); off += 2;
         out.routes[i].hops     = get_u8(buf + off); off += 1;
     }

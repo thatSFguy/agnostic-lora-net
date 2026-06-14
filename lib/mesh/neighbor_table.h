@@ -27,7 +27,7 @@ constexpr link_addr_t ALIAS_NONE      = 0x00;
 constexpr link_addr_t ALIAS_BROADCAST = 0xFF;
 
 struct Neighbor {
-    node_id_t id        = 0;
+    node_id_t id        = {};
     float     q_rx      = -1.0f;  // <0 = unknown
     float     q_tx      = -1.0f;  // <0 = unknown (no report received yet)
     // Link-local aliases (1 byte each, Agent.md §5):
@@ -80,7 +80,7 @@ public:
     // Seed for id-derived alias allocation (call once, before any heard()):
     // spreads each node's alias range so different assigners rarely hand out
     // numerically identical aliases. See alloc_alias().
-    void set_alias_seed(node_id_t my_id) { alias_base_ = (uint16_t)(my_id % 254); }
+    void set_alias_seed(node_id_t my_id) { alias_base_ = (uint16_t)(nid_fold(my_id) % 254); }
 
     Neighbor* find(node_id_t id);
     const Neighbor* find(node_id_t id) const;

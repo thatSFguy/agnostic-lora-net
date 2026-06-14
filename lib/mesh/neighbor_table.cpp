@@ -42,13 +42,13 @@ node_id_t NeighborTable::neighbor_by_link(link_addr_t next_hop, link_addr_t prev
     // neighbour: next_hop is the alias WE assigned to the sender's link, prev_hop
     // the alias the sender assigned to OURS. Matching next_hop alone (the
     // pre-0.5.4 filter) is ambiguous across alias spaces — see alloc_alias().
-    if (next_hop == ALIAS_NONE) return 0;
+    if (next_hop == ALIAS_NONE) return node_id_t{};
     for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
         if (slots_[i].used && slots_[i].my_alias == next_hop &&
             slots_[i].their_alias == prev_hop)
             return slots_[i].id;
     }
-    return 0;
+    return node_id_t{};
 }
 
 Neighbor* NeighborTable::heard(node_id_t id, float q, uint32_t now_ms) {
@@ -99,11 +99,11 @@ bool NeighborTable::is_my_alias(link_addr_t a) const {
 }
 
 node_id_t NeighborTable::neighbor_by_my_alias(link_addr_t a) const {
-    if (a == ALIAS_NONE) return 0;
+    if (a == ALIAS_NONE) return node_id_t{};
     for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
         if (slots_[i].used && slots_[i].my_alias == a) return slots_[i].id;
     }
-    return 0;
+    return node_id_t{};
 }
 
 float NeighborTable::tx_cost(node_id_t id) const {

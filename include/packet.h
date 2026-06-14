@@ -18,22 +18,20 @@
 #pragma once
 
 #include <stdint.h>
+#include "mesh_types.h"   // node_id_t (16-byte NodeId), link_addr_t, NODE_ID_BROADCAST
 
-// 4-byte node ID, derived from the node's public key (self-certifying, §3).
-// In Phase 0 this is a provisional value from the chip's FICR DEVICEID.
-typedef uint32_t node_id_t;
-
-static const node_id_t NODE_ID_BROADCAST = 0xFFFFFFFFu;
+// node_id_t is the 16-byte self-certifying id (= blake2b(pubkey)[0:16]); see
+// mesh_types.h and docs/self-certifying-identity-plan.md. NODE_ID_BROADCAST is the
+// all-0xFF flood destination.
 
 // 1-byte link-local neighbour aliases, negotiated per link (§5). 0 = unassigned;
 // 0xFF = link-local broadcast (all neighbours, e.g. for beacons).
-typedef uint8_t link_addr_t;
 static const link_addr_t LINK_ADDR_NONE      = 0x00;
 static const link_addr_t LINK_ADDR_BROADCAST = 0xFF;
 
 // Protocol version carried in NetHeader.ver_type (high nibble). Bump on any
-// wire-incompatible change.
-static const uint8_t PROTO_VERSION = 1;
+// wire-incompatible change. v2: 16-byte self-certifying node ids (was 4-byte).
+static const uint8_t PROTO_VERSION = 2;
 
 // Packet class — NetHeader.ver_type low nibble (§5: data | control | ack | beacon).
 enum PacketType : uint8_t {
@@ -113,6 +111,8 @@ static inline uint8_t net_ver_of(uint8_t ver_type) {
 // Compile-time guarantees that the structs are truly packed (no padding) and the
 // header stays small — if these ever fail, the wire format silently changed.
 static_assert(sizeof(LinkHeader) == 4,  "LinkHeader must be 4 bytes on-air");
-static_assert(sizeof(NetHeader)  == 13, "NetHeader must be 13 bytes on-air");
+static_assert(sizeof(NetHeader)  == 37, "NetHeader = 1+1+1+16(dst)+16(src)+2 with 16-byte ids");
 static_assert(sizeof(BeaconPayload) == 4, "BeaconPayload must be 4 bytes on-air");
-static_assert(HEADER_BYTES < 20, "combined header must stay in the low double digits (§5)");
+// 16-byte ids push the end-to-end header up (accepted cost, identity-vs-locator §4);
+// per-hop addressing still rides the 1-byte LinkHeader aliases.
+static_assert(HEADER_BYTES == 41, "LinkHeader(4) + NetHeader(37) with 16-byte ids");

@@ -6,9 +6,9 @@ namespace mesh {
 // --- little-endian cursor helpers ------------------------------------------------
 static inline void put8 (uint8_t*& p, uint8_t v)  { *p++ = v; }
 static inline void put16(uint8_t*& p, uint16_t v) { *p++ = v & 0xFF; *p++ = (v >> 8) & 0xFF; }
-static inline void put32(uint8_t*& p, uint32_t v) { for (int i = 0; i < 4; i++) { *p++ = v & 0xFF; v >>= 8; } }
+static inline void put_nid(uint8_t*& p, const node_id_t& id) { nid_write(p, id); p += 16; }
 static inline uint16_t get16(const uint8_t*& p) { uint16_t v = (uint16_t)(p[0] | (p[1] << 8)); p += 2; return v; }
-static inline uint32_t get32(const uint8_t*& p) { uint32_t v = 0; for (int i = 0; i < 4; i++) v |= (uint32_t)p[i] << (8 * i); p += 4; return v; }
+static inline node_id_t get_nid(const uint8_t*& p) { node_id_t id = nid_read(p); p += 16; return id; }
 
 // --- codec -----------------------------------------------------------------------
 uint16_t loc_build_register(uint16_t epoch, uint16_t seq, uint16_t ttl_s,
@@ -37,11 +37,11 @@ uint16_t loc_build_reply(uint16_t qid, uint16_t epoch, uint16_t seq, uint16_t tt
                          node_id_t loc, const uint8_t* id, uint8_t id_len,
                          uint8_t* out, uint16_t cap) {
     if (id_len == 0 || id_len > LOC_ID_MAX) return 0;
-    uint16_t need = (uint16_t)(1 + 2 + 2 + 2 + 2 + 4 + 1 + id_len);
+    uint16_t need = (uint16_t)(1 + 2 + 2 + 2 + 2 + 16 + 1 + id_len);
     if (cap < need) return 0;
     uint8_t* p = out;
     put8(p, LOC_REPLY); put16(p, qid); put16(p, epoch); put16(p, seq); put16(p, ttl_s);
-    put32(p, (uint32_t)loc); put8(p, id_len); memcpy(p, id, id_len); p += id_len;
+    put_nid(p, loc); put8(p, id_len); memcpy(p, id, id_len); p += id_len;
     return (uint16_t)(p - out);
 }
 
@@ -69,9 +69,9 @@ bool loc_parse(const uint8_t* msg, uint16_t len, LocMsg* out) {
             out->qid = get16(p);
             return read_id();
         case LOC_REPLY:
-            if (len < 1 + 2 + 2 + 2 + 2 + 4 + 1 + 1) return false;
+            if (len < 1 + 2 + 2 + 2 + 2 + 16 + 1 + 1) return false;
             out->qid = get16(p); out->epoch = get16(p); out->seq = get16(p); out->ttl_s = get16(p);
-            out->loc = (node_id_t)get32(p);
+            out->loc = get_nid(p);
             return read_id();
         default:
             return false;

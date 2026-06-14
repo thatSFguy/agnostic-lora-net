@@ -13,8 +13,8 @@
 // On-wire layout (immediately follows BeaconPayload in the beacon):
 //   u8  n_reports
 //   u8  n_routes
-//   n_reports × { u32 id, u8 q_q, u8 alias }
-//   n_routes  × { u32 dst, u32 next_hop, u16 cost_q, u8 hops }
+//   n_reports × { id[16], u8 q_q, u8 alias }
+//   n_routes  × { id[16] dst, id[16] next_hop, u16 cost_q, u8 hops }
 #pragma once
 
 #include <stdint.h>
@@ -22,8 +22,8 @@
 
 namespace mesh {
 
-constexpr uint16_t ANNOUNCE_REPORT_BYTES = 6;   // u32 + u8 + u8 (id, q, alias)
-constexpr uint16_t ANNOUNCE_ROUTE_BYTES  = 11;  // u32 + u32 + u16 + u8
+constexpr uint16_t ANNOUNCE_REPORT_BYTES = 18;  // id[16] + u8 + u8 (id, q, alias)
+constexpr uint16_t ANNOUNCE_ROUTE_BYTES  = 35;  // id[16] + id[16] + u16 + u8
 constexpr uint16_t ANNOUNCE_HDR_BYTES    = 2;   // n_reports + n_routes
 
 // Serialise `a` into `buf` (capacity `cap`). Reports are written first, then as

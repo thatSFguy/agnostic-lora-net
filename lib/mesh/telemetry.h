@@ -16,10 +16,10 @@
 //
 // Wire layout (LE) inside a PKT_TELEM payload:
 //   BATT   : u8 kind=1 | u16 mv | u8 pct_plus1
-//   QUERY  : u8 kind=2 | u32 target
+//   QUERY  : u8 kind=2 | id[16] target
 //   REPLY  : u8 kind=3 | u16 mv | u8 pct_plus1 | u16 uptime_min | i8 power_dbm | u8 sf |
 //            u8 flags | u8 fw_len | fw_len×char | u8 n_nbrs |
-//            n×{u32 id, u8 q_rx, u8 q_tx, i8 snr, i16 rssi}
+//            n×{id[16], u8 q_rx, u8 q_tx, i8 snr, i16 rssi}
 // flags bit0 = node is mobile (operator-set on the node; the controller keeps its TX-power
 //   headroom and never trims it). The flag lives on the node so any controller learns it.
 // pct_plus1: 0 = unknown/uncalibrated, 1..101 = 0..100 % (matches the beacon byte).
@@ -56,7 +56,7 @@ struct TelemMsg {
     uint8_t   kind        = 0;
     uint16_t  mv          = 0;     // BATT / REPLY
     uint8_t   pct_plus1   = 0;     // BATT / REPLY
-    node_id_t target      = 0;     // QUERY
+    node_id_t target      = {};    // QUERY
     uint16_t  uptime_min  = 0;     // REPLY
     int8_t    power_dbm   = 0;     // REPLY — current TX power
     uint8_t   sf          = 0;     // REPLY — current spreading factor
@@ -88,7 +88,7 @@ public:
     uint16_t snapshot(View* out, uint16_t cap, uint32_t now_ms) const;
 
 private:
-    struct Entry { node_id_t origin = 0; uint16_t mv = 0; uint8_t pct_plus1 = 0;
+    struct Entry { node_id_t origin = {}; uint16_t mv = 0; uint8_t pct_plus1 = 0;
                    uint32_t ms = 0; bool used = false; };
     Entry e_[TELEM_CACHE_CAP];
 };
