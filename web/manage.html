@@ -122,6 +122,19 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
   </fieldset>
 </div>
 
+<div class="card">
+  <h2>Mobility (fw ≥ 0.11.0)</h2>
+  <div class="stat" style="margin:.3rem 0;">this node is: <b id="mob_val">—</b></div>
+  <fieldset id="mobfs" disabled style="border:none;padding:0;margin:0;">
+    <button id="mob_fixed">Fixed</button>
+    <button id="mob_mobile">📍 Mobile</button>
+    <div class="muted" style="margin-top:.3rem;">
+      Flag a node that moves around. The controller keeps its TX-power headroom and never
+      trims it (a fixed node gets its power optimised down). Stored in flash and reported in
+      telemetry, so any controller learns it.</div>
+  </fieldset>
+</div>
+
 <div style="margin:.4rem 0;">
   <input id="cmd" placeholder="console command (info, ble unbond, rf show, help …)" style="width:24rem;">
   <button id="cmdsend">Send</button>
@@ -147,11 +160,12 @@ function feed(text){ rxbuf+=text; let i;
 
 function markConnected(kind){
   $('status').textContent='connected ('+kind+')'; $('status').className='ok';
-  $('blefs').disabled=false; $('rffs').disabled=false; $('rf_pwr').disabled=false; $('battfs').disabled=false;
+  $('blefs').disabled=false; $('rffs').disabled=false; $('rf_pwr').disabled=false; $('battfs').disabled=false; $('mobfs').disabled=false;
   log('connected over '+kind+' — reading…');
   setTimeout(()=>send('ble'),500);       // current BLE state + PIN
   setTimeout(()=>send('rf show'),900);    // current radio PHY -> prefill the form
   setTimeout(()=>send('info'),1300);      // fw version + mesh state (boot banner scrolls away)
+  setTimeout(()=>send('mobile'),1600);    // current mobility flag (no-arg = query)
 }
 
 function fillRf(r){
@@ -172,6 +186,9 @@ function onLine(line){
   if((m=line.match(/PIN=(\d{6})/))) $('pin').textContent=m[1].split('').join(' ');
   if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
   if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
+  // `mobile on/off …` (command/query reply) or `… mobile=on/off` (info node line)
+  if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
+    $('mob_val').textContent = m[1]==='on' ? '📍 mobile (controller holds power)' : 'fixed (power optimised)';
   if((m=line.match(/^batt raw=(\d+) mv=(\d+) pct=(\d+)/)))
     $('batt_val').textContent=m[2]+' mV — '+m[3]+'%  (raw '+m[1]+')';
   else if((m=line.match(/^batt raw=(\d+) UNCALIBRATED/)))
@@ -193,6 +210,8 @@ function onLine(line){
 }
 
 async function send(s){ if(sendRaw) await sendRaw(s+'\n'); else log('not connected'); }
+$('mob_fixed').onclick=()=>send('mobile off');
+$('mob_mobile').onclick=()=>send('mobile on');
 $('batt_read').onclick=()=>send('batt');
 $('batt_cal').onclick=()=>{ let v=+$('batt_mv').value;
   if(v>0&&v<10) v=Math.round(v*1000);          // volts entered (e.g. 4.02) -> mV
