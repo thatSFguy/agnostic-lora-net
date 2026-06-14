@@ -76,6 +76,32 @@ func TestImportBrowserBackup(t *testing.T) {
 	}
 }
 
+// Export must round-trip through ImportBrowserBackup (and thus the map app, which uses the
+// same PKCS#8-base64-priv / hex-pub encoding): export a key, re-import it, same pubkey.
+func TestExportRoundTrip(t *testing.T) {
+	ks, err := Mint(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	privB64, pubHex, _, err := ks.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := map[string]any{"controllerKey": map[string]string{"priv": privB64, "pub": pubHex}}
+	bj, _ := json.Marshal(backup)
+	bpath := filepath.Join(t.TempDir(), "backup.json")
+	if err := os.WriteFile(bpath, bj, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ks2, err := ImportBrowserBackup(t.TempDir(), bpath)
+	if err != nil {
+		t.Fatalf("re-import exported backup: %v", err)
+	}
+	if ks2.PubHex() != ks.PubHex() {
+		t.Fatalf("pub mismatch after export->import: %s vs %s", ks2.PubHex(), ks.PubHex())
+	}
+}
+
 func TestOpenMissing(t *testing.T) {
 	if _, err := Open(t.TempDir()); !os.IsNotExist(err) {
 		t.Fatalf("expected ErrNotExist, got %v", err)

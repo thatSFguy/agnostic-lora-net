@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -119,6 +120,19 @@ func newStore(dir string, priv ed25519.PrivateKey) (*Store, error) {
 func (s *Store) Pub() ed25519.PublicKey   { return s.priv.Public().(ed25519.PublicKey) }
 func (s *Store) PubHex() string           { return hex.EncodeToString(s.Pub()) }
 func (s *Store) Priv() ed25519.PrivateKey { return s.priv }
+
+// Export returns the key + replay counter in the same encoding the map app's backup uses
+// (priv = base64 PKCS#8, pub = uppercase hex), so the result round-trips through
+// ImportBrowserBackup and the browser. Counter is informational — an import re-seeds it.
+func (s *Store) Export() (privB64, pubHex string, counter uint32, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	der, err := x509.MarshalPKCS8PrivateKey(s.priv)
+	if err != nil {
+		return "", "", 0, err
+	}
+	return base64.StdEncoding.EncodeToString(der), strings.ToUpper(hex.EncodeToString(s.Pub())), s.counter, nil
+}
 
 // Next advances the replay counter, persists it, and returns the new value. Persist
 // happens BEFORE returning so a crash can never reuse a counter.

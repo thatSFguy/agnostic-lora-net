@@ -64,8 +64,29 @@ func main() {
 		heartbeat = flag.Duration("heartbeat", 2*time.Hour, "re-assert held nodes this often (keeps their flash-default watchdog fresh; must be < the node's 6h window)")
 		httpAddr  = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
 		fwDir     = flag.String("fwdir", "../web/fw", "directory of firmware packages to serve at /fw/ for the dashboard Flash tab")
+		export    = flag.String("export", "", "write a map-app-compatible controller backup (key+counter+aliases+positions) to this file and exit")
 	)
 	flag.Parse()
+
+	// Standalone export: dump the controller key + nodes and exit (no node needed).
+	if *export != "" {
+		ks, err := keystore.Open(*keydir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "-export: no controller key in %s (%v)\n", *keydir, err)
+			os.Exit(1)
+		}
+		b, err := httpd.ExportBackup(ks, filepath.Join(*keydir, "ui.json"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "-export: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*export, b, 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "-export: write %s: %v\n", *export, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "wrote controller backup → %s (pub %s) — contains the WRITE key, keep it secret\n", *export, ks.PubHex())
+		os.Exit(0)
+	}
 
 	if *port == "" && *file == "" {
 		fmt.Fprintln(os.Stderr, "need -port <dev> or -file <log|->. see -h")

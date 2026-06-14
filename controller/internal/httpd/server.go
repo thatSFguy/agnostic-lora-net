@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
 	"agnostic-lora-net/controller/internal/commander"
 	"agnostic-lora-net/controller/internal/keystore"
@@ -73,6 +74,47 @@ func (s *Server) Sink(r policy.Record) {
 	if len(s.events) > maxEvents {
 		s.events = s.events[len(s.events)-maxEvents:]
 	}
+}
+
+// BackupName is the suggested filename for an exported controller backup.
+const BackupName = "agnlora-controller-backup.json"
+
+// backupJSON assembles a map-app-compatible controller backup (key + counter + aliases +
+// positions). priv = base64 PKCS#8, pub = hex — round-trips through ImportBrowserBackup.
+func backupJSON(ks *keystore.Store, aliases map[string]string, positions map[string][]float64) ([]byte, error) {
+	if ks == nil {
+		return nil, errors.New("no controller key to export")
+	}
+	priv, pub, ctr, err := ks.Export()
+	if err != nil {
+		return nil, err
+	}
+	type ckey struct {
+		Priv string `json:"priv"`
+		Pub  string `json:"pub"`
+	}
+	return json.MarshalIndent(struct {
+		Warning           string               `json:"_warning"`
+		Exported          string               `json:"exported"`
+		ControllerKey     ckey                 `json:"controllerKey"`
+		ControllerCounter uint32               `json:"controllerCounter"`
+		Aliases           map[string]string    `json:"aliases"`
+		Positions         map[string][]float64 `json:"positions"`
+	}{
+		Warning:           "agnostic-lora-net controller backup — contains the network WRITE key. Keep it secret; re-importing seeds a fresh replay counter.",
+		Exported:          time.Now().UTC().Format(time.RFC3339),
+		ControllerKey:     ckey{Priv: priv, Pub: pub},
+		ControllerCounter: ctr,
+		Aliases:           aliases,
+		Positions:         positions,
+	}, "", "  ")
+}
+
+// ExportBackup builds a controller backup from a keystore + a ui.json path — for the CLI
+// `-export`, which runs without a live server.
+func ExportBackup(ks *keystore.Store, uiPath string) ([]byte, error) {
+	al, pos := loadUI(uiPath).snapshot()
+	return backupJSON(ks, al, pos)
 }
 
 func hexID(s string) uint32 {
@@ -161,6 +203,19 @@ func (s *Server) Handler() http.Handler {
 		// public GitHub release. http.FileServer cleans paths (no traversal above fwDir).
 		mux.Handle("/fw/", http.StripPrefix("/fw/", http.FileServer(http.Dir(s.fwDir))))
 	}
+	mux.HandleFunc("/api/backup", func(w http.ResponseWriter, r *http.Request) {
+		// Download the controller key + nodes (map-app-compatible). Localhost-only by the
+		// SECURITY note above — this serves the private WRITE key.
+		al, pos := s.ui.snapshot()
+		b, err := backupJSON(s.ks, al, pos)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+BackupName+`"`)
+		_, _ = w.Write(b)
+	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		ev := make([]policy.Record, len(s.events))

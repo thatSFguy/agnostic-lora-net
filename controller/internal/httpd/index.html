@@ -74,6 +74,7 @@
   <div>gw <span id="gw" class="gw">—</span></div>
   <div id="count" class="kv"></div>
   <div id="key" class="kv"></div>
+  <a id="backup" class="kv" href="/api/backup" download="agnlora-controller-backup.json" title="download controller key + nodes (aliases/positions) backup" style="color:var(--acc);text-decoration:none">⤓ backup</a>
   <div id="upd" class="kv"></div>
   <div id="stale"></div>
 </header>
@@ -365,6 +366,7 @@ function render(st){
   if(!dragging){ aliases=st.aliases||{}; positions=st.positions||{}; }
   $('#gw').textContent=gateway?nm(gateway):'—'; $('#count').textContent=(st.snapshot?.nodes?.length||0)+' nodes';
   $('#key').textContent=hasKey?'key '+(st.pub||'').slice(0,12)+'…':'⚠ no key (read-only)';
+  $('#backup').style.display=hasKey?'':'none';   // export only meaningful with a key
   $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';
   if(view==='map'){ renderMap(st); } else if(view==='dash'){ renderNodes(st); renderFeed(st.events||[]); renderConsole(st.console); }
 }
