@@ -16,7 +16,7 @@ func line(msg []byte) string { return "ctrlsend " + hex.EncodeToString(msg) }
 
 // Power lowers/raises the target node's TX power to dbm. Decreases auto-revert on-device
 // in 60 s unless a Confirm follows.
-func Power(target uint32, dbm int8, counter uint32, priv ed25519.PrivateKey) (string, error) {
+func Power(target sign.NodeID, dbm int8, counter uint32, priv ed25519.PrivateKey) (string, error) {
 	m, err := sign.BuildControl(sign.CmdPower, target, dbm, counter, priv)
 	if err != nil {
 		return "", err
@@ -25,7 +25,7 @@ func Power(target uint32, dbm int8, counter uint32, priv ed25519.PrivateKey) (st
 }
 
 // Confirm disarms the revert for a provisional power change of `dbm` on the target.
-func Confirm(target uint32, dbm int8, counter uint32, priv ed25519.PrivateKey) (string, error) {
+func Confirm(target sign.NodeID, dbm int8, counter uint32, priv ed25519.PrivateKey) (string, error) {
 	m, err := sign.BuildControl(sign.CmdConfirm, target, dbm, counter, priv)
 	if err != nil {
 		return "", err
@@ -35,7 +35,7 @@ func Confirm(target uint32, dbm int8, counter uint32, priv ed25519.PrivateKey) (
 
 // Block tells `recipient` to drop its link to `victim` for ttlMin minutes (0 = node
 // default). The node auto-expires the block unless renewed.
-func Block(recipient, victim uint32, ttlMin int8, counter uint32, priv ed25519.PrivateKey) (string, error) {
+func Block(recipient, victim sign.NodeID, ttlMin int8, counter uint32, priv ed25519.PrivateKey) (string, error) {
 	m, err := sign.BuildBlock(sign.CmdBlock, recipient, victim, ttlMin, counter, priv)
 	if err != nil {
 		return "", err
@@ -43,8 +43,19 @@ func Block(recipient, victim uint32, ttlMin int8, counter uint32, priv ed25519.P
 	return line(m), nil
 }
 
+// Ble enables (on=true) or disables BLE/BT advertising on the target node via a signed
+// CTRL_BLE command. Remote nodes need firmware CTRL_BLE support to honor it; for the
+// tethered gateway the server short-circuits to a direct `ble on/off` console line instead.
+func Ble(target sign.NodeID, on bool, counter uint32, priv ed25519.PrivateKey) (string, error) {
+	m, err := sign.BuildBle(target, on, counter, priv)
+	if err != nil {
+		return "", err
+	}
+	return line(m), nil
+}
+
 // Unblock clears a block of `victim` on `recipient`.
-func Unblock(recipient, victim uint32, counter uint32, priv ed25519.PrivateKey) (string, error) {
+func Unblock(recipient, victim sign.NodeID, counter uint32, priv ed25519.PrivateKey) (string, error) {
 	m, err := sign.BuildBlock(sign.CmdUnblock, recipient, victim, 0, counter, priv)
 	if err != nil {
 		return "", err

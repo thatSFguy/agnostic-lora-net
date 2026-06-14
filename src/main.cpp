@@ -1354,6 +1354,38 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
         ack(on ? 1 : 0, 0);
 #endif
         // (targets without AGN_BLE have no SoftDevice — command is a no-op, no ack)
+    } else if (m.cmd == mesh::CTRL_RETUNE) {
+        // Remote PHY retune (docs/remote-config.md §3). Atomic: unpack the signed PHY blob,
+        // apply via the same seam the console uses, persist. PHY only — power stays under
+        // CTRL_POWER. NO firmware auto-revert: a failed retune is recovered by the operational
+        // BLE-rescue + reconcile + field-fix (§4), the gate the controller drives.
+        const uint8_t* p = m.cfg;
+        RadioCfg c = radio.config();          // start from current so power_dbm is preserved
+        c.freq_hz  = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        c.bw_hz    = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+        c.sf       = p[8];
+        c.cr       = p[9];
+        c.sync     = p[10];
+        c.preamble = (uint16_t)(p[11] | (p[12] << 8));
+        char l[128];
+        // Validate critical params — a malformed (but validly signed) retune must not brick the radio.
+        if (!(c.sf >= 5 && c.sf <= 12 && c.cr >= 5 && c.cr <= 8 && c.freq_hz && c.bw_hz)) {
+            snprintf(l, sizeof(l), "[ctrl] RETUNE rejected: bad PHY (sf=%u cr=%u freq=%lu bw=%lu)",
+                     (unsigned)c.sf, (unsigned)c.cr, (unsigned long)c.freq_hz, (unsigned long)c.bw_hz);
+            Serial.println(l);
+            ack(0, 0);
+        } else if (radio.apply_config(c) == RADIOLIB_ERR_NONE) {
+            rf_save(radio.config());          // persist on success (save-if-dirty)
+            // The radio is now on the NEW PHY — this log + the ack ride it (the reconcile signal).
+            snprintf(l, sizeof(l), "[ctrl] RETUNE applied freq=%lu bw=%lu sf=%u cr=%u sync=0x%02X pre=%u (counter=%lu)",
+                     (unsigned long)c.freq_hz, (unsigned long)c.bw_hz, (unsigned)c.sf, (unsigned)c.cr,
+                     (unsigned)c.sync, (unsigned)c.preamble, (unsigned long)m.counter);
+            Serial.println(l);
+            ack(1, 0);
+        } else {
+            Serial.println("[ctrl] RETUNE apply FAILED (radio error) — PHY unchanged");
+            ack(0, 0);
+        }
     }
 }
 

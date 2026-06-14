@@ -30,17 +30,22 @@
 namespace mesh {
 
 enum CtrlCmd : uint8_t { CTRL_POWER = 1, CTRL_CONFIRM = 2, CTRL_BLOCK = 3, CTRL_UNBLOCK = 4,
-                         CTRL_BLE = 5 };   // CTRL_BLE: arg 1=enable advertising, 0=disable
+                         CTRL_BLE = 5,      // CTRL_BLE: arg 1=enable advertising, 0=disable
+                         CTRL_RETUNE = 6 }; // CTRL_RETUNE: cfg[13] = PHY to apply (see below)
 
 enum CtrlVerdict : uint8_t { CTRL_OK = 0, CTRL_MALFORMED, CTRL_BAD_SIG, CTRL_REPLAY };
 
 constexpr uint8_t  CTRL_VER       = 2;   // v2: 16-byte node ids (was 4-byte in v1)
-// POWER/CONFIRM unsigned header: ver|cmd|target(16)|arg|counter = 23 bytes.
-// BLOCK/UNBLOCK insert a 16-byte `aux` (the victim id) before the counter, so they carry
-// BOTH the recipient (target) and the link to drop (aux) -> 39 bytes. Layouts branch on cmd.
-constexpr uint16_t CTRL_MSG_BYTES = 23 + 64;   // POWER/CONFIRM: unsigned + signature
+// POWER/CONFIRM/BLE unsigned header: ver|cmd|target(16)|arg|counter = 23 bytes.
+// BLOCK/UNBLOCK insert a 16-byte `aux` (the victim id) before the counter -> 39 bytes.
+// RETUNE inserts a 13-byte PHY config blob before the counter -> 35 bytes. Branch on cmd.
+constexpr uint16_t CTRL_MSG_BYTES = 23 + 64;   // POWER/CONFIRM/BLE: unsigned + signature
 constexpr uint16_t CTRL_BLK_BYTES = 39 + 64;   // BLOCK/UNBLOCK: + 16-byte victim id
-constexpr uint16_t CTRL_MAX_BYTES = CTRL_BLK_BYTES;   // size any command buffer with this
+// RETUNE PHY blob (LE): freq_hz(u32) | bw_hz(u32) | sf(u8) | cr(u8) | sync(u8) | preamble(u16).
+// PHY only — TX power stays under CTRL_POWER (and its dead-man rail), never touched by RETUNE.
+constexpr uint16_t CTRL_RETUNE_CFG = 13;
+constexpr uint16_t CTRL_RTN_BYTES = 22 + CTRL_RETUNE_CFG + 64;   // ver|cmd|target(16)|cfg(13)|counter(4)+sig = 99
+constexpr uint16_t CTRL_MAX_BYTES = CTRL_BLK_BYTES;   // largest command; size any buffer with this
 constexpr uint16_t CTRL_ACK_BYTES = 24;        // ver|cmd|origin(16)|applied|provisional|counter
 
 struct CtrlMsg {
@@ -49,6 +54,7 @@ struct CtrlMsg {
     int8_t    arg     = 0;     // POWER: dBm. BLOCK: TTL minutes (0 = firmware default)
     node_id_t aux     = {};    // BLOCK/UNBLOCK: the victim id to block/unblock (else 0)
     uint32_t  counter = 0;
+    uint8_t   cfg[CTRL_RETUNE_CFG] = {};   // RETUNE: the PHY blob (opaque to the codec)
 };
 
 struct CtrlAck {
@@ -70,6 +76,12 @@ uint16_t ctrl_build(uint8_t cmd, node_id_t target, int8_t arg, uint32_t counter,
 // bytes written (CTRL_BLK_BYTES), or 0 on bad args/cap.
 uint16_t ctrl_build_block(uint8_t cmd, node_id_t target, node_id_t victim, int8_t ttl_min,
                           uint32_t counter, const uint8_t seckey[64], uint8_t* out, uint16_t cap);
+
+// Build a signed RETUNE command. `cfg` is the CTRL_RETUNE_CFG-byte PHY blob (freq/bw/sf/
+// cr/sync/preamble, LE — opaque here; the firmware packs/unpacks it). Returns CTRL_RTN_BYTES
+// or 0 on bad args/cap.
+uint16_t ctrl_build_retune(node_id_t target, const uint8_t cfg[CTRL_RETUNE_CFG],
+                           uint32_t counter, const uint8_t seckey[64], uint8_t* out, uint16_t cap);
 
 // Parse + verify a command against `pubkey` and the replay floor `min_counter`
 // (accepts only counter > min_counter). On CTRL_OK, `out` is filled.

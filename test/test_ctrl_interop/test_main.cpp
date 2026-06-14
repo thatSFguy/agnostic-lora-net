@@ -106,6 +106,28 @@ static void test_ble_cmd_roundtrip() {
     TEST_ASSERT_EQUAL_INT8(1, out.arg);
 }
 
+// 4c) CTRL_RETUNE: build -> verify, the 13-byte PHY blob round-trips, tamper is caught.
+static void test_retune_cmd_roundtrip() {
+    uint8_t cfg[CTRL_RETUNE_CFG];
+    uint32_t freq = 904375000u, bw = 250000u;
+    cfg[0] = (uint8_t)freq; cfg[1] = (uint8_t)(freq >> 8); cfg[2] = (uint8_t)(freq >> 16); cfg[3] = (uint8_t)(freq >> 24);
+    cfg[4] = (uint8_t)bw;   cfg[5] = (uint8_t)(bw >> 8);   cfg[6] = (uint8_t)(bw >> 16);   cfg[7] = (uint8_t)(bw >> 24);
+    cfg[8] = 11; cfg[9] = 5; cfg[10] = 0x4D; cfg[11] = 16; cfg[12] = 0;   // sf, cr, sync, preamble(LE)
+
+    uint8_t m[CTRL_RTN_BYTES];
+    uint16_t n = ctrl_build_retune(target_id(), cfg, 123, SK, m, sizeof(m));
+    TEST_ASSERT_EQUAL_UINT16(CTRL_RTN_BYTES, n);
+
+    CtrlMsg out;
+    TEST_ASSERT_EQUAL_UINT8(CTRL_OK, ctrl_verify(m, n, PK, 122, &out));
+    TEST_ASSERT_EQUAL_UINT8(CTRL_RETUNE, out.cmd);
+    TEST_ASSERT_TRUE(out.target == target_id());
+    TEST_ASSERT_EQUAL_MEMORY(cfg, out.cfg, CTRL_RETUNE_CFG);   // PHY blob survives
+
+    m[20] ^= 0x01;                                             // flip a cfg byte (signed region)
+    TEST_ASSERT_EQUAL_UINT8(CTRL_BAD_SIG, ctrl_verify(m, n, PK, 122, &out));
+}
+
 // 5) Replay floor: a counter at/below the floor is rejected after the sig checks out.
 static void test_replay_rejected() {
     uint8_t m[CTRL_MSG_BYTES];
@@ -125,6 +147,7 @@ int main(int, char**) {
     RUN_TEST(test_tamper_rejected);
     RUN_TEST(test_block_byte_identical_v2);
     RUN_TEST(test_ble_cmd_roundtrip);
+    RUN_TEST(test_retune_cmd_roundtrip);
     RUN_TEST(test_replay_rejected);
     return UNITY_END();
 }

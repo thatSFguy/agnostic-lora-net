@@ -2,12 +2,12 @@ package policy
 
 import (
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
 	"agnostic-lora-net/controller/internal/commander"
 	"agnostic-lora-net/controller/internal/keystore"
+	"agnostic-lora-net/controller/internal/sign"
 	"agnostic-lora-net/controller/internal/topo"
 )
 
@@ -46,9 +46,11 @@ func (e *Engine) modeStr() string {
 	return "dry-run"
 }
 
-func parseHexID(s string) uint32 {
-	v, _ := strconv.ParseUint(s, 16, 32)
-	return uint32(v)
+// parseHexID decodes a node id string to a wire NodeID. On a malformed id it returns the
+// zero id, which the commander builders reject — so a bad id can never produce a command.
+func parseHexID(s string) sign.NodeID {
+	id, _ := sign.ParseNodeID(s)
+	return id
 }
 
 // SNR_FLOOR_DB / SNR_GOOD_DB mirror lib/mesh/link_metric.h: the firmware maps SNR linearly
@@ -124,6 +126,11 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 	var out []Decision
 	for _, n := range snap.Nodes {
 		if n.IsGateway || n.ID == snap.Gateway {
+			continue
+		}
+		// ACL: when membership is configured, only tune verified-and-allowed nodes. ACL=="" means
+		// no ACL (replay / no key) → manage everything, as before identity landed.
+		if n.ACL != "" && n.ACL != "allowed" {
 			continue
 		}
 		sf := n.SF

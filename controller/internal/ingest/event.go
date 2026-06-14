@@ -28,6 +28,7 @@ const (
 	KindBeaconTX        // "[TX] beacon seq=N from X +announce NB"   (trace on)
 	KindBeaconRX        // "[RX] beacon src=X seq=N up=Ns ..."        (trace on)
 	KindFrameRX         // "[RX] type=N src=X seq=N len=N ..."        (trace on)
+	KindIdentity        // "[ann] <id> pub=<64hex> sig=ok|bad" — gateway-verified id↔pubkey binding
 )
 
 var kindNames = map[Kind]string{
@@ -35,7 +36,7 @@ var kindNames = map[Kind]string{
 	KindFW: "fw", KindBatt: "batt", KindRF: "rf", KindBeaconCfg: "beaconcfg",
 	KindNbr: "nbr", KindRoute: "route", KindCtrlAck: "ctrlack", KindNodeBatt: "nodebatt",
 	KindStatus: "status", KindAnnNbr: "annnbr", KindBeaconTX: "beacon_tx",
-	KindBeaconRX: "beacon_rx", KindFrameRX: "frame_rx",
+	KindBeaconRX: "beacon_rx", KindFrameRX: "frame_rx", KindIdentity: "identity",
 }
 
 func (k Kind) String() string {
@@ -67,6 +68,8 @@ type Event struct {
 	Peer    string            // secondary id (nbr peer / route via)
 	Dst     string            // route destination
 	Blocked []string          // ids, for KindBlocked
+	Pub     string            // KindIdentity: node pubkey hex (upper), "" if sig=bad/none
+	SigOK   bool              // KindIdentity: gateway verified the announce signature
 	Num     map[string]int    // q_rx q_tx rssi snr sf power seq len cost hops mv pct age ann freq_hz bw_hz cr sync preamble applied provisional
 	Str     map[string]string // fw, …
 }

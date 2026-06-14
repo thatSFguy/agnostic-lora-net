@@ -6,26 +6,38 @@ import (
 	"strings"
 )
 
+// idHex matches a node id in either width: 8 hex (v1) or 32 hex (v2, the self-certifying
+// 16-byte NodeId). Kept tolerant of both so a mixed-version bench still parses during the
+// v2 rollout (`self-certifying-identity-plan.md` §2). The greedy 32 alternative wins when
+// present. `§` is the placeholder idre() substitutes.
+const idHex = `[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}`
+
+// idre compiles a pattern with each `§` replaced by a (grouped) id matcher.
+func idre(pat string) *regexp.Regexp {
+	return regexp.MustCompile(strings.ReplaceAll(pat, "§", `(?:`+idHex+`)`))
+}
+
 // Compiled once. Patterns mirror web/map.html (which mirrors the firmware
 // Serial.println formats), plus the `trace on` airframe lines ([TX]/[RX]).
 var (
-	reInfoHeader = regexp.MustCompile(`^node ([0-9A-Fa-f]{8})\s+neighbors=(\d+) routes=(\d+) blocked=(\d+)`)
-	reBlocked    = regexp.MustCompile(`^\[blocked\]((?:\s+[0-9A-Fa-f]{8})*)\s*$`)
+	reInfoHeader = idre(`^node (§)\s+neighbors=(\d+) routes=(\d+) blocked=(\d+)`)
+	reBlocked    = idre(`^\[blocked\]((?:\s+§)*)\s*$`)
 	reFW         = regexp.MustCompile(`^fw (\S+)`)
 	reBattMv     = regexp.MustCompile(`^batt\b.*mv=(\d+) pct=(\d+)`)
 	reBattRaw    = regexp.MustCompile(`^batt raw=(\d+) UNCALIBRATED`)
 	reRF         = regexp.MustCompile(`^\[rf\] freq_hz=(\d+) bw_hz=(\d+) sf=(\d+) cr=(\d+) power_dbm=(-?\d+) sync=0x([0-9A-Fa-f]+) preamble=(\d+)`)
 	reBeaconCfg  = regexp.MustCompile(`^net beacon=(\d+)s`)
-	reNbr        = regexp.MustCompile(`^nbr ([0-9A-Fa-f]{8})\s+q_rx=(-?\d+) q_tx=(-?\d+).*?(?:rssi=(-?\d+) snr=(-?\d+))?$`)
-	reRoute      = regexp.MustCompile(`^route dst=([0-9A-Fa-f]{8}) via=([0-9A-Fa-f]{8}) cost=(-?\d+) hops=(\d+)`)
-	reCtrlAck    = regexp.MustCompile(`^\[ctrl\] ack ([0-9A-Fa-f]{8}) cmd=(\d+) applied=(-?\d+) provisional=(\d)`)
-	reNodeBatt   = regexp.MustCompile(`^\[batt\] ([0-9A-Fa-f]{8}) mv=(\d+) pct=(\d+) age=(\d+)s`)
-	reStatus     = regexp.MustCompile(`^\[status\] ([0-9A-Fa-f]{8}) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV/(\d+)%|\?)(?: mob=(\d))?`)
-	reAnnNbr     = regexp.MustCompile(`^\[nbrs\] ([0-9A-Fa-f]{8}) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?`)
-	reBeaconTX   = regexp.MustCompile(`^\[TX\] beacon seq=(\d+) from ([0-9A-Fa-f]{8})\s+\+announce (\d+)B`)
-	reBeaconRX   = regexp.MustCompile(`^\[RX\] beacon\s+src=([0-9A-Fa-f]{8}) seq=(\d+) up=(\d+)s`)
-	reFrameRX    = regexp.MustCompile(`^\[RX\] type=(\d+)\s+src=([0-9A-Fa-f]{8}) seq=(\d+) len=(\d+)`)
-	reHexID      = regexp.MustCompile(`[0-9A-Fa-f]{8}`)
+	reNbr        = idre(`^nbr (§)\s+q_rx=(-?\d+) q_tx=(-?\d+).*?(?:rssi=(-?\d+) snr=(-?\d+))?$`)
+	reRoute      = idre(`^route dst=(§) via=(§) cost=(-?\d+) hops=(\d+)`)
+	reCtrlAck    = idre(`^\[ctrl\] ack (§) cmd=(\d+) applied=(-?\d+) provisional=(\d)`)
+	reNodeBatt   = idre(`^\[batt\] (§) mv=(\d+) pct=(\d+) age=(\d+)s`)
+	reStatus     = idre(`^\[status\] (§) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV/(\d+)%|\?)(?: mob=(\d))?(?: ble=(\d))?`)
+	reAnnNbr     = idre(`^\[nbrs\] (§) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?`)
+	reAnn        = idre(`^\[ann\] (§)(?: pub=([0-9A-Fa-f]{64}))? sig=(ok|bad|none)`)
+	reBeaconTX   = idre(`^\[TX\] beacon seq=(\d+) from (§)\s+\+announce (\d+)B`)
+	reBeaconRX   = idre(`^\[RX\] beacon\s+src=(§) seq=(\d+) up=(\d+)s`)
+	reFrameRX    = idre(`^\[RX\] type=(\d+)\s+src=(§) seq=(\d+) len=(\d+)`)
+	reHexID      = regexp.MustCompile(idHex)
 )
 
 func atoi(s string) int  { n, _ := strconv.Atoi(s); return n }
@@ -51,6 +63,18 @@ func ParseLine(line string) (Event, bool) {
 		for _, id := range reHexID.FindAllString(m[1], -1) {
 			e.Blocked = append(e.Blocked, up(id))
 		}
+		return e, true
+	}
+	if m := reAnn.FindStringSubmatch(t); m != nil {
+		// Gateway-verified identity binding: `[ann] <id> pub=<64hex> sig=ok` (or `… sig=bad`,
+		// no pub). The gateway ran ed25519_check + id==hash(pub) on the announce; we trust its
+		// verdict (Model A, controller-verify-acl-impl.md §0).
+		e := newEvent(KindIdentity, t)
+		e.ID = up(m[1])
+		if m[2] != "" {
+			e.Pub = up(m[2])
+		}
+		e.SigOK = m[3] == "ok"
 		return e, true
 	}
 	if m := reAnnNbr.FindStringSubmatch(t); m != nil { // before reNbr-style lines; distinct prefix
@@ -87,6 +111,9 @@ func ParseLine(line string) (Event, bool) {
 		}
 		if m[8] != "" {
 			e.Num["mob"] = atoi(m[8])
+		}
+		if m[9] != "" {
+			e.Num["ble"] = atoi(m[9])
 		}
 		return e, true
 	}

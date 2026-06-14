@@ -60,6 +60,9 @@
   .pill{ font-size:11px; padding:2px 8px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
   .pill.ok{ color:var(--confirm); border-color:var(--confirm); } .pill.bad{ color:var(--revert); border-color:var(--revert); }
   .pill.warn{ color:var(--lower); border-color:var(--lower); }
+  .pill.ble{ cursor:pointer; user-select:none; } .pill.ble:hover{ border-color:var(--acc); }
+  .pill.ble-on{ color:var(--acc); border-color:var(--acc); } .pill.ble-off{ color:var(--dim); }
+  .pill.ble-unk{ color:var(--dim); border-style:dashed; }
   .termlog{ background:#0a0d12; color:#7fdc8f; font-family:ui-monospace,monospace; font-size:11px; height:11rem;
             overflow:auto; padding:6px 8px; border-radius:6px; white-space:pre-wrap; margin-top:8px; }
 </style>
@@ -241,12 +244,21 @@ function renderNodes(state){
     const margin=d&&d.has_snr?d.margin:(h?(h.snr-(SNR_LIMIT[n.sf||9]??-12.5)):null);
     const pct=margin==null?0:Math.max(0,Math.min(100,margin/24*100)); const act=d?d.action:'';
     const mob=!!n.mobile;   // node self-reports mobility (set on the node with `mobile on`)
+    // BLE/BT advertising state: true=on, false=off, undefined=unknown (firmware not yet
+    // reporting ble=). Click toggles via /api/cmd action "ble" — gateway driven directly,
+    // remote nodes via signed CTRL_BLE (needs the firmware handler to take effect).
+    const bleOn=n.ble===true, bleKnown=(n.ble===true||n.ble===false);
+    const bleCls=bleOn?'ble-on':(bleKnown?'ble-off':'ble-unk');
+    const bleTxt=bleOn?'BT on':(bleKnown?'BT off':'BT ?');
+    const bleNext=bleOn?0:1;   // click target: turn off if on, else turn on
+    const bleTitle=(bleOn?'BLE on — click to disable':(bleKnown?'BLE off — click to enable':'BLE state unknown — click to enable'))+(isGw?' (gateway, direct)':' (signed — needs firmware CTRL_BLE)');
+    const blePill=`<span class="pill ble ${bleCls}" data-ble="${n.id}" data-on="${bleNext}" title="${bleTitle}">${bleTxt}</span>`;
     const ctrls=isGw?'':`<div class="row">
         <input class="pw" type="number" value="${typeof pwr==='number'?pwr:''}" data-pw="${n.id}" title="dBm">
         <button data-pwset="${n.id}">Set</button><button data-pwkeep="${n.id}">Keep</button>
         ${n.blocked?`<button class="danger" data-unblock="${n.id}">Unblock</button>`:`<button class="danger" data-block="${n.id}">Block</button>`}</div>`;
     return `<div class="node ${n.blocked?'blocked':''}">
-      <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${isGw?'<span class="pill">gateway</span>':''}${mob?'<span class="pill">🚗 mobile</span>':''}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
+      <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${isGw?'<span class="pill">gateway</span>':''}${mob?'<span class="pill">🚗 mobile</span>':''}${blePill}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
       <div class="kv">${n.id} · SF${n.sf||'?'}${typeof pwr==='number'?' · '+pwr+'dBm':''}${n.fw?' · fw '+n.fw:''}${n.batt_pct?' · '+n.batt_pct+'%':''}${h?' · gw hears '+h.rssi+'/'+h.snr+'dB':''}</div>
       ${margin!=null?`<div class="kv">margin ${margin.toFixed(1)} dB</div><div class="bar"><span style="width:${pct}%"></span></div>`:'<div class="kv">no SNR yet</div>'}
       <div class="row"><input class="alias" placeholder="alias" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" data-alias="${n.id}"></div>${ctrls}</div>`;
@@ -257,6 +269,7 @@ function renderNodes(state){
   $('#nodelist').querySelectorAll('[data-pwkeep]').forEach(b=>b.onclick=()=>{const v=pw(b.dataset.pwkeep);if(!isNaN(v))api('confirm',{node:b.dataset.pwkeep,dbm:v});});
   $('#nodelist').querySelectorAll('[data-block]').forEach(b=>b.onclick=()=>api('block',{node:gateway,victim:b.dataset.block,ttl:30}));
   $('#nodelist').querySelectorAll('[data-unblock]').forEach(b=>b.onclick=()=>api('unblock',{node:gateway,victim:b.dataset.unblock}));
+  $('#nodelist').querySelectorAll('[data-ble]').forEach(b=>b.onclick=()=>api('ble',{node:b.dataset.ble,on:b.dataset.on==='1'}));
 }
 
 const W=1000,H=620;

@@ -38,6 +38,7 @@ import (
 	"agnostic-lora-net/controller/internal/ingest"
 	"agnostic-lora-net/controller/internal/keystore"
 	"agnostic-lora-net/controller/internal/policy"
+	"agnostic-lora-net/controller/internal/sign"
 	"agnostic-lora-net/controller/internal/topo"
 )
 
@@ -135,6 +136,7 @@ func main() {
 	}
 	if ks != nil {
 		fmt.Fprintf(os.Stderr, "controller key %s — provision nodes with:  ctrlkey %s\n", ks.PubHex(), ks.PubHex())
+		graph.SetAllowFunc(ks.IsAllowed) // membership gate: only verified+approved nodes are managed/commandable
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -144,7 +146,7 @@ func main() {
 		go pollLoop(ctx, src, graph)
 	}
 	if serial && ks != nil {
-		go commandREPL(ctx, src, ks)
+		go commandREPL(ctx, src, ks, graph)
 	}
 
 	// Live web dashboard (read-only): topology + the streaming decision feed.
@@ -324,23 +326,22 @@ func pollLoop(ctx context.Context, src ingest.Source, graph *topo.Graph) {
 
 // commandREPL reads controller commands from stdin and pushes signed control messages to
 // the tethered node. Acks come back through the normal console stream (KindCtrlAck).
-func commandREPL(ctx context.Context, src ingest.Source, ks *keystore.Store) {
-	fmt.Fprintln(os.Stderr, "commands: power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | pub | help")
+func commandREPL(ctx context.Context, src ingest.Source, ks *keystore.Store, graph *topo.Graph) {
+	fmt.Fprintln(os.Stderr, "commands: power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | acl list|pending|approve <pub>|revoke <pub> | pub | help")
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		if ctx.Err() != nil {
 			return
 		}
-		handleCommand(strings.TrimSpace(sc.Text()), src, ks)
+		handleCommand(strings.TrimSpace(sc.Text()), src, ks, graph)
 	}
 }
 
-func parseID(s string) (uint32, error) {
-	v, err := strconv.ParseUint(strings.TrimPrefix(s, "0x"), 16, 32)
-	return uint32(v), err
+func parseID(s string) (sign.NodeID, error) {
+	return sign.ParseNodeID(s)
 }
 
-func handleCommand(line string, src ingest.Source, ks *keystore.Store) {
+func handleCommand(line string, src ingest.Source, ks *keystore.Store, graph *topo.Graph) {
 	f := strings.Fields(line)
 	if len(f) == 0 {
 		return
@@ -358,11 +359,26 @@ func handleCommand(line string, src ingest.Source, ks *keystore.Store) {
 		fmt.Fprintln(os.Stderr, "  → command pushed (watch for [ctrl] ack)")
 	}
 
+	// gate refuses a command to a non-member BEFORE ks.Next() so a reject never burns a counter.
+	gate := func(idStr string) bool {
+		pub, ok := graph.CommandAllowed(idStr)
+		if !ok {
+			if pub == "" {
+				warn("node " + idStr + " is not a verified member (no valid signed announce seen) — see `acl pending`")
+			} else {
+				warn("node " + idStr + " is verified but not approved — run `acl approve " + pub + "`")
+			}
+		}
+		return ok
+	}
+
 	switch f[0] {
 	case "pub":
 		fmt.Fprintf(os.Stderr, "  controller pub = %s\n", ks.PubHex())
 	case "help":
-		fmt.Fprintln(os.Stderr, "  power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | pub")
+		fmt.Fprintln(os.Stderr, "  power <id> <dbm> | confirm <id> <dbm> | block <recip> <victim> [ttlMin] | unblock <recip> <victim> | acl list|pending|approve <pub>|revoke <pub> | pub")
+	case "acl":
+		handleACL(f, ks, graph, warn)
 	case "power", "confirm":
 		if len(f) != 3 {
 			warn("usage: " + f[0] + " <hexid> <dbm>")
@@ -372,6 +388,9 @@ func handleCommand(line string, src ingest.Source, ks *keystore.Store) {
 		dbm, e2 := strconv.Atoi(f[2])
 		if e1 != nil || e2 != nil {
 			warn("bad args")
+			return
+		}
+		if !gate(f[1]) {
 			return
 		}
 		ctr, err := ks.Next()
@@ -395,6 +414,9 @@ func handleCommand(line string, src ingest.Source, ks *keystore.Store) {
 			warn("bad args")
 			return
 		}
+		if !gate(f[1]) { // the recipient (who applies the block) must be a member
+			return
+		}
 		ctr, err := ks.Next()
 		if err != nil {
 			warn(err.Error())
@@ -411,6 +433,59 @@ func handleCommand(line string, src ingest.Source, ks *keystore.Store) {
 		}
 	default:
 		warn("unknown command " + f[0] + " (try help)")
+	}
+}
+
+// handleACL runs the membership subcommands: list (approved pubkeys + when), pending
+// (verified-but-unapproved nodes from the live graph), approve/revoke <pubhex>.
+func handleACL(f []string, ks *keystore.Store, graph *topo.Graph, warn func(string)) {
+	if len(f) < 2 {
+		warn("usage: acl list | pending | approve <pubhex> | revoke <pubhex>")
+		return
+	}
+	switch f[1] {
+	case "list":
+		al := ks.Allowlist()
+		if len(al) == 0 {
+			fmt.Fprintln(os.Stderr, "  (no approved nodes)")
+			return
+		}
+		for pub, ts := range al {
+			fmt.Fprintf(os.Stderr, "  approved %s  (since %s)\n", pub, time.Unix(ts, 0).Format(time.RFC3339))
+		}
+	case "pending":
+		any := false
+		for _, n := range graph.Snapshot().Nodes {
+			if n.Verified && n.ACL == "pending" {
+				fmt.Fprintf(os.Stderr, "  pending id=%s pub=%s\n", n.ID, n.Pub)
+				any = true
+			}
+		}
+		if !any {
+			fmt.Fprintln(os.Stderr, "  (no pending nodes)")
+		}
+	case "approve":
+		if len(f) != 3 {
+			warn("usage: acl approve <pubhex>")
+			return
+		}
+		if err := ks.Approve(f[2], time.Now().Unix()); err != nil {
+			warn(err.Error())
+			return
+		}
+		fmt.Fprintf(os.Stderr, "  approved %s\n", strings.ToUpper(f[2]))
+	case "revoke":
+		if len(f) != 3 {
+			warn("usage: acl revoke <pubhex>")
+			return
+		}
+		if err := ks.Revoke(f[2]); err != nil {
+			warn(err.Error())
+			return
+		}
+		fmt.Fprintf(os.Stderr, "  revoked %s\n", strings.ToUpper(f[2]))
+	default:
+		warn("unknown acl subcommand " + f[1])
 	}
 }
 

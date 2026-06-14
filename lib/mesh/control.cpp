@@ -12,16 +12,19 @@ static const uint8_t DOMAIN[10] = {'A','G','N','-','C','T','R','L','-','1'};
 static void put_u32(uint8_t* p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> 8 * i); }
 static uint32_t get_u32(const uint8_t* p) { uint32_t v = 0; for (int i = 3; i >= 0; i--) v = (v << 8) | p[i]; return v; }
 
-// Unsigned-header length by command: POWER/CONFIRM are 23 bytes (ver|cmd|target(16)|arg|
-// counter); BLOCK/UNBLOCK insert a 16-byte victim id before the counter -> 39 bytes.
+// Unsigned-header length by command: POWER/CONFIRM/BLE are 23 bytes (ver|cmd|target(16)|arg|
+// counter); BLOCK/UNBLOCK insert a 16-byte victim id -> 39; RETUNE inserts a 13-byte PHY
+// blob -> 35.
 static uint16_t unsigned_len(uint8_t cmd) {
-    return (cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK) ? 39 : 23;
+    if (cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK) return 39;
+    if (cmd == CTRL_RETUNE) return 22 + CTRL_RETUNE_CFG;   // 35
+    return 23;
 }
-static const uint16_t DOMAIN_VIEW_MAX = sizeof(DOMAIN) + 39;
+static const uint16_t DOMAIN_VIEW_MAX = sizeof(DOMAIN) + 39;   // 39 is the longest unsigned header
 
 static bool known_cmd(uint8_t cmd) {
     return cmd == CTRL_POWER || cmd == CTRL_CONFIRM || cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK
-        || cmd == CTRL_BLE;
+        || cmd == CTRL_BLE || cmd == CTRL_RETUNE;
 }
 
 // The exact byte string that is signed: DOMAIN || unsigned-part (ulen bytes).
@@ -63,6 +66,20 @@ uint16_t ctrl_build_block(uint8_t cmd, node_id_t target, node_id_t victim, int8_
     return CTRL_BLK_BYTES;
 }
 
+uint16_t ctrl_build_retune(node_id_t target, const uint8_t cfg[CTRL_RETUNE_CFG],
+                           uint32_t counter, const uint8_t seckey[64], uint8_t* out, uint16_t cap) {
+    if (cap < CTRL_RTN_BYTES || target.is_zero()) return 0;
+    out[0] = CTRL_VER;
+    out[1] = CTRL_RETUNE;
+    nid_write(out + 2, target);                         // [2..18)
+    memcpy(out + 18, cfg, CTRL_RETUNE_CFG);             // [18..31)
+    put_u32(out + 18 + CTRL_RETUNE_CFG, counter);       // [31..35)
+    uint8_t view[DOMAIN_VIEW_MAX];
+    uint16_t vn = signed_view(out, 18 + CTRL_RETUNE_CFG + 4, view);   // 35 unsigned bytes
+    crypto_ed25519_sign(out + 18 + CTRL_RETUNE_CFG + 4, seckey, view, vn);
+    return CTRL_RTN_BYTES;
+}
+
 CtrlVerdict ctrl_verify(const uint8_t* msg, uint16_t len, const uint8_t pubkey[32],
                         uint32_t min_counter, CtrlMsg* out) {
     if (!msg || len < CTRL_MSG_BYTES || msg[0] != CTRL_VER) return CTRL_MALFORMED;
@@ -85,9 +102,13 @@ CtrlVerdict ctrl_verify(const uint8_t* msg, uint16_t len, const uint8_t pubkey[3
     if (out) {
         out->cmd = cmd;
         out->target = nid_read(msg + 2);
-        out->arg = (int8_t)msg[18];
-        out->aux = (cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK) ? nid_read(msg + 19) : node_id_t{};
         out->counter = counter;
+        if (cmd == CTRL_RETUNE) {
+            memcpy(out->cfg, msg + 18, CTRL_RETUNE_CFG);   // [18..31) PHY blob
+        } else {
+            out->arg = (int8_t)msg[18];
+            out->aux = (cmd == CTRL_BLOCK || cmd == CTRL_UNBLOCK) ? nid_read(msg + 19) : node_id_t{};
+        }
     }
     return CTRL_OK;
 }
