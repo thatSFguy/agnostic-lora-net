@@ -27,6 +27,9 @@
 #include "control.h"
 #include "sar.h"
 #include "locator_dir.h"
+#include "node_table.h"            // nid_from_pubkey for the self-certifying node id
+#include "monocypher.h"            // node keypair: keygen + (later) announce signing
+#include "monocypher-ed25519.h"
 // Persistent config (radio PHY + BLE) lives in LittleFS on internal flash — always
 // compiled in (radio config is not BLE-specific). fs_compat.h gives us the same
 // InternalFS/File surface on nRF52 (Adafruit LittleFS) and ESP32 (core LittleFS).
@@ -679,21 +682,75 @@ static void net_cfg_save() {
     if (f.open(NET_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
 }
 
-// Provisional 4-byte node ID. The real ID is derived from the node's public key
-// (self-certifying, §3); until crypto lands we use a per-chip stable value from
-// the nRF52 FICR DEVICEID, or an explicit build-time override (-DAGN_NODE_ID=...).
-static node_id_t derive_node_id() {
-    if ((uint32_t)AGN_NODE_ID != 0u) return nid_from_u32((uint32_t)AGN_NODE_ID);
-#if defined(NRF_FICR)
-    return nid_from_u32(NRF_FICR->DEVICEID[0] ^ NRF_FICR->DEVICEID[1]);
+// --- Node identity keypair (self-certifying id; docs/node-keygen-signed-announce-impl.md) ---
+// Each node mints its OWN Ed25519 keypair once, at first boot, and persists it. The node id
+// is blake2b(pubkey)[0:16] — self-certifying and collision-free. The secret key never leaves
+// the node; it signs the node's own announces (see signed-announce work). This is independent
+// of the *controller* pubkey (ctrl_pubkey), which authenticates inbound commands.
+static const char     KEY_PATH[]  = "/agn_key.cfg";
+static const uint32_t KEY_MAGIC   = 0x59454B41;   // "AKEY"
+struct __attribute__((packed)) KeyStore { uint32_t magic; uint8_t sk[64]; uint8_t pk[32]; };
+static uint8_t node_sk[64];
+static uint8_t node_pk[32];
+static bool    node_have_key = false;
+
+// Fill `buf` with hardware-TRNG entropy. A node with no real RNG must NOT mint a guessable
+// key, so an unsupported target fails to BUILD rather than silently fall back to a PRNG.
+// Called before the SoftDevice is enabled, so direct NRF_RNG access is safe (no sd_rand).
+static void entropy_fill(uint8_t* buf, size_t n) {
+#if defined(NRF_RNG)
+    NRF_RNG->CONFIG = RNG_CONFIG_DERCEN_Msk;          // bias correction on
+    NRF_RNG->TASKS_START = 1;
+    for (size_t i = 0; i < n; i++) {
+        NRF_RNG->EVENTS_VALRDY = 0;
+        while (!NRF_RNG->EVENTS_VALRDY) { /* wait for a byte */ }
+        buf[i] = (uint8_t)NRF_RNG->VALUE;
+    }
+    NRF_RNG->TASKS_STOP = 1;
 #elif defined(ESP32)
-    // No FICR on ESP32; fold the 48-bit factory eFuse MAC down to 32 bits (same
-    // "stable per-chip, non-authenticating" role as the nRF52 DEVICEID, §3).
-    uint64_t mac = ESP.getEfuseMac();
-    return nid_from_u32((uint32_t)mac ^ (uint32_t)(mac >> 32));
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t r = esp_random();
+        size_t c = (n - i >= 4) ? 4 : (n - i);
+        memcpy(buf + i, &r, c);
+    }
 #else
-    return nid_from_u32(0xDEADBEEFu);  // non-nRF/ESP target (e.g. host tooling) — fixed placeholder
+    #error "no hardware TRNG for this target — node keygen would be insecure"
 #endif
+}
+
+static bool key_cfg_load() {
+    InternalFS.begin();
+    KeyStore rec; File f(InternalFS);
+    if (!f.open(KEY_PATH, FILE_O_READ)) return false;
+    int n = f.read((void*)&rec, sizeof(rec)); f.close();
+    if (n == (int)sizeof(rec) && rec.magic == KEY_MAGIC) {
+        memcpy(node_sk, rec.sk, 64); memcpy(node_pk, rec.pk, 32);
+        return true;
+    }
+    return false;
+}
+
+static void key_cfg_save() {
+    KeyStore want; want.magic = KEY_MAGIC;
+    memcpy(want.sk, node_sk, 64); memcpy(want.pk, node_pk, 32);
+    InternalFS.remove(KEY_PATH);
+    File f(InternalFS);
+    if (f.open(KEY_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
+// Load the persisted keypair, or mint one on first boot, and return the self-certifying
+// node id. A build-time -DAGN_NODE_ID=... still overrides for bench/debug (no keypair: the
+// node can't sign its announces, but routing works).
+static node_id_t node_key_init() {
+    if ((uint32_t)AGN_NODE_ID != 0u) return nid_from_u32((uint32_t)AGN_NODE_ID);
+    if (!key_cfg_load()) {
+        uint8_t seed[32];
+        entropy_fill(seed, sizeof(seed));
+        crypto_ed25519_key_pair(node_sk, node_pk, seed);   // consumes (wipes) seed
+        key_cfg_save();
+    }
+    node_have_key = true;
+    return mesh::nid_from_pubkey(node_pk);
 }
 
 static uint32_t schedule_next_beacon() {
@@ -2434,7 +2491,7 @@ void setup() {
     uint32_t t0 = millis();
     while (!Serial && (millis() - t0) < 2000) { /* wait for monitor, briefly */ }
 
-    my_id = derive_node_id();
+    my_id = node_key_init();   // load or mint the node's Ed25519 keypair; id = blake2b(pubkey)
     randomSeed(nid_fold(my_id));
     static mesh::Router router_inst(my_id);   // static storage, no heap
     router = &router_inst;
