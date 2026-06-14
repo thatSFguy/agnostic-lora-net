@@ -25,7 +25,7 @@ static void test_ack_clears_pending() {
     LinkArq arq;
     Cap cap;
     uint8_t seq = arq.next_seq();
-    TEST_ASSERT_TRUE(arq.track(seq, 0xB, FRAME, sizeof(FRAME), 1000));
+    TEST_ASSERT_TRUE(arq.track(seq, nid_from_u32(0xB), FRAME, sizeof(FRAME), 1000));
     TEST_ASSERT_EQUAL_UINT8(1, arq.pending_count());
 
     TEST_ASSERT_TRUE(arq.on_ack(seq));
@@ -41,7 +41,7 @@ static void test_timeout_triggers_resend() {
     LinkArq arq;
     Cap cap;
     uint8_t seq = arq.next_seq();
-    arq.track(seq, 0xB, FRAME, sizeof(FRAME), 1000, /*timeout*/500, /*retries*/3);
+    arq.track(seq, nid_from_u32(0xB), FRAME, sizeof(FRAME), 1000, /*timeout*/500, /*retries*/3);
 
     arq.tick(1499, cap_fn, &cap);        // not due yet
     TEST_ASSERT_EQUAL_INT(0, cap.resends);
@@ -57,7 +57,7 @@ static void test_retries_exhaust_then_drop() {
     LinkArq arq;
     Cap cap;
     uint8_t seq = arq.next_seq();
-    arq.track(seq, 0xB, FRAME, sizeof(FRAME), 0, /*timeout*/100, /*retries*/2);
+    arq.track(seq, nid_from_u32(0xB), FRAME, sizeof(FRAME), 0, /*timeout*/100, /*retries*/2);
 
     TEST_ASSERT_EQUAL_UINT8(0, arq.tick(100, cap_fn, &cap));  // resend 1
     TEST_ASSERT_EQUAL_UINT8(0, arq.tick(200, cap_fn, &cap));  // resend 2
@@ -72,7 +72,7 @@ static void test_retries_exhaust_then_drop() {
 static void test_unmatched_ack_ignored() {
     LinkArq arq;
     uint8_t seq = arq.next_seq();
-    arq.track(seq, 0xB, FRAME, sizeof(FRAME), 1000);
+    arq.track(seq, nid_from_u32(0xB), FRAME, sizeof(FRAME), 1000);
 
     TEST_ASSERT_FALSE(arq.on_ack((uint8_t)(seq + 7)));
     TEST_ASSERT_EQUAL_UINT8(1, arq.pending_count());
@@ -83,9 +83,9 @@ static void test_unmatched_ack_ignored() {
 static void test_pending_table_full() {
     LinkArq arq;
     for (uint8_t i = 0; i < ARQ_MAX_PENDING; i++) {
-        TEST_ASSERT_TRUE(arq.track(arq.next_seq(), 0xB, FRAME, sizeof(FRAME), 1000));
+        TEST_ASSERT_TRUE(arq.track(arq.next_seq(), nid_from_u32(0xB), FRAME, sizeof(FRAME), 1000));
     }
-    TEST_ASSERT_FALSE(arq.track(arq.next_seq(), 0xB, FRAME, sizeof(FRAME), 1000));
+    TEST_ASSERT_FALSE(arq.track(arq.next_seq(), nid_from_u32(0xB), FRAME, sizeof(FRAME), 1000));
     TEST_ASSERT_EQUAL_UINT8(ARQ_MAX_PENDING, arq.pending_count());
 }
 
@@ -94,7 +94,7 @@ static void test_ack_stops_resend() {
     LinkArq arq;
     Cap cap;
     uint8_t seq = arq.next_seq();
-    arq.track(seq, 0xB, FRAME, sizeof(FRAME), 0, /*timeout*/100, /*retries*/3);
+    arq.track(seq, nid_from_u32(0xB), FRAME, sizeof(FRAME), 0, /*timeout*/100, /*retries*/3);
 
     arq.tick(100, cap_fn, &cap);         // one resend
     TEST_ASSERT_EQUAL_INT(1, cap.resends);

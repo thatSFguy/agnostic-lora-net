@@ -11,7 +11,7 @@
 
 using namespace mesh;
 
-static const node_id_t NA = 0xAu, NB = 0xBu, NC = 0xCu;
+static const node_id_t NA = nid_from_u32(0xAu), NB = nid_from_u32(0xBu), NC = nid_from_u32(0xCu);
 
 // Exchange announces between A and B until aliases settle.
 static void converge_pair(Router& A, Router& B, int rounds) {
@@ -65,7 +65,7 @@ static void test_resolver_receive_side() {
 
     link_addr_t stamped_by_a = A.link_addr_for(NB);   // == B.my_alias(A)
     TEST_ASSERT_TRUE(B.is_my_alias(stamped_by_a));
-    TEST_ASSERT_EQUAL_HEX32(NA, B.neighbors().neighbor_by_my_alias(stamped_by_a));
+    TEST_ASSERT_TRUE(NA == B.neighbors().neighbor_by_my_alias(stamped_by_a));
 
     // An alias nobody was assigned is not ours.
     TEST_ASSERT_FALSE(B.is_my_alias(200));
@@ -77,7 +77,7 @@ static void test_resolver_receive_side() {
 // next_hop alone let C accept/ACK/forward frames meant for B (alias spaces are
 // only meaningful per assigner), corrupting ARQ and collapsing throughput.
 static void test_triangle_no_cross_space_match() {
-    Router A(0x9828F51Bu), B(0xD97EEC3Au), C(0xB51EEC13u);
+    Router A(nid_from_u32(0x9828F51Bu)), B(nid_from_u32(0xD97EEC3Au)), C(nid_from_u32(0xB51EEC13u));
     converge_pair(A, B, 4);
     converge_pair(A, C, 4);
     converge_pair(B, C, 4);
@@ -89,14 +89,14 @@ static void test_triangle_no_cross_space_match() {
     TEST_ASSERT_NOT_EQUAL(ALIAS_NONE, prev_hop);
 
     // The intended receiver resolves it to A; the bystander resolves NOTHING.
-    TEST_ASSERT_EQUAL_HEX32(A.id(), B.link_sender(next_hop, prev_hop));
-    TEST_ASSERT_EQUAL_HEX32(0,      C.link_sender(next_hop, prev_hop));
+    TEST_ASSERT_TRUE(A.id() == B.link_sender(next_hop, prev_hop));
+    TEST_ASSERT_TRUE(C.link_sender(next_hop, prev_hop).is_zero());
 
     // All four remaining directed links behave the same way.
-    TEST_ASSERT_EQUAL_HEX32(B.id(), A.link_sender(B.link_addr_for(A.id()), B.my_alias_for(A.id())));
-    TEST_ASSERT_EQUAL_HEX32(0,      C.link_sender(B.link_addr_for(A.id()), B.my_alias_for(A.id())));
-    TEST_ASSERT_EQUAL_HEX32(C.id(), B.link_sender(C.link_addr_for(B.id()), C.my_alias_for(B.id())));
-    TEST_ASSERT_EQUAL_HEX32(0,      A.link_sender(C.link_addr_for(B.id()), C.my_alias_for(B.id())));
+    TEST_ASSERT_TRUE(B.id() == A.link_sender(B.link_addr_for(A.id()), B.my_alias_for(A.id())));
+    TEST_ASSERT_TRUE(C.link_sender(B.link_addr_for(A.id()), B.my_alias_for(A.id())).is_zero());
+    TEST_ASSERT_TRUE(C.id() == B.link_sender(C.link_addr_for(B.id()), C.my_alias_for(B.id())));
+    TEST_ASSERT_TRUE(A.link_sender(C.link_addr_for(B.id()), C.my_alias_for(B.id())).is_zero());
 }
 
 void setUp() {}

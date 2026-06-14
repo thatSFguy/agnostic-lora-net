@@ -10,7 +10,7 @@
 
 using namespace mesh;
 
-static const node_id_t NA = 0xAu, NB = 0xBu, NC = 0xCu;
+static const node_id_t NA = nid_from_u32(0xAu), NB = nid_from_u32(0xBu), NC = nid_from_u32(0xCu);
 
 // Minimal synchronous DV driver for the line A-B-C (q = 0.9 on each hop).
 static void converge_line(Router& A, Router& B, Router& C, int rounds) {
@@ -55,14 +55,14 @@ static void test_forward_with_ttl_decrement() {
     Forwarder fb(NB, B);
     Decision d = fb.decide({NA, NC, 2, 8});
     TEST_ASSERT_EQUAL(Action::FORWARD, d.action);
-    TEST_ASSERT_EQUAL_HEX32(NC, d.next_hop);   // B reaches C directly
+    TEST_ASSERT_TRUE(NC == d.next_hop);   // B reaches C directly
     TEST_ASSERT_EQUAL_UINT8(7, d.out_ttl);
 
     // At A, the same destination relays via B.
     Forwarder fa(NA, A);
-    Decision da = fa.decide({0x99u, NC, 3, 8});
+    Decision da = fa.decide({nid_from_u32(0x99u), NC, 3, 8});
     TEST_ASSERT_EQUAL(Action::FORWARD, da.action);
-    TEST_ASSERT_EQUAL_HEX32(NB, da.next_hop);
+    TEST_ASSERT_TRUE(NB == da.next_hop);
 }
 
 // No route -> dropped.
@@ -70,7 +70,7 @@ static void test_drop_no_route() {
     Router A(NA), B(NB), C(NC);
     converge_line(A, B, C, 8);
     Forwarder fb(NB, B);
-    Decision d = fb.decide({NA, 0xDEADu, 4, 8});
+    Decision d = fb.decide({NA, nid_from_u32(0xDEADu), 4, 8});
     TEST_ASSERT_EQUAL(Action::DROP_NO_ROUTE, d.action);
 }
 
