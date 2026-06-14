@@ -69,8 +69,7 @@
   <div><b>AGN Controller</b></div>
   <div class="tab on" id="tab-dash">Dashboard</div>
   <div class="tab" id="tab-map">Map</div>
-  <div class="tab" id="tab-config">Configure</div>
-  <div class="tab" id="tab-flash">Flash</div>
+  <div class="tab" id="tab-node">Add / Configure</div>
   <div class="tab" id="tab-settings">Settings</div>
   <div>gw <span id="gw" class="gw">—</span></div>
   <div id="count" class="kv"></div>
@@ -87,8 +86,36 @@
 </div>
 <div id="mapview" class="hide" style="position:relative"></div>
 
-<!-- ===================== CONFIGURE (local node over Web Serial / BLE) ===================== -->
-<div id="configview" class="tabview hide"><div class="col">
+<!-- ============ ADD / CONFIGURE NODE (flash + configure a locally-attached node) ============ -->
+<div id="nodeview" class="tabview hide"><div class="col">
+  <p class="kv" style="margin:0 0 14px">Everything for a node plugged into <b>THIS</b> machine over USB / BLE — never over the mesh. New node: <b>flash</b> it (below), then <b>connect</b> to provision &amp; configure. Existing node: just connect.</p>
+
+  <h2>Flash firmware — for a new node</h2>
+  <div class="cfgcard"><h3>Flash firmware (nRF52 serial DFU)</h3>
+    <div class="kv">Flashes a node plugged into THIS machine over Web Serial. The node reboots into its bootloader (1200-baud touch) and re-enumerates — pick the bootloader port when prompted.</div>
+    <div class="kv" style="color:var(--lower)">Firmware only — flashing doesn't change provisioning. The controller key persists in flash across reflashes, so a previously-provisioned node stays provisioned; a brand-new node still needs it. After it reboots, connect below and check/sync under <b>Provisioning</b> (and set a BLE PIN there).</div>
+    <div class="grid" style="margin-top:.6rem">
+      <label>Board<select id="fl_board">
+        <option value="rak">RAK4631 (nRF52840 + SX1262)</option>
+        <option value="xiao">XIAO nRF52840 + Wio-SX1262</option>
+        <option value="promicro">Pro Micro nRF52840 ("faketec")</option>
+        <option value="t1000">SenseCAP T1000-E (LR1110)</option>
+        <option value="heltec-v4">Heltec V4 (ESP32 — flash via CLI)</option>
+      </select></label>
+      <label>Firmware base URL<input id="fl_base" style="width:100%" placeholder="(/fw/ — served by the control plane)"></label>
+    </div>
+    <div class="row" style="margin:.5rem 0">
+      <label class="chk"><input id="fl_isboot" type="checkbox"> node is already in bootloader (skip the touch)</label>
+    </div>
+    <div class="row"><button id="fl_go" class="primary">① Reboot to bootloader →</button>
+      <button id="fl_finish" class="primary hide">② Select bootloader port &amp; flash →</button>
+      <span id="fl_state" class="pill">idle</span>
+      <button id="fl_uf2" class="hide">Download UF2 (drag-drop fallback)</button></div>
+    <div class="bar" style="height:8px;margin:.6rem 0"><span id="fl_prog" style="width:0"></span></div>
+    <div id="fl_log" class="termlog"></div>
+  </div>
+
+  <h2 style="margin-top:20px">Connect &amp; configure</h2>
   <div class="connbar">
     <button id="cfgUsb">Connect (USB)</button>
     <button id="cfgBle">Connect (BLE)</button>
@@ -160,33 +187,6 @@
   </div>
 </div></div>
 
-<!-- ===================== FLASH (serial DFU to a locally-attached node) ===================== -->
-<div id="flashview" class="tabview hide"><div class="col">
-  <div class="cfgcard"><h3>Flash firmware (nRF52 serial DFU)</h3>
-    <div class="kv">Flashes a node plugged into THIS machine over Web Serial. The node reboots into its bootloader (1200-baud touch) and re-enumerates — pick the bootloader port when prompted.</div>
-    <div class="kv" style="color:var(--lower)">Firmware only — flashing doesn't change provisioning. The controller key persists in flash across reflashes, so a previously-provisioned node stays provisioned; a brand-new node still needs it. After it reboots, check/sync on <b>Configure → Provisioning</b> (and set a BLE PIN there).</div>
-    <div class="grid" style="margin-top:.6rem">
-      <label>Board<select id="fl_board">
-        <option value="rak">RAK4631 (nRF52840 + SX1262)</option>
-        <option value="xiao">XIAO nRF52840 + Wio-SX1262</option>
-        <option value="promicro">Pro Micro nRF52840 ("faketec")</option>
-        <option value="t1000">SenseCAP T1000-E (LR1110)</option>
-        <option value="heltec-v4">Heltec V4 (ESP32 — flash via CLI)</option>
-      </select></label>
-      <label>Firmware base URL<input id="fl_base" style="width:100%" placeholder="(/fw/ — served by the control plane)"></label>
-    </div>
-    <div class="row" style="margin:.5rem 0">
-      <label class="chk"><input id="fl_isboot" type="checkbox"> node is already in bootloader (skip the touch)</label>
-    </div>
-    <div class="row"><button id="fl_go" class="primary">① Reboot to bootloader →</button>
-      <button id="fl_finish" class="primary hide">② Select bootloader port &amp; flash →</button>
-      <span id="fl_state" class="pill">idle</span>
-      <button id="fl_uf2" class="hide">Download UF2 (drag-drop fallback)</button></div>
-    <div class="bar" style="height:8px;margin:.6rem 0"><span id="fl_prog" style="width:0"></span></div>
-    <div id="fl_log" class="termlog"></div>
-  </div>
-</div></div>
-
 <!-- ===================== SETTINGS (controller key · backup · restore) ===================== -->
 <div id="settingsview" class="tabview hide"><div class="col">
   <div class="cfgcard"><h3>Controller key</h3>
@@ -222,7 +222,7 @@ async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST'
 function uiPost(b){ fetch('/api/ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
 function setAlias(id,name){ if(name)aliases[id]=name; else delete aliases[id]; uiPost({type:'alias',id,name}); }
 
-const VIEWS={dash:'#grid', map:'#mapview', config:'#configview', flash:'#flashview', settings:'#settingsview'};
+const VIEWS={dash:'#grid', map:'#mapview', node:'#nodeview', settings:'#settingsview'};
 function setView(v){ view=v;
   for(const k in VIEWS){ $('#tab-'+k).classList.toggle('on',k===v); $(VIEWS[k]).classList.toggle('hide',k!==v); }
   if(state) render(state); }
