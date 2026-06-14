@@ -22,7 +22,8 @@ type Node struct {
 	BattMv    int       `json:"batt_mv,omitempty"`
 	BattPct   int       `json:"batt_pct,omitempty"`
 	IsGateway bool      `json:"is_gateway,omitempty"`
-	Blocked   bool      `json:"blocked,omitempty"` // blocked by the gateway/controller
+	Blocked   bool      `json:"blocked,omitempty"`  // blocked by the gateway/controller
+	Mobile    bool      `json:"mobile,omitempty"`   // node self-reports it moves (telemetry mob=1)
 	LastSeen  time.Time `json:"last_seen"`
 }
 
@@ -155,6 +156,9 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		}
 		if v, ok := e.Num["power"]; ok {
 			n.Power = v
+		}
+		if v, ok := e.Num["mob"]; ok {
+			n.Mobile = v != 0
 		}
 		if v, ok := e.Num["mv"]; ok {
 			n.BattMv, n.BattPct = v, e.Num["pct"]

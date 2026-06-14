@@ -47,11 +47,6 @@ func New(graph *topo.Graph, ks *keystore.Store, send func(string) error, uiPath 
 	return &Server{graph: graph, ks: ks, send: send, ui: loadUI(uiPath)}
 }
 
-// IsMobile reports whether the operator has flagged `id` as a moving node. The optimiser
-// uses it to keep movement headroom (never trims a mobile node's power). Safe for the
-// policy goroutine to call concurrently with dashboard writes.
-func (s *Server) IsMobile(id string) bool { return s.ui.isMobile(id) }
-
 // Console records a raw node console line for the dashboard's console pane.
 func (s *Server) Console(line string) {
 	s.mu.Lock()
@@ -127,18 +122,16 @@ type stateJSON struct {
 	Console   []string             `json:"console"`
 	Aliases   map[string]string    `json:"aliases"`
 	Positions map[string][]float64 `json:"positions"`
-	Mobile    map[string]bool      `json:"mobile"`
 	HasKey    bool                 `json:"has_key"`
 	Pub       string               `json:"pub,omitempty"`
 }
 
 type uiReq struct {
-	Type   string  `json:"type"` // alias | pos | mobile
-	ID     string  `json:"id"`
-	Name   string  `json:"name"`
-	X      float64 `json:"x"`
-	Y      float64 `json:"y"`
-	Mobile bool    `json:"mobile"`
+	Type string  `json:"type"` // alias | pos
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
 }
 
 func (s *Server) Handler() http.Handler {
@@ -158,9 +151,9 @@ func (s *Server) Handler() http.Handler {
 		con := make([]string, len(s.console))
 		copy(con, s.console)
 		s.mu.Unlock()
-		al, pos, mob := s.ui.snapshot()
+		al, pos := s.ui.snapshot()
 		st := stateJSON{Snapshot: s.graph.Snapshot(), Events: ev, Console: con,
-			Aliases: al, Positions: pos, Mobile: mob, HasKey: s.ks != nil}
+			Aliases: al, Positions: pos, HasKey: s.ks != nil}
 		if s.ks != nil {
 			st.Pub = s.ks.PubHex()
 		}
@@ -182,8 +175,6 @@ func (s *Server) Handler() http.Handler {
 			s.ui.setAlias(u.ID, u.Name)
 		case "pos":
 			s.ui.setPos(u.ID, u.X, u.Y)
-		case "mobile":
-			s.ui.setMobile(u.ID, u.Mobile)
 		default:
 			writeJSON(w, map[string]any{"ok": false, "msg": "unknown ui type"})
 			return

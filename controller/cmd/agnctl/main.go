@@ -140,11 +140,7 @@ func main() {
 		}
 		cfg := policy.DefaultConfig()
 		cfg.MarginLow, cfg.MarginHigh, cfg.MaxStep = *marginLo, *marginHi, int8(*maxStep)
-		var mobile func(string) bool // the dashboard owns the fixed/mobile flags; nil = all fixed
-		if dash != nil {
-			mobile = dash.IsMobile
-		}
-		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat, mobile)
+		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat)
 		mode := "dry-run (log only)"
 		if *apply {
 			mode = "APPLY"

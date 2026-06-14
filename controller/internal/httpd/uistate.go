@@ -15,11 +15,10 @@ type uiState struct {
 	path      string
 	Aliases   map[string]string    `json:"aliases"`
 	Positions map[string][]float64 `json:"positions"` // id -> [x,y] in 0..1
-	Mobile    map[string]bool      `json:"mobile"`    // id -> true if the node moves around
 }
 
 func loadUI(path string) *uiState {
-	u := &uiState{path: path, Aliases: map[string]string{}, Positions: map[string][]float64{}, Mobile: map[string]bool{}}
+	u := &uiState{path: path, Aliases: map[string]string{}, Positions: map[string][]float64{}}
 	if path != "" {
 		if b, err := os.ReadFile(path); err == nil {
 			_ = json.Unmarshal(b, u)
@@ -28,9 +27,6 @@ func loadUI(path string) *uiState {
 			}
 			if u.Positions == nil {
 				u.Positions = map[string][]float64{}
-			}
-			if u.Mobile == nil {
-				u.Mobile = map[string]bool{}
 			}
 		}
 	}
@@ -55,25 +51,8 @@ func (u *uiState) setPos(id string, x, y float64) {
 	u.save()
 }
 
-func (u *uiState) setMobile(id string, mobile bool) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if mobile {
-		u.Mobile[id] = true
-	} else {
-		delete(u.Mobile, id) // absent = fixed (the default)
-	}
-	u.save()
-}
-
-func (u *uiState) isMobile(id string) bool {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.Mobile[id]
-}
-
 // snapshot returns copies safe to marshal without holding the lock.
-func (u *uiState) snapshot() (map[string]string, map[string][]float64, map[string]bool) {
+func (u *uiState) snapshot() (map[string]string, map[string][]float64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	a := make(map[string]string, len(u.Aliases))
@@ -84,11 +63,7 @@ func (u *uiState) snapshot() (map[string]string, map[string][]float64, map[strin
 	for k, v := range u.Positions {
 		p[k] = v
 	}
-	m := make(map[string]bool, len(u.Mobile))
-	for k, v := range u.Mobile {
-		m[k] = v
-	}
-	return a, p, m
+	return a, p
 }
 
 // save persists the state (called under lock). Best-effort; a UI-state write failure must
@@ -100,8 +75,7 @@ func (u *uiState) save() {
 	if b, err := json.MarshalIndent(struct {
 		Aliases   map[string]string    `json:"aliases"`
 		Positions map[string][]float64 `json:"positions"`
-		Mobile    map[string]bool      `json:"mobile"`
-	}{u.Aliases, u.Positions, u.Mobile}, "", "  "); err == nil {
+	}{u.Aliases, u.Positions}, "", "  "); err == nil {
 		_ = os.WriteFile(u.path, b, 0o644)
 	}
 }

@@ -295,6 +295,27 @@ static void kiss_cfg_save() {
     if (f.open(KISS_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
 }
 
+// Node mobility flag (operator metadata): is this node one that moves around? Reported in
+// telemetry so the Tier-1 controller keeps its TX-power headroom (never trims a mobile node).
+// Lives on the node — any controller learns it — and is set with `mobile on|off`.
+static bool node_mobile = false;
+static const char     NODE_PATH[]  = "/agn_node.cfg";
+static const uint32_t NODE_MAGIC   = 0x444E4741;   // "AGND"
+struct __attribute__((packed)) NodeStore { uint32_t magic; uint8_t mobile; };
+static void node_cfg_load() {
+    InternalFS.begin();
+    NodeStore rec; File f(InternalFS);
+    if (!f.open(NODE_PATH, FILE_O_READ)) return;
+    int n = f.read((void*)&rec, sizeof(rec)); f.close();
+    if (n == (int)sizeof(rec) && rec.magic == NODE_MAGIC) node_mobile = rec.mobile != 0;
+}
+static void node_cfg_save() {
+    NodeStore want; want.magic = NODE_MAGIC; want.mobile = node_mobile ? 1 : 0;
+    InternalFS.remove(NODE_PATH);
+    File f(InternalFS);
+    if (f.open(NODE_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
+}
+
 static void batt_refresh() {            // cheap cached read for heartbeat/info
     batt_last_mv = (batt_scale > 0.0f) ? (uint16_t)(batt_raw() * batt_scale) : 0;
 }
@@ -1308,14 +1329,15 @@ static void telem_flood_batt() {
 }
 
 static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
-    char line[96];
+    char line[104];
+    unsigned mob = (m.flags & mesh::TELEM_FLAG_MOBILE) ? 1u : 0u;
     if (m.pct_plus1)
-        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%%",
+        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u",
                  (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf,
-                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1));
+                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob);
     else
-        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=?",
-                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm);
+        snprintf(line, sizeof(line), "[status] %08lX fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u",
+                 (unsigned long)origin, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob);
 #ifdef AGN_BLE
     if (ble_connected) bleuart.println(line);
 #endif
@@ -1372,11 +1394,12 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                         nn++;
                     }
                 }
-                uint8_t r[9 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 9];
+                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 9];
                 uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
+                uint8_t flags = node_mobile ? mesh::TELEM_FLAG_MOBILE : 0;
                 uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
                         (uint16_t)((millis() - boot_ms) / 60000u),
-                        radio.config().power_dbm, radio.config().sf, AGN_FW_VERSION,
+                        radio.config().power_dbm, radio.config().sf, flags, AGN_FW_VERSION,
                         nbrs, nn, r, sizeof(r));
                 if (rlen) send_loc_unicast(net.src, r, rlen, PKT_TELEM);
             }
@@ -1925,9 +1948,10 @@ static void print_info() {
     char l[100];
     snprintf(l, sizeof(l), "fw %s  built %s", AGN_FW_VERSION, FW_BUILD);
     Serial.println(l);
-    snprintf(l, sizeof(l), "node %08lX  neighbors=%u routes=%u blocked=%u",
+    snprintf(l, sizeof(l), "node %08lX  neighbors=%u routes=%u blocked=%u  mobile=%s",
              (unsigned long)my_id, (unsigned)router->neighbors().count(),
-             (unsigned)router->routes().count(), (unsigned)router->blocked_count());
+             (unsigned)router->routes().count(), (unsigned)router->blocked_count(),
+             node_mobile ? "on" : "off");
     Serial.println(l);
     // Authoritative block list (always printed, even when empty) so the map can sync
     // exactly which links this node is blocking. MAX_BLOCKED (8) ids fit one line.
@@ -2069,6 +2093,12 @@ static void handle_command(char* line) {
         if (a && !strcmp(a, "on"))  trace_beacons = true;
         if (a && !strcmp(a, "off")) trace_beacons = false;
         Serial.println(trace_beacons ? "trace on (beacon RX/TX lines)" : "trace off");
+    } else if (!strcmp(cmd, "mobile")) {       // mobile [on|off] — flag a moving node (controller keeps TX-power headroom)
+        char* a = strtok(nullptr, " ");
+        if (a && !strcmp(a, "on"))  { node_mobile = true;  node_cfg_save(); }
+        if (a && !strcmp(a, "off")) { node_mobile = false; node_cfg_save(); }
+        Serial.println(node_mobile ? "mobile on (controller holds TX power for movement headroom)"
+                                   : "mobile off (power optimised for fixed position)");
     } else if (!strcmp(cmd, "net")) {          // net | net beacon <seconds>|auto
         char* a = strtok(nullptr, " ");
         char* v = a ? strtok(nullptr, " ") : nullptr;
@@ -2291,7 +2321,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | status <id> | battdump | kiss [<id>|off] | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif
@@ -2405,6 +2435,7 @@ void setup() {
     batt_refresh();
     net_cfg_load();    // restore the beacon-period setting (0 = auto-by-SF)
     kiss_cfg_load();   // restore KISS TNC mode (the node can boot as a TNC appliance)
+    node_cfg_load();   // restore the mobile flag
     ctrl_cfg_load();   // restore the controller pubkey + replay counter
 
 #ifdef AGN_BLE

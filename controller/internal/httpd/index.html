@@ -67,7 +67,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
-let aliases = {}, positions = {}, mobile = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null, selected = null;
+let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null, selected = null;
 const nm = id => aliases[id] || id;
 const clamp01 = v => Math.max(0, Math.min(1, v));
 const ASYM = 0.35;                                  // mirrors lib/mesh ASYM_THRESHOLD
@@ -79,7 +79,6 @@ function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('show')
 async function api(action,p){ try{ const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...p})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); return j.ok; }catch(e){ toast('✗ '+e); } }
 function uiPost(b){ fetch('/api/ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
 function setAlias(id,name){ if(name)aliases[id]=name; else delete aliases[id]; uiPost({type:'alias',id,name}); }
-function setMobile(id,m){ if(m)mobile[id]=true; else delete mobile[id]; uiPost({type:'mobile',id,mobile:m}); if(state)render(state); }
 
 function setView(v){ view=v; $('#tab-dash').classList.toggle('on',v==='dash'); $('#tab-map').classList.toggle('on',v==='map');
   $('#grid').classList.toggle('hide',v!=='dash'); $('#mapview').classList.toggle('hide',v!=='map'); if(state) render(state); }
@@ -97,11 +96,10 @@ function renderNodes(state){
     const pwr=d?(d.action==='lower'||d.action==='raise'?d.new_target:d.cur_target):(n.power_dbm??'');
     const margin=d&&d.has_snr?d.margin:(h?(h.snr-(SNR_LIMIT[n.sf||9]??-12.5)):null);
     const pct=margin==null?0:Math.max(0,Math.min(100,margin/24*100)); const act=d?d.action:'';
-    const mob=!!mobile[n.id];
+    const mob=!!n.mobile;   // node self-reports mobility (set on the node with `mobile on`)
     const ctrls=isGw?'':`<div class="row">
         <input class="pw" type="number" value="${typeof pwr==='number'?pwr:''}" data-pw="${n.id}" title="dBm">
         <button data-pwset="${n.id}">Set</button><button data-pwkeep="${n.id}">Keep</button>
-        <button data-mob="${n.id}" title="${mob?'moving node — power held for headroom':'stationary — power optimised'}">${mob?'📍 Mobile':'Fixed'}</button>
         ${n.blocked?`<button class="danger" data-unblock="${n.id}">Unblock</button>`:`<button class="danger" data-block="${n.id}">Block</button>`}</div>`;
     return `<div class="node ${n.blocked?'blocked':''}">
       <div><span class="id ${isGw?'gw':''}">${nm(n.id)}</span>${isGw?'<span class="pill">gateway</span>':''}${mob?'<span class="pill">📍 mobile</span>':''}${n.blocked?'<span class="pill blk">blocked</span>':''}${act&&!isGw?`<span class="pill ${act}">${act}</span>`:''}</div>
@@ -110,7 +108,6 @@ function renderNodes(state){
       <div class="row"><input class="alias" placeholder="alias" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" data-alias="${n.id}"></div>${ctrls}</div>`;
   }).join('') || '<div class="kv">waiting for the node…</div>';
   $('#nodelist').querySelectorAll('[data-alias]').forEach(el=>el.onchange=()=>setAlias(el.dataset.alias,el.value.trim()));
-  $('#nodelist').querySelectorAll('[data-mob]').forEach(b=>b.onclick=()=>setMobile(b.dataset.mob,!mobile[b.dataset.mob]));
   const pw=id=>{const el=$(`[data-pw="${id}"]`);return el?+el.value:NaN;};
   $('#nodelist').querySelectorAll('[data-pwset]').forEach(b=>b.onclick=()=>{const v=pw(b.dataset.pwset);if(!isNaN(v))api('power',{node:b.dataset.pwset,dbm:v});});
   $('#nodelist').querySelectorAll('[data-pwkeep]').forEach(b=>b.onclick=()=>{const v=pw(b.dataset.pwkeep);if(!isNaN(v))api('confirm',{node:b.dataset.pwkeep,dbm:v});});
@@ -188,7 +185,7 @@ function renderMap(state){
       dec=`<text class="dec" y="${r+13}" text-anchor="middle" fill="${actCol[d.action]||'#6b7686'}">${d.action==='skip'?'skip':`${actSym[d.action]}${decTarget(d)}dBm${m}`}${d.soft?' ~':''}</text>`; }
     // battery chip above the name (colour-coded); only when the node has reported a %
     const bp=n.batt_pct; const batt = bp ? `<text class="batt" y="${-r-19}" text-anchor="middle" fill="${battCol(bp)}">${bp}%</text>` : '';
-    const mob=!!mobile[n.id];   // dashed ring = mobile (power held for movement headroom)
+    const mob=!!n.mobile;   // dashed ring = node self-reported mobile (power held for movement headroom)
     s+=`<g class="mnode" data-id="${n.id}" transform="translate(${x},${y})" style="cursor:grab;opacity:${fade?0.3:1}">
       <circle r="${r}" fill="${fill}" stroke="${sel}" stroke-width="${selected===n.id?3:2}"${mob?' stroke-dasharray="3 2"':''}/>
       ${mob?`<text class="mob" y="${-r-(bp?32:18)}" text-anchor="middle">📍</text>`:''}
@@ -212,7 +209,6 @@ function renderMap(state){
       document.addEventListener('mousemove',move); document.addEventListener('mouseup',upH); });
   });
   $('#mapview').querySelectorAll('[data-close]').forEach(el=>el.onclick=()=>{ selected=null; renderMap(state); });
-  $('#mapview').querySelectorAll('[data-mobtoggle]').forEach(el=>el.onclick=()=>setMobile(el.dataset.mobtoggle,!mobile[el.dataset.mobtoggle]));
 }
 
 // neighbourPanel lists what the selected node can SEE (it hears) and who can hear IT, with
@@ -229,9 +225,9 @@ function neighbourPanel(id){
   if(d){ const m=d.margin!=null?` · worst margin ${d.margin.toFixed(1)}dB`:'';
     dec=`<div class="decline" style="color:${actCol[d.action]||'#6b7686'}">${(d.action||'').toUpperCase()} → ${decTarget(d)}dBm${m}${d.governs?` (binds on ${nm(d.governs)})`:''}${d.soft?' · quality-est':''}</div>
       <div class="dim" style="font-size:11px;margin-bottom:6px">${esc(d.reason||'')}</div>`; }
-  const mob=!!mobile[id];
+  const mob=!!(nd&&nd.mobile);
   return `<div class="mapinfo"><span class="x" data-close>✕</span><h3>${nm(id)} — ${keys.length} neighbour(s)${bp?` · <span style="color:${battCol(bp)}">${bp}%</span>`:''}</h3>
-    <div style="margin-bottom:6px"><button data-mobtoggle="${id}" title="${mob?'moving node — optimiser holds its power':'stationary — optimiser trims its power'}">${mob?'📍 Mobile — power held':'Fixed — optimised'}</button></div>${dec}
+    <div class="dim" style="margin-bottom:6px">${mob?'📍 mobile — optimiser holds power (set on the node)':'fixed — optimiser trims power'}</div>${dec}
     <table><tr><td class="dim">peer</td><td class="dim sees" title="this node hears peer">sees ▸</td><td class="dim heard" title="peer hears this node (governs its TX power)">◂ heard</td></tr>${rows}</table></div>`;
 }
 
@@ -250,7 +246,7 @@ function renderConsole(lines){ const out=$('#conout'); const pinned=out.scrollHe
 let state=null;
 function render(st){
   state=st; lastOk=Date.now(); gateway=st.snapshot?.gateway||''; hasKey=st.has_key;
-  if(!dragging){ aliases=st.aliases||{}; positions=st.positions||{}; mobile=st.mobile||{}; }
+  if(!dragging){ aliases=st.aliases||{}; positions=st.positions||{}; }
   $('#gw').textContent=gateway?nm(gateway):'—'; $('#count').textContent=(st.snapshot?.nodes?.length||0)+' nodes';
   $('#key').textContent=hasKey?'key '+(st.pub||'').slice(0,12)+'…':'⚠ no key (read-only)';
   $('#upd').textContent=new Date().toLocaleTimeString(); $('#stale').textContent='';

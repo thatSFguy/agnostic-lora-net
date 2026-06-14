@@ -26,13 +26,24 @@ func TestRemoteTelemetryBuildsNodeToNodeLinks(t *testing.T) {
 
 	// Remote node CCCC0003's telemetry reply: its neighbour DDDD0004 is nowhere near the
 	// gateway. q_rx = C hears D (link D->C); q_tx = D hears C (link C->D).
-	feed(g, now, "[status] CCCC0003 fw=x up=10min sf=9 pwr=14 batt=?")
+	feed(g, now, "[status] CCCC0003 fw=x up=10min sf=9 pwr=14 batt=? mob=1")
 	feed(g, now, "  nbr DDDD0004 q_rx=70 q_tx=60")
 
 	s := g.Snapshot()
 	byKey := map[string]Link{}
+	byNode := map[string]Node{}
 	for _, l := range s.Links {
 		byKey[l.From+">"+l.To] = l
+	}
+	for _, n := range s.Nodes {
+		byNode[n.ID] = n
+	}
+	// The node self-reported mobile (mob=1) in its telemetry status line.
+	if !byNode["CCCC0003"].Mobile {
+		t.Fatalf("CCCC0003 should be Mobile (reported mob=1), got %+v", byNode["CCCC0003"])
+	}
+	if byNode["DDDD0004"].Mobile {
+		t.Fatalf("DDDD0004 reported no mob= — should default to fixed")
 	}
 
 	// Gateway spoke, with measured SNR preserved.

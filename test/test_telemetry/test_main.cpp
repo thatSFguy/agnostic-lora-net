@@ -31,10 +31,10 @@ static void test_query_roundtrip() {
 }
 
 static void test_reply_roundtrip() {
-    // nbr 0 carries measured RF (snr/rssi); nbr 1 is unmeasured (0/0).
+    // nbr 0 carries measured RF (snr/rssi); nbr 1 is unmeasured (0/0). flags = mobile.
     TelemNbr nbrs[2] = { {0xD97EEC3Au, 99, 100, -4, -95}, {0xB51EEC13u, 87, 0, 0, 0} };
     uint8_t b[64];
-    uint16_t n = telem_build_reply(4021, 86, 1234, 22, 9, "0.7.0", nbrs, 2, b, sizeof(b));
+    uint16_t n = telem_build_reply(4021, 86, 1234, 22, 9, TELEM_FLAG_MOBILE, "0.7.0", nbrs, 2, b, sizeof(b));
     TEST_ASSERT_TRUE(n > 0);
     TelemMsg m;
     TEST_ASSERT_TRUE(telem_parse(b, n, &m));
@@ -44,6 +44,7 @@ static void test_reply_roundtrip() {
     TEST_ASSERT_EQUAL_UINT16(1234, m.uptime_min);
     TEST_ASSERT_EQUAL_INT8(22, m.power_dbm);
     TEST_ASSERT_EQUAL_UINT8(9, m.sf);
+    TEST_ASSERT_EQUAL_UINT8(TELEM_FLAG_MOBILE, m.flags & TELEM_FLAG_MOBILE); // mobile flag round-trips
     TEST_ASSERT_EQUAL_STRING("0.7.0", m.fw);
     TEST_ASSERT_EQUAL_UINT8(2, m.n_nbrs);
     TEST_ASSERT_EQUAL_HEX32(0xD97EEC3Au, m.nbrs[0].id);
@@ -64,7 +65,7 @@ static void test_parse_rejects_malformed() {
     // reply whose nbr count overruns the buffer
     TelemNbr nbrs[1] = { {1, 1, 1, 0, 0} };
     uint8_t b[64];
-    uint16_t n = telem_build_reply(1, 1, 1, 10, 9, "x", nbrs, 1, b, sizeof(b));
+    uint16_t n = telem_build_reply(1, 1, 1, 10, 9, 0, "x", nbrs, 1, b, sizeof(b));
     b[n - 10] = 5;                                              // n_nbrs byte (one 9 B entry trails it): claim 5, carry 1
     TEST_ASSERT_FALSE(telem_parse(b, n, &m));
 }
