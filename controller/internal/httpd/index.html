@@ -35,7 +35,7 @@
   #toast { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:7px 14px; opacity:0; transition:opacity .2s; pointer-events:none; }
   #toast.show{opacity:1;}
   svg text { fill:var(--txt); font-size:13px; } .maphint{ position:absolute; bottom:10px; left:14px; right:14px; color:var(--dim); }
-  svg .lv { font-size:10px; } svg .deg { font-size:10px; font-weight:700; fill:#fff; } svg .dec { font-size:10.5px; font-weight:600; }
+  svg .lv { font-size:10px; } svg .deg { font-size:10px; font-weight:700; fill:#fff; } svg .dec { font-size:10.5px; font-weight:600; } svg .batt { font-size:10px; font-weight:600; }
   .mapinfo .decline{ font-size:12px; font-weight:600; margin-bottom:2px; } .mapinfo tr.gov td{ background:#2a3340; }
   .mapinfo{ position:absolute; top:10px; right:14px; width:280px; max-height:calc(100% - 40px); overflow:auto;
             background:#161b22f2; border:1px solid var(--line); border-radius:8px; padding:9px 11px; }
@@ -121,6 +121,7 @@ function mapXY(n,i,N){ const p=positions[n.id]; if(p)return[p[0]*W,p[1]*H];
 // tunes on), quality-only links show q. Tooltips carry the full detail.
 const lval = d => d.rssi ? `${d.snr}` : `.${Math.round(d.q*100)}`;
 let mapNodes=[], mapPeers={}, mapDec={};   // last render's data, for the neighbour panel
+const battCol = p => p>50?'#3fb950':p>20?'#d29922':'#f85149';   // green / amber / red
 const actCol={lower:'#e0a030',raise:'#2fd4c6',hold:'#6b7686',skip:'#6b7686'};
 const actSym={lower:'▼',raise:'▲',hold:'=',skip:'·'};
 // decTarget: the power the decision lands on (new for raise/lower, current for hold).
@@ -181,13 +182,15 @@ function renderMap(state){
     const d=lastDec[n.id]; let dec='';
     if(d && !n.is_gateway){ const m=d.margin!=null?` m${d.margin.toFixed(1)}`:'';
       dec=`<text class="dec" y="${r+13}" text-anchor="middle" fill="${actCol[d.action]||'#6b7686'}">${d.action==='skip'?'skip':`${actSym[d.action]}${decTarget(d)}dBm${m}`}${d.soft?' ~':''}</text>`; }
+    // battery chip above the name (colour-coded); only when the node has reported a %
+    const bp=n.batt_pct; const batt = bp ? `<text class="batt" y="${-r-19}" text-anchor="middle" fill="${battCol(bp)}">${bp}%</text>` : '';
     s+=`<g class="mnode" data-id="${n.id}" transform="translate(${x},${y})" style="cursor:grab;opacity:${fade?0.3:1}">
       <circle r="${r}" fill="${fill}" stroke="${sel}" stroke-width="${selected===n.id?3:2}"/>
       ${k?`<text class="deg" text-anchor="middle" dominant-baseline="central"><title>${k} neighbour(s)</title>${k}</text>`:''}
-      <text y="${-r-5}" text-anchor="middle">${nm(n.id)}</text>${dec}</g>`; });
+      ${batt}<text y="${-r-5}" text-anchor="middle">${nm(n.id)}</text>${dec}</g>`; });
   s+=`</svg>`;
   if(selected) s+=neighbourPanel(selected);
-  s+=`<div class="maphint">under each node = optimiser decision (▲raise ▼lower =hold @target dBm · m=worst margin · ~=quality-estimate) · numbers on links = SNR or q×100 · node number/size = neighbours · <b>click a node</b> to focus + see why · ➤ direction · dashed=one-way · ⚠️ asymmetric</div>`;
+  s+=`<div class="maphint">above node = battery % (green &gt;50 · amber &gt;20 · red) · under node = optimiser decision (▲raise ▼lower =hold @target dBm · m=worst margin · ~=quality-estimate) · numbers on links = SNR or q×100 · node number/size = neighbours · <b>click a node</b> to focus + see why · ➤ direction · dashed=one-way · ⚠️ asymmetric</div>`;
   $('#mapview').innerHTML=s;
   const svg=$('#svg');
   svg.addEventListener('mousedown',ev=>{ if(ev.target===svg){ selected=null; renderMap(state); } });
@@ -209,6 +212,7 @@ function renderMap(state){
 // the link values — the per-link feedback for tuning the algorithm.
 function neighbourPanel(id){
   const ps=mapPeers[id]||{}, keys=Object.keys(ps), d=mapDec[id];
+  const nd=(mapNodes||[]).find(n=>n.id===id), bp=nd&&nd.batt_pct;
   const cell=v=> v ? `<span style="color:${qcol(v.q)}">${v.rssi?`${v.snr}dB`:`q.${Math.round(v.q*100)}`}</span>` : '<span class="dim">—</span>';
   keys.sort((a,b)=>((ps[b].out?.q||ps[b].in?.q||0)-(ps[a].out?.q||ps[a].in?.q||0)));
   const rows=keys.map(k=>`<tr${d&&d.governs===k?' class="gov"':''}><td>${nm(k)}${d&&d.governs===k?' ◀':''}</td><td class="sees">${cell(ps[k].in)}</td><td class="heard">${cell(ps[k].out)}</td></tr>`).join('')
@@ -218,7 +222,7 @@ function neighbourPanel(id){
   if(d){ const m=d.margin!=null?` · worst margin ${d.margin.toFixed(1)}dB`:'';
     dec=`<div class="decline" style="color:${actCol[d.action]||'#6b7686'}">${(d.action||'').toUpperCase()} → ${decTarget(d)}dBm${m}${d.governs?` (binds on ${nm(d.governs)})`:''}${d.soft?' · quality-est':''}</div>
       <div class="dim" style="font-size:11px;margin-bottom:6px">${esc(d.reason||'')}</div>`; }
-  return `<div class="mapinfo"><span class="x" data-close>✕</span><h3>${nm(id)} — ${keys.length} neighbour(s)</h3>${dec}
+  return `<div class="mapinfo"><span class="x" data-close>✕</span><h3>${nm(id)} — ${keys.length} neighbour(s)${bp?` · <span style="color:${battCol(bp)}">${bp}%</span>`:''}</h3>${dec}
     <table><tr><td class="dim">peer</td><td class="dim sees" title="this node hears peer">sees ▸</td><td class="dim heard" title="peer hears this node (governs its TX power)">◂ heard</td></tr>${rows}</table></div>`;
 }
 
