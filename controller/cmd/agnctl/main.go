@@ -62,6 +62,7 @@ func main() {
 		marginLo  = flag.Float64("margin-low", 6, "raise power below this SNR margin (dB)")
 		marginHi  = flag.Float64("margin-high", 12, "lower power above this SNR margin (dB)")
 		maxStep   = flag.Int("max-step", 3, "max dBm power change per cycle")
+		connFloor = flag.Int("conn-floor", 0, "EXPERIMENTAL connectivity-floor governor: keep each node's best N gateway-ward uplinks (+ any link a dependent peer needs) and let redundant weak links a repeater already covers fade (0 = off / classic worst-neighbour; 1 = single best uplink; 2 = keep one backup)")
 		heartbeat = flag.Duration("heartbeat", 2*time.Hour, "re-assert held nodes this often (keeps their flash-default watchdog fresh; must be < the node's 6h window)")
 		httpAddr  = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
 		fwDir     = flag.String("fwdir", "../web/fw", "directory of firmware packages to serve at /fw/ for the dashboard Flash tab")
@@ -182,13 +183,18 @@ func main() {
 		}
 		cfg := policy.DefaultConfig()
 		cfg.MarginLow, cfg.MarginHigh, cfg.MaxStep = *marginLo, *marginHi, int8(*maxStep)
+		cfg.ConnFloor = *connFloor
 		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat)
 		mode := "dry-run (log only)"
 		if *apply {
 			mode = "APPLY"
 		}
-		fmt.Fprintf(os.Stderr, "optimiser: %s, band [%.0f,%.0f] dB, ≤%d dB/cycle every %s → %s\n",
-			mode, *marginLo, *marginHi, *maxStep, *polEvery, *polLog)
+		governor := "worst-neighbour"
+		if *connFloor > 0 {
+			governor = fmt.Sprintf("connectivity-floor (keep %d uplink(s))", *connFloor)
+		}
+		fmt.Fprintf(os.Stderr, "optimiser: %s, band [%.0f,%.0f] dB, ≤%d dB/cycle every %s, governor=%s → %s\n",
+			mode, *marginLo, *marginHi, *maxStep, *polEvery, governor, *polLog)
 		go func() {
 			t := time.NewTicker(*polEvery)
 			defer t.Stop()

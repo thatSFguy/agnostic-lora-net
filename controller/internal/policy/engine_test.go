@@ -18,6 +18,10 @@ const (
 	gwID = "00000000000000000000000000000001"
 	aID  = "aaaa00010000000000000000000000a1" // loud node
 	bID  = "bbbb00020000000000000000000000b2" // in-band node
+	nID  = "cccc00030000000000000000000000c3" // connectivity-floor node under test
+	rID  = "dddd00040000000000000000000000d4" // repeater
+	fID  = "eeee00050000000000000000000000e5" // far peer, reachable via the repeater
+	lID  = "ffff00060000000000000000000000f6" // leaf that depends on nID
 )
 
 func mustNID(s string) sign.NodeID {
@@ -94,6 +98,83 @@ func TestEngineWorstLinkGoverns(t *testing.T) {
 	d := find(eng.Tick(s, now), "MESH0001")
 	if d.Action != Raise || d.Governs != "FARN0002" {
 		t.Fatalf("worst-link should govern: %+v want Raise governed by FARN0002", d)
+	}
+}
+
+// Connectivity-floor: a node loud to the gateway (margin 21.5, would lower) but only marginally
+// heard by a far peer F. Classic worst-neighbour RAISES (the F link governs). But F is reachable
+// via a repeater, so under the floor the weak N->F link is redundant and fades — N is governed by
+// its strong gateway uplink and LOWERS. Same snapshot, opposite verdict: the whole point.
+func connFloorSnap(now time.Time) topo.Snapshot {
+	return topo.Snapshot{
+		Gateway: gwID,
+		Nodes: []topo.Node{
+			{ID: gwID, IsGateway: true},
+			{ID: nID, SF: 9, Power: 10}, // mid-range so a raise/lower isn't clamped
+			{ID: rID, SF: 9, Power: 14},
+			{ID: fID, SF: 9, Power: 14},
+		},
+		Links: []topo.Link{
+			{From: nID, To: gwID, RSSI: -42, SNR: 9, At: now}, // N's strong uplink (margin 21.5)
+			{From: nID, To: fID, Q: 0.3, At: now},             // N's weak link to F (margin ~3)
+			{From: rID, To: gwID, RSSI: -50, SNR: 7, At: now}, // repeater <-> gateway
+			{From: fID, To: rID, RSSI: -60, SNR: 5, At: now},  // F is reachable via the repeater
+		},
+	}
+}
+
+func TestEngineConnFloorFadesRedundantLink(t *testing.T) {
+	now := time.Now()
+	s := connFloorSnap(now)
+	// Classic worst-neighbour: the weak N->F link governs -> RAISE.
+	clas := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	if d := find(clas.Tick(s, now), nID); d.Action != Raise {
+		t.Fatalf("classic: %+v want Raise (weak far link governs)", d)
+	}
+	// Connectivity-floor keep=1: F is covered by the repeater, so N->F fades and the strong
+	// gateway uplink governs -> LOWER.
+	cfg := DefaultConfig()
+	cfg.ConnFloor = 1
+	cf := NewEngine(cfg, newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	if d := find(cf.Tick(s, now), nID); d.Action != Lower || d.Governs != gwID {
+		t.Fatalf("conn-floor: %+v want Lower governed by gateway", d)
+	}
+}
+
+// Connectivity-floor must NOT strand a dependent: if a leaf reaches the gateway ONLY through this
+// node, its weak link is critical and is kept even though it's the node's worst link -> RAISE.
+func TestEngineConnFloorKeepsDependentLink(t *testing.T) {
+	now := time.Now()
+	s := topo.Snapshot{
+		Gateway: gwID,
+		Nodes: []topo.Node{
+			{ID: gwID, IsGateway: true},
+			{ID: nID, SF: 9, Power: 10}, // mid-range so the protective raise isn't clamped
+			{ID: lID, SF: 9, Power: 14},
+		},
+		Links: []topo.Link{
+			{From: nID, To: gwID, RSSI: -42, SNR: 9, At: now}, // strong uplink
+			{From: nID, To: lID, Q: 0.3, At: now},             // weak link to a leaf that depends on N
+			{From: lID, To: nID, RSSI: -60, SNR: 5, At: now},  // L only connects back through N
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.ConnFloor = 1
+	cf := NewEngine(cfg, newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	if d := find(cf.Tick(s, now), nID); d.Action != Raise || d.Governs != lID {
+		t.Fatalf("conn-floor must keep the dependent leaf: %+v want Raise governed by %s", d, lID)
+	}
+}
+
+// Sanity: ConnFloor=0 leaves the classic worst-neighbour verdict identical.
+func TestEngineConnFloorDisabledMatchesClassic(t *testing.T) {
+	now := time.Now()
+	s := connFloorSnap(now)
+	cfg := DefaultConfig()
+	cfg.ConnFloor = 0
+	eng := NewEngine(cfg, newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	if d := find(eng.Tick(s, now), nID); d.Action != Raise {
+		t.Fatalf("conn-floor disabled should match classic worst-neighbour: %+v want Raise", d)
 	}
 }
 

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -92,6 +93,131 @@ func observe(snap topo.Snapshot, node string, sf int, now time.Time, fresh time.
 	return obs
 }
 
+// --- connectivity-floor governor (experimental, enabled by Config.ConnFloor > 0) ------------
+//
+// observe (above) keeps EVERY direct link healthy, which over-provisions power: a node blasts to
+// satisfy a marginal peer even when a stronger repeater already reaches it. observeConnFloor keeps
+// only the links the network needs:
+//   - CRITICAL links — to a peer that would be cut off from the gateway if THIS node vanished (a
+//     downstream relay/leaf that depends on it) — are always kept.
+//   - UPLINKS — to a peer that reaches the gateway independently of this node — are kept only for
+//     the best `redundancy` of them (that many good paths to the gateway; the rest may fade).
+// Everything else is redundant and allowed to weaken, so the node can turn down. If no link leads
+// to the gateway (isolated cluster, or gateway unknown) every link is treated as critical and kept,
+// so we never trim a node into the dark — it degrades to the classic worst-neighbour rule.
+
+// adjUndirected builds an undirected adjacency map from fresh, usable links (once per tick). The
+// mesh is flood-based and links are ~symmetric, so either direction proves the pair can relay.
+func adjUndirected(snap topo.Snapshot, now time.Time, fresh time.Duration) map[string][]string {
+	adj := map[string][]string{}
+	for _, l := range snap.Links {
+		if now.Sub(l.At) >= fresh || (l.RSSI == 0 && l.Q <= 0) {
+			continue // stale or no usable signal
+		}
+		adj[l.From] = append(adj[l.From], l.To)
+		adj[l.To] = append(adj[l.To], l.From)
+	}
+	return adj
+}
+
+// reachExcluding returns the nodes reachable from `start` (the gateway) without ever passing
+// through `exclude` — i.e. who stays gateway-connected if `exclude` (the node we're tuning) were
+// removed. A peer NOT in this set depends on `exclude` to reach the gateway (a critical link).
+func reachExcluding(adj map[string][]string, start, exclude string) map[string]bool {
+	seen := map[string]bool{}
+	if start == "" || start == exclude {
+		return seen
+	}
+	seen[start] = true
+	q := []string{start}
+	for len(q) > 0 {
+		n := q[0]
+		q = q[1:]
+		for _, m := range adj[n] {
+			if m == exclude || seen[m] {
+				continue
+			}
+			seen[m] = true
+			q = append(q, m)
+		}
+	}
+	return seen
+}
+
+type floorLink struct {
+	margin float64
+	snr    float64
+	soft   bool
+	peer   string
+	uplink bool // peer reaches the gateway WITHOUT this node (else it depends on us -> critical)
+}
+
+func shortID(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
+func observeConnFloor(snap topo.Snapshot, node string, sf int, now time.Time, fresh time.Duration, redundancy int, adj map[string][]string) Observation {
+	obs := Observation{Node: node, SF: sf}
+	limit := SNRLimit(sf)
+	reach := reachExcluding(adj, snap.Gateway, node) // peers that keep the gateway without us
+	var links []floorLink
+	for _, l := range snap.Links {
+		if l.From != node || now.Sub(l.At) >= fresh {
+			continue
+		}
+		snr, soft := 0.0, true
+		switch {
+		case l.RSSI != 0: // measured SNR (LoRa RSSI is always negative)
+			snr, soft = float64(l.SNR), false
+		case l.Q > 0: // quality only — estimate, saturates high
+			snr = qToSNR(l.Q)
+		default:
+			continue
+		}
+		links = append(links, floorLink{margin: snr - limit, snr: snr, soft: soft, peer: l.To, uplink: reach[l.To]})
+	}
+	if len(links) == 0 {
+		return obs // HasObs stays false — not reachable this cycle
+	}
+	if redundancy < 1 {
+		redundancy = 1
+	}
+	// Strongest first: keep the best `redundancy` uplinks and let the weaker uplinks fade. The
+	// governing link is the WEAKEST one we decide to keep (critical ∪ best-N uplinks).
+	sort.Slice(links, func(i, j int) bool { return links[i].margin > links[j].margin })
+	var gov *floorLink
+	uplinkRank, kept, faded, crit := 0, 0, 0, 0
+	for i := range links {
+		keep := false
+		if links[i].uplink {
+			keep = uplinkRank < redundancy // keep only the best `redundancy` gateway-ward links
+			uplinkRank++
+		} else {
+			keep, crit = true, crit+1 // critical: a peer that depends on us — never drop
+		}
+		if keep {
+			kept++
+			if gov == nil || links[i].margin < gov.margin {
+				gov = &links[i]
+			}
+		} else {
+			faded++
+		}
+	}
+	if gov == nil { // defensive: nothing kept (only if reach is empty -> all critical, can't happen)
+		gov = &links[len(links)-1]
+		kept, faded = len(links), 0
+	}
+	obs.HasObs = true
+	obs.Margin, obs.SNR, obs.Soft, obs.GovPeer = gov.margin, gov.snr, gov.soft, gov.peer
+	obs.FloorNote = fmt.Sprintf("conn-floor: keep %d/%d links (gov %s m=%.1f, %d critical), %d redundant fading",
+		kept, len(links), shortID(gov.peer), gov.margin, crit, faded)
+	return obs
+}
+
 // Tick processes one cycle: confirm/expire pending decreases, then decide + (in apply
 // mode) command each managed node. Returns the decisions for inspection/tests.
 func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
@@ -123,6 +249,12 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 	}
 
 	// 2) Decide per managed (non-gateway) node.
+	// Connectivity-floor mode needs the whole-mesh adjacency to tell each node's redundant links
+	// from the ones it must keep — build it once per cycle.
+	var gwAdj map[string][]string
+	if e.cfg.ConnFloor > 0 {
+		gwAdj = adjUndirected(snap, now, e.fresh)
+	}
 	var out []Decision
 	for _, n := range snap.Nodes {
 		if n.IsGateway || n.ID == snap.Gateway {
@@ -137,7 +269,12 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		if sf <= 0 {
 			sf = e.cfg.DefaultSF
 		}
-		obs := observe(snap, n.ID, sf, now, e.fresh)
+		var obs Observation
+		if e.cfg.ConnFloor > 0 {
+			obs = observeConnFloor(snap, n.ID, sf, now, e.fresh, e.cfg.ConnFloor, gwAdj)
+		} else {
+			obs = observe(snap, n.ID, sf, now, e.fresh)
+		}
 		obs.Mobile = n.Mobile // the node self-reports mobility in telemetry (mob=1)
 
 		cur, seeded := e.targets[n.ID]
@@ -152,6 +289,9 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		}
 
 		d := Decide(obs, cur, e.cfg)
+		if obs.FloorNote != "" {
+			d.Reason += " | " + obs.FloorNote // connectivity-floor audit trail
+		}
 
 		// Mobile slow-trim hysteresis: only trim a mobile node after MobileLowerHold
 		// consecutive over-band cycles, so a transient strong reading from a moving node

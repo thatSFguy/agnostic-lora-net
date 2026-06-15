@@ -55,6 +55,15 @@ type Config struct {
 	MobileUpStep    int8    // raise step for mobile (fast up); <=0 falls back to MaxStep
 	MobileLowerStep int8    // trim step for mobile (slow down)
 	MobileLowerHold int     // consecutive over-band cycles before a mobile node is trimmed
+
+	// ConnFloor (experimental, off by default). When > 0, a node's power is governed not by its
+	// single weakest neighbour (classic worst-neighbour) but by the weakest link it must KEEP for
+	// connectivity: every link to a peer that would be cut off from the gateway if this node
+	// vanished (a downstream relay/leaf that depends on it), plus the best `ConnFloor` of its
+	// gateway-ward uplinks. Redundant weak links — peers a stronger repeater already reaches — are
+	// left to fade, so the node can turn down. 1 = keep a single best uplink (most aggressive);
+	// 2 = keep one backup. 0 = classic worst-neighbour. See engine.go observeConnFloor.
+	ConnFloor int
 }
 
 func DefaultConfig() Config {
@@ -74,6 +83,7 @@ type Observation struct {
 	Soft    bool    // governing link is quality-only (estimate saturates; not safe to trim on)
 	Mobile  bool    // node self-reports it moves — higher reserve band, raise fast / trim slow
 	GovPeer string  // receiver of the governing (weakest) link, for the audit log
+	FloorNote string // connectivity-floor: audit note (which uplink governs, how many links faded); "" in classic mode
 }
 
 // Action is the verdict for one node.
