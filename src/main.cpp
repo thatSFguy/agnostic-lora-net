@@ -405,6 +405,17 @@ static inline bool host_tunnel_active() {
     return tunnel_mode;
 }
 
+// Scheduled reboot (board-agnostic — used by remote CTRL_BLE-on and CTRL_RETUNE, neither of which
+// is BLE-only). They persist their change to flash then reboot; the boot path applies it cleanly.
+static uint32_t  reboot_at = 0;   // millis() at which to reboot; 0 = none
+static void node_reboot() {
+#if defined(ESP32)
+    esp_restart();
+#else
+    NVIC_SystemReset();
+#endif
+}
+
 #ifdef AGN_BLE
 // --- BLE peripheral (Nordic UART Service) -----------------------------------
 // A phone/Web-Bluetooth client connects over BLE; we tunnel its app frames into
@@ -415,8 +426,6 @@ static BLEUart   bleuart;
 static char      ble_pin[7]      = "000000";   // 6-digit pairing PIN
 static bool      ble_advertising = false;
 static bool      ble_inited      = false;      // SoftDevice/BLE stack brought up yet?
-static volatile int8_t ble_ctrl_want = -1;     // deferred remote BLE toggle: -1 none, 0 off, 1 on
-                                               // (applied from the loop, NOT the control-RX path)
 
 // These callbacks run in the SoftDevice event task — NEVER do USB/console I/O here.
 // Printing from this context took the node down outright (bisected on hardware: the
@@ -529,8 +538,10 @@ static void ble_setup();   // fwd decl — start_adv brings the stack up on dema
 static void ble_start_adv() {
     ble_setup();                          // lazily enable the SoftDevice on first use
     Bluefruit.Security.setPIN(ble_pin);   // (re)apply the current PIN before pairing
-    Bluefruit.Advertising.start(0);       // 0 = advertise until connected
-    ble_advertising = true;
+    // Report only if advertising ACTUALLY started: start() returns false when the underlying
+    // sd_ble_gap_adv_start fails (the silent runtime-enable failure that left the node telling
+    // the mesh ble=on while dark -> controller showed BLE on when it wasn't). Truthful now.
+    ble_advertising = Bluefruit.Advertising.start(0);   // 0 = advertise until connected
 }
 static void ble_stop_adv() {
     if (!ble_inited) { ble_advertising = false; return; }   // never enabled — nothing to stop
@@ -1378,18 +1389,20 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
             ack(0, 0);
         }
     } else if (m.cmd == mesh::CTRL_BLE) {
-        // Remote BLE toggle (arg: 1=on, 0=off). NOT a dead-man: the firmware just obeys;
-        // the "only disable after proof-of-config" gate lives in the controller (todo.md).
-        // Replicates the local `ble on/off` console path verbatim (incl. flash persist).
+        // Remote BLE toggle (arg: 1=on, 0=off). OFF applies live; ON requires a REBOOT.
+        // Runtime SoftDevice enable (ble_setup -> Bluefruit.begin) is unreliable on these boards
+        // even from the loop — but the BOOT path brings BLE up cleanly. So ON persists enabled=1
+        // and reboots; OFF stops advertising in place. (Meshtastic likewise reboots after config.)
 #ifdef AGN_BLE
         bool on = (m.arg != 0);
-        // DEFER the start/stop to the main loop. ble_start_adv() -> ble_setup() ->
-        // Bluefruit.begin() must not run from the control-packet RX path: there it silently
-        // fails to bring the SoftDevice up / start advertising (remote `ble on` acked but the
-        // node never advertised), while the loop/console/boot paths work. The loop applies the
-        // toggle and persists it (cfg_save).
-        ble_ctrl_want = on ? 1 : 0;
-        snprintf(line, sizeof(line), "[ctrl] BLE %s queued (counter=%lu)",
+        // BOTH directions apply via REBOOT. Runtime SoftDevice toggling from the control path is
+        // unreliable (on never advertised; a live off worked only intermittently), but the boot
+        // path is deterministic: persist enabled=on, ack, reboot — on=advertise, off=stay down.
+        if (!on) ble_stop_adv();      // best-effort immediate stop; the reboot is the real guarantee
+        ble_advertising = on;         // cfg_save persists `enabled` from this; boot applies it
+        cfg_save();
+        reboot_at = millis() + 3000;  // reboot after the ack drains the TX queue
+        snprintf(line, sizeof(line), "[ctrl] BLE %s — rebooting (counter=%lu)",
                  on ? "on" : "off", (unsigned long)m.counter);
         Serial.println(line);
         ack(on ? 1 : 0, 0);
@@ -1415,17 +1428,20 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
                      (unsigned)c.sf, (unsigned)c.cr, (unsigned long)c.freq_hz, (unsigned long)c.bw_hz);
             Serial.println(l);
             ack(0, 0);
-        } else if (radio.apply_config(c) == RADIOLIB_ERR_NONE) {
-            rf_save(radio.config());          // persist on success (save-if-dirty)
-            // The radio is now on the NEW PHY — this log + the ack ride it (the reconcile signal).
-            snprintf(l, sizeof(l), "[ctrl] RETUNE applied freq=%lu bw=%lu sf=%u cr=%u sync=0x%02X pre=%u (counter=%lu)",
+        } else {
+            // Stage the new PHY to flash and REBOOT to apply it — don't retune live (unreliable
+            // mid-operation; the boot path applies the persisted PHY cleanly). Also turn BLE ON so
+            // a retune that breaks mesh connectivity is recoverable over BLE rescue (remote-config §4).
+            rf_save(c);                       // persist the new PHY (applied on the reboot below)
+#ifdef AGN_BLE
+            ble_advertising = true; cfg_save();   // BLE-on rescue across the retune reboot
+#endif
+            snprintf(l, sizeof(l), "[ctrl] RETUNE staged freq=%lu bw=%lu sf=%u cr=%u sync=0x%02X pre=%u — rebooting (counter=%lu)",
                      (unsigned long)c.freq_hz, (unsigned long)c.bw_hz, (unsigned)c.sf, (unsigned)c.cr,
                      (unsigned)c.sync, (unsigned)c.preamble, (unsigned long)m.counter);
             Serial.println(l);
-            ack(1, 0);
-        } else {
-            Serial.println("[ctrl] RETUNE apply FAILED (radio error) — PHY unchanged");
-            ack(0, 0);
+            ack(1, 0);                        // acks on the CURRENT (pre-retune) PHY before the reboot
+            reboot_at = millis() + 3000;
         }
     }
 }
@@ -2920,12 +2936,11 @@ static void agn_loop_once() {
         reg_burst_ms = millis() + 5000 + (uint32_t)random(0, 5000);
     }
 
+    // Scheduled reboot: a remote BLE-ON or RETUNE staged its change to flash and asked for a
+    // reboot; the boot path applies it cleanly. Delayed so the ack drains the TX queue first.
+    if (reboot_at && (int32_t)(millis() - reboot_at) >= 0) node_reboot();
+
 #ifdef AGN_BLE
-    if (ble_ctrl_want >= 0) {          // apply a deferred remote CTRL_BLE toggle from loop context
-        bool on = ble_ctrl_want; ble_ctrl_want = -1;
-        if (on) ble_start_adv(); else ble_stop_adv();
-        cfg_save();
-    }
     ble_poll();    // service the BLE UART (echo) — must stay non-blocking
 #endif
 
