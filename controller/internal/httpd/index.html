@@ -499,7 +499,7 @@ $('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').c
 // ===================== CONFIGURE: direct Web Serial / BLE to a local node =====================
 // Ported from web/manage.html. This talks to a node plugged into THIS machine, not the mesh.
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e', NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e', NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
-let cfgPort=null, cfgWriter=null, cfgBleDev=null, cfgReader=null, cfgSendRaw=null, cfgRxbuf='', loadedRf=null, ctrlPub='';
+let cfgPort=null, cfgWriter=null, cfgBleDev=null, cfgReader=null, cfgSendRaw=null, cfgRxbuf='', loadedRf=null, ctrlPub='', cfgBleTx=null, cfgBleNotify=null;
 function clog(m){ const l=$('#cfgLog'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-300).join('\n'); l.scrollTop=l.scrollHeight; }
 function provSet(cls,text){ const e=$('#prov_status'); e.textContent=text;
   e.style.color = cls==='ok'?'var(--confirm)':cls==='bad'?'var(--revert)':'var(--lower)'; }
@@ -557,7 +557,12 @@ async function cfgConnectBle(){ if(!navigator.bluetooth){ clog('Web Bluetooth un
     cfgBleDev.addEventListener('gattserverdisconnected',()=>{ $('#cfgStatus').textContent='disconnected'; $('#cfgStatus').className='bad'; cfgSendRaw=null; clog('BLE disconnected'); });
     const srv=await (await cfgBleDev.gatt.connect()).getPrimaryService(NUS);
     const rx=await srv.getCharacteristic(NUS_RX), tx=await srv.getCharacteristic(NUS_TX);
-    await tx.startNotifications(); tx.addEventListener('characteristicvaluechanged',e=>cfgFeed(new TextDecoder().decode(e.target.value)));
+    cfgRxbuf='';   // drop any stale partial line on (re)connect
+    // Register the notify handler exactly ONCE (a reconnect otherwise stacks a second listener,
+    // doubling every console line, e.g. "name: HF3-XiaoNRFname: HF3-XiaoNRF").
+    if(cfgBleTx && cfgBleNotify) cfgBleTx.removeEventListener('characteristicvaluechanged',cfgBleNotify);
+    cfgBleNotify = e=>cfgFeed(new TextDecoder().decode(e.target.value)); cfgBleTx = tx;
+    await tx.startNotifications(); tx.addEventListener('characteristicvaluechanged',cfgBleNotify);
     cfgSendRaw=async s=>{ const d=new TextEncoder().encode(s); for(let i=0;i<d.length;i+=20) await rx.writeValueWithoutResponse(d.slice(i,i+20)); };
     cfgMarkConnected('BLE'); }catch(e){ clog('BLE connect error: '+e+' (node paired + BLE enabled?)'); } }
 function cfgFormRf(){ return { freq_hz:Math.round(parseFloat($('#rf_freq').value)*1e6), bw_hz:Math.round(parseFloat($('#rf_bw').value)*1000),

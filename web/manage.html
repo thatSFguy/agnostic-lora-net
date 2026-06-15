@@ -157,7 +157,7 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
 <script>
 const $=id=>document.getElementById(id);
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight;};
-let port,writer,bleDev;
+let port,writer,bleDev,bleTx=null,bleNotify=null;
 let sendRaw=null;    // transport writer: async (string)=>void  (set by connect USB/BLE)
 let loadedRf=null;   // {freq_hz,bw_hz,sf,cr,power_dbm,sync,preamble} last read from node
 
@@ -279,8 +279,15 @@ async function connectBle(){
     const srv=await (await bleDev.gatt.connect()).getPrimaryService(NUS);
     const rx=await srv.getCharacteristic(NUS_RX);
     const tx=await srv.getCharacteristic(NUS_TX);
+    rxbuf='';                                  // drop any stale partial line on (re)connect
+    // Register the notify handler exactly ONCE: removing any prior one prevents a reconnect
+    // from stacking a second listener (which processed every notification twice, doubling
+    // every console line -> e.g. "name: HF3-XiaoNRFname: HF3-XiaoNRF").
+    if(bleTx && bleNotify) bleTx.removeEventListener('characteristicvaluechanged',bleNotify);
+    bleNotify = e=>feed(new TextDecoder().decode(e.target.value));
+    bleTx = tx;
     await tx.startNotifications();
-    tx.addEventListener('characteristicvaluechanged',e=>feed(new TextDecoder().decode(e.target.value)));
+    tx.addEventListener('characteristicvaluechanged',bleNotify);
     // NUS writes are capped at the ATT MTU (~20 B) — chunk the line.
     sendRaw=async s=>{ const d=new TextEncoder().encode(s);
       for(let i=0;i<d.length;i+=20) await rx.writeValueWithoutResponse(d.slice(i,i+20)); };
