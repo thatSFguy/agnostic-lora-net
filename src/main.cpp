@@ -415,6 +415,8 @@ static BLEUart   bleuart;
 static char      ble_pin[7]      = "000000";   // 6-digit pairing PIN
 static bool      ble_advertising = false;
 static bool      ble_inited      = false;      // SoftDevice/BLE stack brought up yet?
+static volatile int8_t ble_ctrl_want = -1;     // deferred remote BLE toggle: -1 none, 0 off, 1 on
+                                               // (applied from the loop, NOT the control-RX path)
 
 // These callbacks run in the SoftDevice event task — NEVER do USB/console I/O here.
 // Printing from this context took the node down outright (bisected on hardware: the
@@ -1381,9 +1383,13 @@ static void ctrl_apply_verified(const mesh::CtrlMsg& m, node_id_t reply_to) {
         // Replicates the local `ble on/off` console path verbatim (incl. flash persist).
 #ifdef AGN_BLE
         bool on = (m.arg != 0);
-        if (on) ble_start_adv(); else ble_stop_adv();
-        cfg_save();
-        snprintf(line, sizeof(line), "[ctrl] BLE %s (counter=%lu)",
+        // DEFER the start/stop to the main loop. ble_start_adv() -> ble_setup() ->
+        // Bluefruit.begin() must not run from the control-packet RX path: there it silently
+        // fails to bring the SoftDevice up / start advertising (remote `ble on` acked but the
+        // node never advertised), while the loop/console/boot paths work. The loop applies the
+        // toggle and persists it (cfg_save).
+        ble_ctrl_want = on ? 1 : 0;
+        snprintf(line, sizeof(line), "[ctrl] BLE %s queued (counter=%lu)",
                  on ? "on" : "off", (unsigned long)m.counter);
         Serial.println(line);
         ack(on ? 1 : 0, 0);
@@ -2915,6 +2921,11 @@ static void agn_loop_once() {
     }
 
 #ifdef AGN_BLE
+    if (ble_ctrl_want >= 0) {          // apply a deferred remote CTRL_BLE toggle from loop context
+        bool on = ble_ctrl_want; ble_ctrl_want = -1;
+        if (on) ble_start_adv(); else ble_stop_adv();
+        cfg_save();
+    }
     ble_poll();    // service the BLE UART (echo) — must stay non-blocking
 #endif
 
