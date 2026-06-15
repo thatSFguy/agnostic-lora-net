@@ -261,6 +261,17 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		n.LastSeen = at
 		n.BattMv, n.BattPct = e.Num["mv"], e.Num["pct"]
 
+	case ingest.KindCtrlAck:
+		// A node acked a signed control command. For CTRL_BLE (cmd=5) the `applied` field is
+		// the new advertising state (1=on, 0=off), so reflect it immediately instead of waiting
+		// for the next telemetry poll (which lags ~30s and made a successful BLE-off look stuck).
+		if e.Num["cmd"] == 5 { // sign.CmdBle / CTRL_BLE
+			n := g.node(e.ID)
+			n.LastSeen = at
+			b := e.Num["applied"] != 0
+			n.BLE = &b
+		}
+
 	case ingest.KindFW:
 		if g.Gateway != "" {
 			g.node(g.Gateway).FW = e.Str["fw"]
