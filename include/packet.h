@@ -81,7 +81,11 @@ struct AGN_PACKED NetHeader {
 };
 
 static const uint8_t  DEFAULT_TTL = 16;
-static const uint16_t MAX_PAYLOAD = 200;  // conservative cap under the LoRa frame limit
+static const uint16_t MAX_PAYLOAD = 230;  // cap under the SX1262 255-byte frame limit. Raised
+                                          // 200->230 so a ~167B RNS announce + the v2 41B header
+                                          // (16-byte ids) still rides ONE frame; at 200 it spilled
+                                          // into SAR and announces stopped delivering (v1 fit one
+                                          // frame at the old ~17B header). Radio pend_buf_ is 255.
 
 // --- Beacon payload (§4 Tier 0: neighbour discovery) -----------------------
 // Phase 0 carries only enough to prove the link and print RSSI/SNR. Phase 2 will

@@ -88,7 +88,7 @@ def main():
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     result = None
     t0 = time.time()
-    while time.time() - t0 < 240:
+    while time.time() - t0 < 320:
         line = cli.stdout.readline()
         if not line:
             if cli.poll() is not None: break

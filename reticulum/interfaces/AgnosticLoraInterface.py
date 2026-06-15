@@ -65,7 +65,9 @@ class AgnosticLoraInterface(Interface):
         self.port    = c["port"]
         self.speed   = int(c["speed"]) if "speed" in c else 115200
         # Static node id (optional) or identity-based addressing via the directory.
-        self.peer          = int(c["peer"], 16) if "peer" in c else None
+        # v2: node id is a 16-byte value (32 hex). Store as raw bytes, natural order — the
+        # wire locator is these bytes verbatim (NOT a little-endian int; that was the v1 bug).
+        self.peer          = bytes.fromhex(c["peer"]) if "peer" in c else None
         self.identity      = c["identity"]      if "identity" in c else None
         self.peer_identity = c["peer_identity"] if "peer_identity" in c else None
         self.bitrate = 800                            # LoRa-class link (~0.8 kbit/s)
@@ -92,7 +94,7 @@ class AgnosticLoraInterface(Interface):
         self._dbg(f"connect id={self.identity} peer_id={self.peer_identity} peer={self.peer}")
         if self.identity or self.peer_identity:        # identity-addressed: drive the directory
             threading.Thread(target=self._directory_loop, daemon=True).start()
-        who = ("%08X" % self.peer) if self.peer is not None else f"identity {self.peer_identity}"
+        who = self.peer.hex().upper() if self.peer is not None else f"identity {self.peer_identity}"
         RNS.log(f"{self} online (peer {who})", RNS.LOG_VERBOSE)
 
     # All serial writes go through one lock so the directory thread's text commands and
@@ -136,8 +138,8 @@ class AgnosticLoraInterface(Interface):
         self._send_frame(data)
 
     def _send_frame(self, data):
-        loc = struct.pack("<I", self.peer)             # locator (node id, LE)
-        payload = bytes([self.ADDR_LOCATOR, len(loc)]) + loc + data  # [type][len][locator][rns packet]
+        loc = self.peer                                # 16 raw bytes, natural order (= bytes.fromhex(id))
+        payload = bytes([self.ADDR_LOCATOR, len(loc)]) + loc + data  # [type][len=16][locator][rns packet]
         self._write(HDLC.frame(payload))
         self.txb += len(data)
 
@@ -177,25 +179,26 @@ class AgnosticLoraInterface(Interface):
             if addr_type == self.ADDR_LOCATOR and len(buf) >= 2 + addr_len:
                 data = bytes(buf[2 + addr_len:])
                 self.rxb += len(data)
-                src = int.from_bytes(buf[2:2 + addr_len], "little")
+                src = buf[2:2 + addr_len].hex().upper()   # 16-byte id, natural order (not LE int)
                 self._rxn = getattr(self, "_rxn", 0) + 1
                 if self._rxn <= 8 or self._rxn % 25 == 0:
-                    self._dbg(f"INBOUND #{self._rxn} ({len(data)}B) from {src:08X}")
+                    self._dbg(f"INBOUND #{self._rxn} ({len(data)}B) from {src}")
                 self.owner.inbound(data, self)
 
     def _handle_text(self, line):
-        # `loc <idhex> <node8hex>` — a resolve answer from the node's directory.
+        # `loc <IDHEX> <NODE-32hex>` — a resolve answer from the node's directory (v2: both
+        # full uppercase hex). The node id is parsed as 16 raw bytes, NOT an int.
         parts = line.split()
         if len(parts) == 3 and parts[0] == "loc" and self.peer_identity \
                 and parts[1].upper() == self.peer_identity.upper():
             try:
-                node = int(parts[2], 16)
+                node = bytes.fromhex(parts[2])
             except ValueError:
                 return
             if node != self.peer:
                 self.peer = node
-                self._dbg(f"RESOLVED {self.peer_identity} -> {node:08X}")
-                RNS.log(f"{self} resolved {self.peer_identity} -> {node:08X}", RNS.LOG_NOTICE)
+                self._dbg(f"RESOLVED {self.peer_identity} -> {node.hex().upper()}")
+                RNS.log(f"{self} resolved {self.peer_identity} -> {node.hex().upper()}", RNS.LOG_NOTICE)
                 with self._plock:
                     pend, self._pending = self._pending, []
                 if pend: self._dbg(f"flush {len(pend)} buffered")

@@ -27,7 +27,7 @@ def client(configdir, desthash_hex):
     print("waiting for a path to the server (over the mesh)...", flush=True)
     t0 = time.time()
     while not RNS.Transport.has_path(dh):
-        if time.time() - t0 > 180:
+        if time.time() - t0 > 280:
             print("RESULT no-path", flush=True); sys.exit(1)
         RNS.Transport.request_path(dh); time.sleep(3)
     print(f"path established in {time.time()-t0:.0f}s", flush=True)
