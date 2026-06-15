@@ -19,12 +19,15 @@ uint16_t telem_build_query(node_id_t target, uint8_t* out, uint16_t cap) {
 
 uint16_t telem_build_reply(uint16_t mv, uint8_t pct_plus1, uint16_t uptime_min,
                            int8_t power_dbm, uint8_t sf, uint8_t flags,
-                           const char* fw, const TelemNbr* nbrs, uint8_t n_nbrs,
+                           const char* fw, const char* name,
+                           const TelemNbr* nbrs, uint8_t n_nbrs,
                            uint8_t* out, uint16_t cap) {
     uint8_t fw_len = 0;
     while (fw && fw[fw_len] && fw_len < TELEM_FW_MAX) fw_len++;
+    uint8_t name_len = 0;
+    while (name && name[name_len] && name_len < TELEM_NAME_MAX) name_len++;
     if (n_nbrs > TELEM_NBR_MAX) n_nbrs = TELEM_NBR_MAX;
-    uint16_t need = (uint16_t)(10 + fw_len + 1 + n_nbrs * 21);
+    uint16_t need = (uint16_t)(10 + fw_len + 1 + name_len + 1 + n_nbrs * 21);
     if (cap < need) return 0;
     uint8_t* p = out;
     *p++ = TELEM_REPLY;
@@ -36,6 +39,8 @@ uint16_t telem_build_reply(uint16_t mv, uint8_t pct_plus1, uint16_t uptime_min,
     *p++ = flags;
     *p++ = fw_len;
     memcpy(p, fw, fw_len); p += fw_len;
+    *p++ = name_len;
+    memcpy(p, name, name_len); p += name_len;
     *p++ = n_nbrs;
     for (uint8_t i = 0; i < n_nbrs; i++) {
         nid_write(p, nbrs[i].id); p += 16;
@@ -72,6 +77,9 @@ bool telem_parse(const uint8_t* msg, uint16_t len, TelemMsg* out) {
             uint8_t fw_len = *p++;
             if (fw_len > TELEM_FW_MAX || (uint16_t)(p - msg) + fw_len + 1 > len) return false;
             memcpy(out->fw, p, fw_len); out->fw[fw_len] = 0; p += fw_len;
+            uint8_t name_len = *p++;
+            if (name_len > TELEM_NAME_MAX || (uint16_t)(p - msg) + name_len + 1 > len) return false;
+            memcpy(out->name, p, name_len); out->name[name_len] = 0; p += name_len;
             uint8_t n = *p++;
             if (n > TELEM_NBR_MAX || (uint16_t)(p - msg) + (uint16_t)n * 21 > len) return false;
             out->n_nbrs = n;

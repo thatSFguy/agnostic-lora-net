@@ -40,6 +40,7 @@ namespace mesh {
 enum TelemKind : uint8_t { TELEM_BATT = 1, TELEM_QUERY = 2, TELEM_REPLY = 3 };
 
 constexpr uint8_t  TELEM_FW_MAX   = 12;   // fw version string cap in a REPLY
+constexpr uint8_t  TELEM_NAME_MAX = 20;   // operator "friendly" name cap in a REPLY
 constexpr uint8_t  TELEM_NBR_MAX  = 16;   // neighbour entries cap in a REPLY
 constexpr uint16_t TELEM_CACHE_CAP = 16;  // battery reports cached per node
 
@@ -62,6 +63,7 @@ struct TelemMsg {
     uint8_t   sf          = 0;     // REPLY — current spreading factor
     uint8_t   flags       = 0;     // REPLY — bit0: node is mobile
     char      fw[TELEM_FW_MAX + 1] = {};
+    char      name[TELEM_NAME_MAX + 1] = {};  // REPLY — operator friendly name ("" = none)
     uint8_t   n_nbrs      = 0;     // REPLY
     TelemNbr  nbrs[TELEM_NBR_MAX];
 };
@@ -71,7 +73,8 @@ uint16_t telem_build_batt(uint16_t mv, uint8_t pct_plus1, uint8_t* out, uint16_t
 uint16_t telem_build_query(node_id_t target, uint8_t* out, uint16_t cap);
 uint16_t telem_build_reply(uint16_t mv, uint8_t pct_plus1, uint16_t uptime_min,
                            int8_t power_dbm, uint8_t sf, uint8_t flags,
-                           const char* fw, const TelemNbr* nbrs, uint8_t n_nbrs,
+                           const char* fw, const char* name,
+                           const TelemNbr* nbrs, uint8_t n_nbrs,
                            uint8_t* out, uint16_t cap);
 
 constexpr uint8_t TELEM_FLAG_MOBILE = 0x01;

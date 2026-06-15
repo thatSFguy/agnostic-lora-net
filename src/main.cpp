@@ -302,18 +302,27 @@ static void kiss_cfg_save() {
 // telemetry so the Tier-1 controller keeps its TX-power headroom (never trims a mobile node).
 // Lives on the node — any controller learns it — and is set with `mobile on|off`.
 static bool node_mobile = false;
+// Operator-set "friendly" name (e.g. "Rob's Gateway"). Empty => fall back to AgnLoRa-<id>.
+// It IS the BLE advertised name, and is reported in telemetry/info so the controller and
+// web apps show it as the node's alias instead of the raw hex id. Set with `name <text>`.
+static const uint8_t  AGN_NAME_MAX = 20;
+static char node_name[AGN_NAME_MAX + 1] = {0};
 static const char     NODE_PATH[]  = "/agn_node.cfg";
-static const uint32_t NODE_MAGIC   = 0x444E4741;   // "AGND"
-struct __attribute__((packed)) NodeStore { uint32_t magic; uint8_t mobile; };
+static const uint32_t NODE_MAGIC   = 0x324E4741;   // "AGN2" (bumped from "AGND" for the name field)
+struct __attribute__((packed)) NodeStore { uint32_t magic; uint8_t mobile; char name[AGN_NAME_MAX + 1]; };
 static void node_cfg_load() {
     InternalFS.begin();
     NodeStore rec; File f(InternalFS);
     if (!f.open(NODE_PATH, FILE_O_READ)) return;
     int n = f.read((void*)&rec, sizeof(rec)); f.close();
-    if (n == (int)sizeof(rec) && rec.magic == NODE_MAGIC) node_mobile = rec.mobile != 0;
+    if (n == (int)sizeof(rec) && rec.magic == NODE_MAGIC) {
+        node_mobile = rec.mobile != 0;
+        rec.name[AGN_NAME_MAX] = 0; strncpy(node_name, rec.name, AGN_NAME_MAX); node_name[AGN_NAME_MAX] = 0;
+    }
 }
 static void node_cfg_save() {
-    NodeStore want; want.magic = NODE_MAGIC; want.mobile = node_mobile ? 1 : 0;
+    NodeStore want = {}; want.magic = NODE_MAGIC; want.mobile = node_mobile ? 1 : 0;
+    strncpy(want.name, node_name, AGN_NAME_MAX); want.name[AGN_NAME_MAX] = 0;
     InternalFS.remove(NODE_PATH);
     File f(InternalFS);
     if (f.open(NODE_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
@@ -543,8 +552,9 @@ static void ble_setup() {
     // Local Name adds 2 AD bytes). The v2 id is 32 hex chars, so "AgnLoRa-"+32 = 40 chars
     // OVERFLOWS that and gets silently truncated to a garbled shortened name — which broke BLE
     // discovery/pairing in v2 (the id-widening regression). Use a short, still-unique id slice.
-    char nm[24]; char idhx[33]; nid_hex(my_id, idhx);
-    snprintf(nm, sizeof(nm), "AgnLoRa-%.8s", idhx);   // e.g. "AgnLoRa-b0459c80" (16 chars, fits)
+    char nm[AGN_NAME_MAX + 1]; char idhx[33]; nid_hex(my_id, idhx);
+    if (node_name[0]) snprintf(nm, sizeof(nm), "%s", node_name);          // operator friendly name
+    else              snprintf(nm, sizeof(nm), "AgnLoRa-%.8s", idhx);     // default: "AgnLoRa-B0459C80"
     Bluefruit.setName(nm);
     Bluefruit.Security.setPIN(ble_pin);             // static passkey -> phone must enter it
     Bluefruit.Periph.setConnectCallback(ble_connect_cb);
@@ -1475,16 +1485,17 @@ static void telem_flood_batt() {
 }
 
 static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
-    char line[128]; char orighx[33]; nid_hex(origin, orighx);
+    char line[160]; char orighx[33]; nid_hex(origin, orighx);
     unsigned mob = (m.flags & mesh::TELEM_FLAG_MOBILE) ? 1u : 0u;
     unsigned ble = (m.flags & mesh::TELEM_FLAG_BLE) ? 1u : 0u;
+    // `name=` is LAST because a friendly name may contain spaces (controller captures to EOL).
     if (m.pct_plus1)
-        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u ble=%u",
+        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=%umV/%u%% mob=%u ble=%u name=%s",
                  orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf,
-                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob, ble);
+                 (int)m.power_dbm, (unsigned)m.mv, (unsigned)(m.pct_plus1 - 1), mob, ble, m.name);
     else
-        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u ble=%u",
-                 orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob, ble);
+        snprintf(line, sizeof(line), "[status] %s fw=%s up=%umin sf=%u pwr=%d batt=? mob=%u ble=%u name=%s",
+                 orighx, m.fw, (unsigned)m.uptime_min, (unsigned)m.sf, (int)m.power_dbm, mob, ble, m.name);
 #ifdef AGN_BLE
     if (ble_connected) bleuart.println(line);
 #endif
@@ -1552,7 +1563,7 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                         nn++;
                     }
                 }
-                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NBR_MAX * 21];  // nbr entry is 21 B (16-byte id)
+                uint8_t r[10 + mesh::TELEM_FW_MAX + 1 + mesh::TELEM_NAME_MAX + 1 + mesh::TELEM_NBR_MAX * 21];  // nbr entry is 21 B (16-byte id)
                 uint8_t pp1 = (batt_scale > 0.0f) ? (uint8_t)(batt_pct(batt_last_mv) + 1) : 0;
                 uint8_t flags = node_mobile ? mesh::TELEM_FLAG_MOBILE : 0;
 #ifdef AGN_BLE
@@ -1561,7 +1572,7 @@ static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, 
                 uint16_t rlen = mesh::telem_build_reply(batt_last_mv, pp1,
                         (uint16_t)((millis() - boot_ms) / 60000u),
                         radio.config().power_dbm, radio.config().sf, flags, AGN_FW_VERSION,
-                        nbrs, nn, r, sizeof(r));
+                        node_name, nbrs, nn, r, sizeof(r));
                 if (rlen) send_loc_unicast(net.src, r, rlen, PKT_TELEM);
             }
         }
@@ -2152,10 +2163,10 @@ static void print_info() {
     snprintf(l, sizeof(l), "fw %s  built %s", AGN_FW_VERSION, FW_BUILD);
     Serial.println(l);
     char myidhx[33]; nid_hex(my_id, myidhx);
-    snprintf(l, sizeof(l), "node %s  neighbors=%u routes=%u blocked=%u  mobile=%s",
+    snprintf(l, sizeof(l), "node %s  neighbors=%u routes=%u blocked=%u  mobile=%s  name=%s",
              myidhx, (unsigned)router->neighbors().count(),
              (unsigned)router->routes().count(), (unsigned)router->blocked_count(),
-             node_mobile ? "on" : "off");
+             node_mobile ? "on" : "off", node_name);
     Serial.println(l);
     // Authoritative block list (always printed, even when empty) so the map can sync
     // exactly which links this node is blocking. MAX_BLOCKED (8) ids fit one line.
@@ -2308,6 +2319,26 @@ static void handle_command(char* line) {
         if (a && !strcmp(a, "off")) { node_mobile = false; node_cfg_save(); }
         Serial.println(node_mobile ? "mobile on (controller holds TX power for movement headroom)"
                                    : "mobile off (power optimised for fixed position)");
+    } else if (!strcmp(cmd, "name")) {         // name | name <friendly text> | name clear
+        char* rest = strtok(nullptr, "");      // rest of line (the name may contain spaces)
+        while (rest && *rest == ' ') rest++;   // trim leading space
+        if (rest && !strcmp(rest, "clear")) {
+            node_name[0] = 0; node_cfg_save();
+            Serial.println("name cleared — advertising AgnLoRa-<id>");
+        } else if (rest && *rest) {
+            strncpy(node_name, rest, AGN_NAME_MAX); node_name[AGN_NAME_MAX] = 0;
+            node_cfg_save();
+            char l[48]; snprintf(l, sizeof(l), "name set: %s", node_name); Serial.println(l);
+#ifdef AGN_BLE
+            if (ble_inited) {                  // apply live: re-name + restart advertising
+                Bluefruit.setName(node_name);
+                if (ble_advertising && !ble_connected) { ble_stop_adv(); ble_start_adv(); }
+            }
+#endif
+        } else {
+            char l[48]; snprintf(l, sizeof(l), "name: %s", node_name[0] ? node_name : "(none — AgnLoRa-<id>)");
+            Serial.println(l);
+        }
     } else if (!strcmp(cmd, "net")) {          // net | net beacon <seconds>|auto
         char* a = strtok(nullptr, " ");
         char* v = a ? strtok(nullptr, " ") : nullptr;

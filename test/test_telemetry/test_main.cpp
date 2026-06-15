@@ -35,10 +35,11 @@ static void test_reply_roundtrip() {
     TelemNbr nbrs[2] = { {nid_from_u32(0xD97EEC3Au), 99, 100, -4, -95},
                          {nid_from_u32(0xB51EEC13u), 87, 0, 0, 0} };
     uint8_t b[128];   // REPLY with two 16-byte-id nbr entries
-    uint16_t n = telem_build_reply(4021, 86, 1234, 22, 9, TELEM_FLAG_MOBILE, "0.7.0", nbrs, 2, b, sizeof(b));
+    uint16_t n = telem_build_reply(4021, 86, 1234, 22, 9, TELEM_FLAG_MOBILE, "0.7.0", "Pixel Node", nbrs, 2, b, sizeof(b));
     TEST_ASSERT_TRUE(n > 0);
     TelemMsg m;
     TEST_ASSERT_TRUE(telem_parse(b, n, &m));
+    TEST_ASSERT_EQUAL_STRING("Pixel Node", m.name);   // friendly name round-trips (with a space)
     TEST_ASSERT_EQUAL_UINT8(TELEM_REPLY, m.kind);
     TEST_ASSERT_EQUAL_UINT16(4021, m.mv);
     TEST_ASSERT_EQUAL_UINT8(86, m.pct_plus1);
@@ -66,7 +67,7 @@ static void test_parse_rejects_malformed() {
     // reply whose nbr count overruns the buffer
     TelemNbr nbrs[1] = { {nid_from_u32(1), 1, 1, 0, 0} };
     uint8_t b[128];
-    uint16_t n = telem_build_reply(1, 1, 1, 10, 9, 0, "x", nbrs, 1, b, sizeof(b));
+    uint16_t n = telem_build_reply(1, 1, 1, 10, 9, 0, "x", "", nbrs, 1, b, sizeof(b));
     b[n - 22] = 5;                                              // n_nbrs byte (one 21 B entry trails it): claim 5, carry 1
     TEST_ASSERT_FALSE(telem_parse(b, n, &m));
 }

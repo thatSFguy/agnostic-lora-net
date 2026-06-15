@@ -45,9 +45,12 @@ typedef uint8_t link_addr_t;
 inline void   nid_write(uint8_t* p, const NodeId& id) { memcpy(p, id.b, 16); }
 inline NodeId nid_read(const uint8_t* p) { NodeId id; memcpy(id.b, p, 16); return id; }
 
-// Format as 32 lowercase hex chars + NUL (for logs and the AgnLoRa-<id> BLE name).
+// Format as 32 UPPERCASE hex chars + NUL. Uppercase to match loc_id_hex (identity ids),
+// the controller's id normalization, and the project convention "uppercase everywhere"
+// (docs/INTEGRATING-AGNOSTIC-LORA-NET.md). V1 used %08lX (also uppercase); v2's earlier
+// lowercase was an oversight that produced mixed-case `loc <ID> <node>` lines.
 inline void nid_hex(const NodeId& id, char out[33]) {
-    static const char* hx = "0123456789abcdef";
+    static const char* hx = "0123456789ABCDEF";
     for (int i = 0; i < 16; i++) { out[2*i] = hx[id.b[i] >> 4]; out[2*i+1] = hx[id.b[i] & 0xF]; }
     out[32] = '\0';
 }
