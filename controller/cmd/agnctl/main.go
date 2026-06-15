@@ -298,7 +298,13 @@ func openSource(port, file string, baud int) (ingest.Source, bool, error) {
 
 func pollLoop(ctx context.Context, src ingest.Source, graph *topo.Graph) {
 	time.Sleep(400 * time.Millisecond)
-	_ = src.Send("trace on")
+	// reinit re-arms per-connection node state: `trace on` (airframe capture) and `anndump`
+	// (the node re-emits every verified `[ann] <id> pub=… sig=ok` binding). The live proof is
+	// printed only once per boot per peer, so without anndump a controller that connects after
+	// that — or reconnects after a node reboot — never learns the identity and leaves the node
+	// "unverified". Sent at startup and periodically so any reconnect self-heals.
+	reinit := func() { _ = src.Send("trace on"); _ = src.Send("anndump") }
+	reinit()
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	tick, rr := 0, 0
@@ -310,6 +316,9 @@ func pollLoop(ctx context.Context, src ingest.Source, graph *topo.Graph) {
 			_ = src.Send("info")
 			if tick%3 == 0 {
 				_ = src.Send("nbrdump")
+			}
+			if tick > 0 && tick%20 == 0 { // ~every 60s: resync after any silent reconnect
+				reinit()
 			}
 			// Round-robin one remote telemetry query per tick. The reply (a routed `[status] N`
 			// + its `nbr …` table) feeds the mesh-wide topology the optimiser needs to tune
