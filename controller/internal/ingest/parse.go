@@ -20,7 +20,7 @@ func idre(pat string) *regexp.Regexp {
 // Compiled once. Patterns mirror web/map.html (which mirrors the firmware
 // Serial.println formats), plus the `trace on` airframe lines ([TX]/[RX]).
 var (
-	reInfoHeader = idre(`^node (§)\s+neighbors=(\d+) routes=(\d+) blocked=(\d+)`)
+	reInfoHeader = idre(`^node (§)\s+neighbors=(\d+) routes=(\d+) blocked=(\d+)(?:.* name=(.*))?$`)
 	reBlocked    = idre(`^\[blocked\]((?:\s+§)*)\s*$`)
 	reFW         = regexp.MustCompile(`^fw (\S+)`)
 	reBattMv     = regexp.MustCompile(`^batt\b.*mv=(\d+) pct=(\d+)`)
@@ -31,7 +31,7 @@ var (
 	reRoute      = idre(`^route dst=(§) via=(§) cost=(-?\d+) hops=(\d+)`)
 	reCtrlAck    = idre(`^\[ctrl\] ack (§) cmd=(\d+) applied=(-?\d+) provisional=(\d)`)
 	reNodeBatt   = idre(`^\[batt\] (§) mv=(\d+) pct=(\d+) age=(\d+)s`)
-	reStatus     = idre(`^\[status\] (§) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV/(\d+)%|\?)(?: mob=(\d))?(?: ble=(\d))?`)
+	reStatus     = idre(`^\[status\] (§) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV/(\d+)%|\?)(?: mob=(\d))?(?: ble=(\d))?(?: name=(.*))?$`)
 	reAnnNbr     = idre(`^\[nbrs\] (§) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?`)
 	reAnn        = idre(`^\[ann\] (§)(?: pub=([0-9A-Fa-f]{64}))? sig=(ok|bad|none)`)
 	reBeaconTX   = idre(`^\[TX\] beacon seq=(\d+) from (§)\s+\+announce (\d+)B`)
@@ -56,6 +56,9 @@ func ParseLine(line string) (Event, bool) {
 		e := newEvent(KindInfoHeader, t)
 		e.ID = up(m[1])
 		e.Num["neighbors"], e.Num["routes"], e.Num["blocked"] = atoi(m[2]), atoi(m[3]), atoi(m[4])
+		if m[5] != "" {
+			e.Str["name"] = m[5]
+		}
 		return e, true
 	}
 	if m := reBlocked.FindStringSubmatch(t); m != nil {
@@ -114,6 +117,9 @@ func ParseLine(line string) (Event, bool) {
 		}
 		if m[9] != "" {
 			e.Num["ble"] = atoi(m[9])
+		}
+		if m[10] != "" {
+			e.Str["name"] = m[10]
 		}
 		return e, true
 	}

@@ -17,6 +17,7 @@ import (
 // Node is one mesh node as the controller currently understands it.
 type Node struct {
 	ID        string    `json:"id"`
+	Name      string    `json:"name,omitempty"`    // operator-set friendly name (telemetry/info name=); the display alias
 	FW        string    `json:"fw,omitempty"`
 	SF        int       `json:"sf,omitempty"`
 	Power     int       `json:"power_dbm,omitempty"`
@@ -158,6 +159,9 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		g.Gateway = e.ID
 		n := g.node(e.ID)
 		n.IsGateway, n.LastSeen = true, at
+		if nm, ok := e.Str["name"]; ok {
+			n.Name = nm
+		}
 		g.reportOwner = e.ID // the gateway's own `nbr …` lines follow this header
 
 	case ingest.KindBlocked:
@@ -219,6 +223,9 @@ func (g *Graph) Apply(e ingest.Event, at time.Time) {
 		n.LastSeen = at
 		if v, ok := e.Str["fw"]; ok {
 			n.FW = v
+		}
+		if v, ok := e.Str["name"]; ok {
+			n.Name = v
 		}
 		if v, ok := e.Num["sf"]; ok {
 			n.SF = v

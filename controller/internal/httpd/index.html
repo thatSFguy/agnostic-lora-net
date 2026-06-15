@@ -184,6 +184,14 @@
     </fieldset>
   </div>
 
+  <div class="cfgcard"><h3>Node name</h3>
+    <fieldset id="cfgnamefs" disabled>
+      <input id="cfg_name_in" placeholder="e.g. Rob's Gateway" maxlength="20" style="width:14rem">
+      <button id="cfg_name_set">Set name</button><button id="cfg_name_clear">Clear</button>
+      <span class="kv">friendly name — becomes the BLE advertised name and the alias shown here instead of the hex id (blank = AgnLoRa-&lt;id&gt;)</span>
+    </fieldset>
+  </div>
+
   <div class="cfgcard"><h3>Mobility</h3>
     <div class="kv" style="margin:.3rem 0">this node is: <b id="mob_val">—</b></div>
     <fieldset id="mobfs" disabled>
@@ -240,7 +248,9 @@
 const $ = s => document.querySelector(s);
 const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
 let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null, selected = null;
-const nm = id => aliases[id] || id;
+let nodeNames = {};   // node-reported friendly names (telemetry/info name=), keyed by id
+// Label: a manual dashboard alias wins; else the node's own friendly name; else the hex id.
+const nm = id => aliases[id] || nodeNames[id] || id;
 const clamp01 = v => Math.max(0, Math.min(1, v));
 const ASYM = 0.35;                                  // mirrors lib/mesh ASYM_THRESHOLD
 const qcol = q => q>=0.9?'#3fb950':q>=0.6?'#d29922':'#f85149';   // green / amber / red
@@ -264,6 +274,7 @@ function editingNodes(){ const a=document.activeElement; return a&&a.tagName==='
 function renderNodes(state){
   if(editingNodes()) return;
   const snap=state.snapshot||{}, nodes=snap.nodes||[], links=snap.links||[], events=state.events||[];
+  nodeNames={}; for(const n of nodes) if(n.name) nodeNames[n.id]=n.name;   // node-set friendly names drive the alias
   const lastDec={}; for(const e of events) if(e.kind==='decision') lastDec[e.node]=e;
   const heard={}; for(const l of links) if(l.to===gateway) heard[l.from]=l;
   $('#nodelist').innerHTML = nodes.slice().sort((a,b)=>(b.is_gateway?1:0)-(a.is_gateway?1:0)).map(n=>{
@@ -494,7 +505,7 @@ function provSet(cls,text){ const e=$('#prov_status'); e.textContent=text;
   e.style.color = cls==='ok'?'var(--confirm)':cls==='bad'?'var(--revert)':'var(--lower)'; }
 function cfgFeed(t){ cfgRxbuf+=t; let i; while((i=cfgRxbuf.indexOf('\n'))>=0){ cfgLine(cfgRxbuf.slice(0,i).replace(/\r$/,'')); cfgRxbuf=cfgRxbuf.slice(i+1); } }
 async function cfgSend(s){ if(cfgSendRaw) await cfgSendRaw(s+'\n'); else clog('not connected'); }
-function cfgEnable(on){ for(const f of ['#rffs','#battfs','#blefs','#mobfs','#provfs']) $(f).disabled=!on;
+function cfgEnable(on){ for(const f of ['#rffs','#battfs','#blefs','#mobfs','#provfs','#cfgnamefs']) $(f).disabled=!on;
   $('#rf_pwr').disabled=!on; $('#cfgCmd').disabled=!on; $('#cfgSend').disabled=!on; }
 function cfgFillRf(r){ $('#rf_freq').value=(r.freq_hz/1e6).toFixed(3).replace(/\.?0+$/,'');
   for(const o of $('#rf_bw').options){ if(Math.round(parseFloat(o.value)*1000)===r.bw_hz){ $('#rf_bw').value=o.value; break; } }
@@ -505,6 +516,8 @@ function cfgLine(line){ clog(line); let m;
   if((m=line.match(/PIN=(\d{6})/))) $('#pin').textContent=m[1].split('').join(' ');
   if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8,32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
   if((m=line.match(/node[= ]([0-9A-Fa-f]{8,32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
+  if((m=line.match(/^name(?: set)?: (.+)$/))) $('#cfg_name_in').value = m[1].startsWith('(none') ? '' : m[1];
+  if(/^name cleared/.test(line)) $('#cfg_name_in').value='';
   if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
     $('#mob_val').textContent = m[1]==='on'?'🚗 mobile (reserve band, raise fast / trim slow)':'📍 fixed (power optimised)';
   // provisioning state: node reports `ctrlkey AABB..YYZZ counter=N` | `ctrlkey: none` | set/clear acks
@@ -527,7 +540,7 @@ function cfgLine(line){ clog(line); let m;
 function cfgMarkConnected(kind){ $('#cfgStatus').textContent='connected ('+kind+')'; $('#cfgStatus').className='ok'; cfgEnable(true);
   clog('connected over '+kind+' — reading…');
   setTimeout(()=>cfgSend('ble'),500); setTimeout(()=>cfgSend('rf show'),900);
-  setTimeout(()=>cfgSend('info'),1300); setTimeout(()=>cfgSend('mobile'),1600);
+  setTimeout(()=>cfgSend('info'),1300); setTimeout(()=>cfgSend('mobile'),1600); setTimeout(()=>cfgSend('name'),1750);
   provSet('warn','checking…'); setTimeout(()=>cfgSend('ctrlkey'),1900); }   // query provisioning state
 async function cfgReadLoop(){ cfgReader=cfgPort.readable.getReader();
   try{ for(;;){ const {value,done}=await cfgReader.read(); if(done) break; cfgFeed(new TextDecoder().decode(value)); } }
@@ -571,6 +584,8 @@ $('#batt_read').onclick=()=>cfgSend('batt');
 $('#batt_cal').onclick=()=>{ let v=+$('#batt_mv').value; if(v>0&&v<10) v=Math.round(v*1000);
   if(v>=1000&&v<=6000) cfgSend('batt cal '+v); else clog('enter measured battery (volts e.g. 4.02, or mV e.g. 4020)'); };
 $('#mob_fixed').onclick=()=>cfgSend('mobile off'); $('#mob_mobile').onclick=()=>cfgSend('mobile on');
+$('#cfg_name_set').onclick=()=>{ const v=$('#cfg_name_in').value.trim(); if(v) cfgSend('name '+v); };
+$('#cfg_name_clear').onclick=()=>{ cfgSend('name clear'); $('#cfg_name_in').value=''; };
 $('#prov_key').onclick=()=>{ if(!ctrlPub){ clog('controller has no key — mint or import one first'); return; }
   provSet('warn','provisioning…'); cfgSend('ctrlkey '+ctrlPub); clog('→ ctrlkey '+ctrlPub.slice(0,12)+'… (provisioning this node)');
   setTimeout(()=>cfgSend('ctrlkey'),700); };   // re-query -> status flips to ✓ provisioned with THIS controller

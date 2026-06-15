@@ -44,6 +44,18 @@ if it's attached to WSL via usbipd, detach it first).</p>
 (Web Bluetooth) works on an already-paired node with BLE enabled — the field / retune-rescue
 path. BLE can't change its own security, so enable/PIN changes still need USB.</p>
 
+<!-- ───────────────────── Node name (alias) ───────────────────── -->
+<div class="card">
+  <h2>Node name</h2>
+  <p class="muted">A friendly name for this node. It becomes the BLE advertised name <b>and</b> the alias
+    shown in the controller / dashboards instead of the hex id. Max 20 chars; blank = <b>AgnLoRa-&lt;id&gt;</b>.</p>
+  <fieldset id="namefs" disabled style="border:none;padding:0;margin:0;">
+    <input id="name_in" placeholder="e.g. Rob's Gateway" maxlength="20" style="width:16rem;">
+    <button id="name_set">Set name</button>
+    <button id="name_clear">Clear</button>
+  </fieldset>
+</div>
+
 <!-- ───────────────────── BLE pairing ───────────────────── -->
 <div class="card">
   <h2>BLE pairing</h2>
@@ -161,12 +173,13 @@ function feed(text){ rxbuf+=text; let i;
 
 function markConnected(kind){
   $('status').textContent='connected ('+kind+')'; $('status').className='ok';
-  $('blefs').disabled=false; $('rffs').disabled=false; $('rf_pwr').disabled=false; $('battfs').disabled=false; $('mobfs').disabled=false;
+  $('blefs').disabled=false; $('rffs').disabled=false; $('rf_pwr').disabled=false; $('battfs').disabled=false; $('mobfs').disabled=false; $('namefs').disabled=false;
   log('connected over '+kind+' — reading…');
   setTimeout(()=>send('ble'),500);       // current BLE state + PIN
   setTimeout(()=>send('rf show'),900);    // current radio PHY -> prefill the form
   setTimeout(()=>send('info'),1300);      // fw version + mesh state (boot banner scrolls away)
   setTimeout(()=>send('mobile'),1600);    // current mobility flag (no-arg = query)
+  setTimeout(()=>send('name'),1800);      // current friendly name -> prefill the field
 }
 
 function fillRf(r){
@@ -187,6 +200,9 @@ function onLine(line){
   if((m=line.match(/PIN=(\d{6})/))) $('pin').textContent=m[1].split('').join(' ');
   if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
   if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
+  // friendly name: `name: <v>` / `name set: <v>` (prefill the field); `(none …)`/cleared => blank
+  if((m=line.match(/^name(?: set)?: (.+)$/))) $('name_in').value = m[1].startsWith('(none') ? '' : m[1];
+  if(/^name cleared/.test(line)) $('name_in').value='';
   // `mobile on/off …` (command/query reply) or `… mobile=on/off` (info node line)
   if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
     $('mob_val').textContent = m[1]==='on' ? '🚗 mobile (reserve band, raise fast / trim slow)' : '📍 fixed (power optimised)';
@@ -213,6 +229,8 @@ function onLine(line){
 async function send(s){ if(sendRaw) await sendRaw(s+'\n'); else log('not connected'); }
 $('mob_fixed').onclick=()=>send('mobile off');
 $('mob_mobile').onclick=()=>send('mobile on');
+$('name_set').onclick=()=>{ const v=$('name_in').value.trim(); if(v) send('name '+v); };
+$('name_clear').onclick=()=>{ send('name clear'); $('name_in').value=''; };
 $('batt_read').onclick=()=>send('batt');
 $('batt_cal').onclick=()=>{ let v=+$('batt_mv').value;
   if(v>0&&v<10) v=Math.round(v*1000);          // volts entered (e.g. 4.02) -> mV
