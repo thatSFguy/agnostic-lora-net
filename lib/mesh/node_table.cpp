@@ -63,9 +63,19 @@ bool NodeTable::verified(node_ref r) const {
     return (s.flags & F_USED) && s.gen == r.gen && (s.flags & F_VERIFIED);
 }
 
-void NodeTable::mark_verified(node_ref r) {
-    if (r.idx < NODE_TABLE_CAP && (s_[r.idx].flags & F_USED) && s_[r.idx].gen == r.gen)
+void NodeTable::mark_verified(node_ref r, const uint8_t pub[32]) {
+    if (r.idx < NODE_TABLE_CAP && (s_[r.idx].flags & F_USED) && s_[r.idx].gen == r.gen) {
         s_[r.idx].flags |= F_VERIFIED;
+        memcpy(s_[r.idx].pub, pub, 32);   // retain for anndump re-emit
+    }
+}
+
+void NodeTable::for_each_verified(void (*fn)(void*, const NodeId&, const uint8_t*),
+                                  void* ctx) const {
+    if (!fn) return;
+    for (int i = 0; i < NODE_TABLE_CAP; i++)
+        if ((s_[i].flags & F_USED) && (s_[i].flags & F_VERIFIED))
+            fn(ctx, s_[i].id, s_[i].pub);
 }
 
 void NodeTable::pin(node_ref r, bool on) {

@@ -39,7 +39,8 @@ static void test_verified_flag() {
     NodeTable t;
     node_ref r = t.intern(idn(0x42), 1);
     TEST_ASSERT_FALSE(t.verified(r));
-    t.mark_verified(r);
+    uint8_t pub[32]; for (int i = 0; i < 32; i++) pub[i] = (uint8_t)(0x42 + i);
+    t.mark_verified(r, pub);
     TEST_ASSERT_TRUE(t.verified(r));
     // re-interning the same id keeps the verified flag (same slot).
     node_ref r2 = t.intern(idn(0x42), 2);
@@ -88,6 +89,29 @@ static void test_nid_from_pubkey() {
     TEST_ASSERT_FALSE(a.is_zero());
 }
 
+// for_each_verified re-emits exactly the verified slots, with the retained pubkey.
+struct DumpCtx { int n; NodeId ids[8]; uint8_t pubs[8][32]; };
+static void dump_cb(void* ctx, const NodeId& id, const uint8_t pub[32]) {
+    DumpCtx* d = (DumpCtx*)ctx;
+    if (d->n < 8) { d->ids[d->n] = id; memcpy(d->pubs[d->n], pub, 32); d->n++; }
+}
+static void test_for_each_verified_reemits_pub() {
+    NodeTable t;
+    uint8_t pa[32], pb[32];
+    for (int i = 0; i < 32; i++) { pa[i] = (uint8_t)(0xA0 + i); pb[i] = (uint8_t)(0xB0 + i); }
+    node_ref ra = t.intern(idn(0xAA), 1);
+    node_ref rb = t.intern(idn(0xBB), 2);
+    t.intern(idn(0xCC), 3);                 // interned but NOT verified — must be skipped
+    t.mark_verified(ra, pa);
+    t.mark_verified(rb, pb);
+    DumpCtx d{}; t.for_each_verified(dump_cb, &d);
+    TEST_ASSERT_EQUAL_INT(2, d.n);          // only the two verified
+    // find AA's entry and check its pubkey round-tripped
+    int ai = (d.ids[0] == idn(0xAA)) ? 0 : 1;
+    TEST_ASSERT_TRUE(d.ids[ai] == idn(0xAA));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(pa, d.pubs[ai], 32);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -99,5 +123,6 @@ int main(int, char**) {
     RUN_TEST(test_eviction_bumps_gen);
     RUN_TEST(test_pin_protects_lru);
     RUN_TEST(test_nid_from_pubkey);
+    RUN_TEST(test_for_each_verified_reemits_pub);
     return UNITY_END();
 }

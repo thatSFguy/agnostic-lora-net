@@ -503,11 +503,13 @@ static void cfg_load() {
     AgnBleCfg c;
     if (cfg_read(c)) {
         strncpy(ble_pin, c.pin, 6); ble_pin[6] = 0;
-        // SAFETY GUARD (2026-06-14): do NOT auto-start BLE from a persisted "on". A v2 node
-        // with the SoftDevice active hard-hangs ~20s after boot (signed-beacon/SoftDevice
-        // coexistence regression — see memory v2-ble-hardware-regressions). Forcing off at
-        // boot keeps the node stable even if BLE was left enabled. Remove once that's fixed.
-        cfg_ble_enabled = false;  // was: c.enabled
+        // Honor the persisted enabled state: a node that had `ble on` (e.g. set via the config
+        // page) comes back up advertising after a reboot. The 2026-06-14 SAFETY GUARD that forced
+        // this off was a band-aid for the ~20s post-boot hang, which turned out NOT to be a
+        // BLE/SoftDevice problem at all but a stack overflow on the Ed25519 announce-verify path
+        // (fixed in 1f24975: agn_main_task 2048->4096 words + off-stack crypto bufs). With the
+        // real cause fixed, the guard is obsolete — see memory v2-ble-hardware-regressions.
+        cfg_ble_enabled = c.enabled;
     } else { ble_gen_pin(); cfg_first_boot = true; }
 }
 
@@ -1503,6 +1505,16 @@ static void telem_print_status(node_id_t origin, const mesh::TelemMsg& m) {
     }
 }
 
+// `anndump` callback: re-emit one already-verified id↔pubkey binding as the controller
+// `[ann] <id> pub=<hex> sig=ok` contract line. Lets a controller that (re)connects after
+// the once-per-boot live proof resync without waiting for / forcing a fresh announce.
+static void ann_redump_one(void*, const NodeId& id, const uint8_t pub[32]) {
+    char idhx[33]; nid_hex(id, idhx);
+    char pubhx[65]; loc_id_hex(pub, 32, pubhx);
+    char l[120]; snprintf(l, sizeof(l), "[ann] %s pub=%s sig=ok", idhx, pubhx);
+    if (g_con) g_con->println(l);
+}
+
 static void on_telem_rx(const uint8_t* buf, uint16_t len, const NetHeader& net, const LinkHeader& lh) {
     const uint8_t* pay = buf + HEADER_BYTES;
     uint16_t plen = (uint16_t)(len - HEADER_BYTES);
@@ -1665,7 +1677,7 @@ static void on_rx(const uint8_t* buf, uint16_t len, float rssi, float snr) {
                               && (mesh::nid_from_pubkey(pub) == net.src);
                     char idhx[33]; nid_hex(net.src, idhx);
                     if (ok) {
-                        id_table.mark_verified(r);
+                        id_table.mark_verified(r, pub);   // retains pub for anndump re-emit
                         char pubhx[65]; loc_id_hex(pub, 32, pubhx);
                         char l[120];
                         snprintf(l, sizeof(l), "[ann] %s pub=%s sig=ok", idhx, pubhx);
@@ -1929,7 +1941,9 @@ static void hdlc_write(const uint8_t* d, uint16_t n) {
 }
 
 // Emit a delivered app payload to the host as the typed envelope:
-// [LOCATOR][len=sizeof(node_id)][src node-id LE][payload].
+// [LOCATOR][len=sizeof(node_id)][src node-id, 16 raw bytes natural order][payload].
+// (NOT little-endian — the v2 node_id is a uint8_t[16], memcpy'd verbatim; byte[0] is the
+// first hex pair. The old uint32 id was LE here; the byte-array drops that reversal.)
 static void tunnel_emit(node_id_t src, const uint8_t* payload, uint16_t plen) {
     if (plen > TUN_HOST_MAX) plen = TUN_HOST_MAX;
 #ifdef AGN_BLE
@@ -2038,7 +2052,10 @@ static void tunnel_send(node_id_t dst, const uint8_t* payload, uint16_t plen) {
 // The local control surface. `send` originates app data; `block`/`unblock` drive
 // the Tier-1 link-block setting at runtime. When the controller lands (Phase 4),
 // the same Router calls are invoked by signed control packets instead of typed in.
-static node_id_t parse_id(const char* s) { return nid_from_u32((uint32_t)strtoul(s, nullptr, 16)); }
+// Parse a console-supplied node id. v2 ids are 32 hex chars (16 bytes) — the old
+// `nid_from_u32(strtoul(s,16))` OVERFLOWED them to 0xFFFFFFFF and addressed a
+// non-existent node, so `send`/`status`/`block`/SAR to a real node went nowhere.
+static node_id_t parse_id(const char* s) { node_id_t id; nid_from_hex(s, id); return id; }
 
 static int hexnyb(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -2349,6 +2366,11 @@ static void handle_command(char* line) {
             char l[64]; snprintf(l, sizeof(l), "pub (none — AGN_NODE_ID override)  id=%s", idhx);
             Serial.println(l);
         }
+    } else if (!strcmp(cmd, "anndump")) {      // re-emit every verified [ann] binding (controller resync)
+        // The live `[ann] … sig=ok` proof is printed once per boot per peer; a controller
+        // that connects later sends `anndump` to re-learn them without a gateway reboot.
+        id_table.for_each_verified(ann_redump_one, nullptr);
+        Serial.println("anndump done");
     } else if (!strcmp(cmd, "ctrlkey")) {      // ctrlkey <64hex>|clear — controller pubkey
         char* a = strtok(nullptr, " ");
         if (a && !strcmp(a, "clear")) {
@@ -2412,9 +2434,9 @@ static void handle_command(char* line) {
     } else if (!strcmp(cmd, "status")) {       // status <node8hex> — on-demand remote telemetry
         char* a = strtok(nullptr, " ");
         node_id_t t = a ? parse_id(a) : node_id_t{};
-        if (t.is_zero()) { Serial.println("usage: status <node id, 8 hex>"); return; }
+        if (t.is_zero()) { Serial.println("usage: status <node id, 32 hex>"); return; }
         if (t == my_id) { Serial.println("that's this node — see `info`"); return; }
-        uint8_t q[8];
+        uint8_t q[17];   // v2 query = [kind:1][target:16]; the old q[8] silently failed to build
         uint16_t n = mesh::telem_build_query(t, q, sizeof(q));
         if (n) { send_loc_flood(q, n, DEFAULT_TTL, PKT_TELEM); Serial.println("status query sent"); }
     } else if (!strcmp(cmd, "battdump")) {     // last-known battery for every node (cached)
@@ -2527,7 +2549,7 @@ static void handle_command(char* line) {
         Serial.println("send <id> <msg> | block/unblock <id> | info | sbegin <len> <crc> | sdata <hex> | xfer <id> | dump | tunnel");
         Serial.println("rf [show] | rf <freq|bw|sf|cr|power|sync|preamble> <val> | rf apply | rf revert | rf default");
         Serial.println("cad [on|off]   (CSMA listen-before-talk; counters in `info`)");
-        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | pub | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
+        Serial.println("register <idhex> | resolve <idhex> | dirdump | nbrdump | batt [cal <mV>] | net [beacon <s>|auto] | trace [on|off] | mobile [on|off] | status <id> | battdump | kiss [<id>|off] | pub | anndump | ctrlkey [<64hex>|clear] | ctrlsend <hex>");
 #ifdef AGN_BLE
         Serial.println("ble [on|off|unbond] | blepin [random|<6 digits>]");
 #endif

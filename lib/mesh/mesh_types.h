@@ -70,6 +70,32 @@ inline NodeId nid_from_u32(uint32_t v) {
     return id;
 }
 
+// One hex digit -> 0..15, or -1 if not a hex char. Case-insensitive.
+inline int nid_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Parse up to 32 hex chars (case-insensitive) into a NodeId in NATURAL order —
+// byte[0] is the first hex pair, the exact inverse of nid_hex (NOT little-endian:
+// the v2 id is a raw 16-byte array, so display order == wire order). Parsing stops
+// at the first non-hex char or after 16 bytes; unfilled bytes stay zero. Returns the
+// number of bytes filled. Replaces the old 32-bit strtoul parse, which OVERFLOWED a
+// 32-hex id to 0xFFFFFFFF and addressed a non-existent node.
+inline uint8_t nid_from_hex(const char* s, NodeId& out) {
+    for (int i = 0; i < 16; i++) out.b[i] = 0;
+    uint8_t nb = 0;
+    for (int i = 0; i < 16; i++) {
+        int hi = nid_hexval(s[2*i]);   if (hi < 0) break;
+        int lo = nid_hexval(s[2*i+1]); if (lo < 0) break;
+        out.b[i] = (uint8_t)((hi << 4) | lo);
+        nb++;
+    }
+    return nb;
+}
+
 // --- node_ref: a compact handle into the NodeTable -------------------------
 // 2 bytes: a slot index plus a generation tag. The gen makes a stale ref (slot
 // evicted and reused) DETECTABLE — NodeTable::resolve() returns false rather than
