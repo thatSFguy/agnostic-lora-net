@@ -302,7 +302,7 @@ static void kiss_cfg_save() {
 // telemetry so the Tier-1 controller keeps its TX-power headroom (never trims a mobile node).
 // Lives on the node — any controller learns it — and is set with `mobile on|off`.
 static bool node_mobile = false;
-// Operator-set "friendly" name (e.g. "Rob's Gateway"). Empty => fall back to AgnLoRa-<id>.
+// Operator-set "friendly" name (e.g. "Rob's Gateway"). Empty => fall back to ALN-<id>.
 // It IS the BLE advertised name, and is reported in telemetry/info so the controller and
 // web apps show it as the node's alias instead of the raw hex id. Set with `name <text>`.
 static const uint8_t  AGN_NAME_MAX = 20;
@@ -541,6 +541,17 @@ static void ble_stop_adv() {
 // on per node, on demand, from the management console (`ble on`). Lazy + idempotent:
 // the SoftDevice is only enabled the first time BLE is actually turned on, so a node
 // that never uses BLE pays no runtime/power cost (Req 4) — just the flash it occupies.
+// Build the BLE advertised name. ALWAYS prefixed "ALN-" — the mobile app (and the web
+// config apps) scan/filter on that prefix. Friendly name when the operator set one, else a
+// short id slice ("ALN-<8hex>"). The name is NOT an id source — the app reads the full
+// 32-hex id from `registered … at <node>` / `[hb] node=` after connecting.
+static const uint8_t BLE_NAME_BUF = AGN_NAME_MAX + 6;   // "ALN-" + up to 20 chars + NUL
+static void ble_adv_name(char* out, size_t cap) {
+    if (node_name[0]) { snprintf(out, cap, "ALN-%s", node_name); return; }
+    char idhx[33]; nid_hex(my_id, idhx);
+    snprintf(out, cap, "ALN-%.8s", idhx);               // e.g. "ALN-B0459C80"
+}
+
 static void ble_setup() {
     if (ble_inited) return;
     ble_inited = true;
@@ -549,12 +560,10 @@ static void ble_setup() {
     Bluefruit.autoConnLed(false);                   // no blinking conn LED — solar power budget
     Bluefruit.setTxPower(4);
     // The BLE name must fit the 31-byte legacy advertising / scan-response payload (a Complete
-    // Local Name adds 2 AD bytes). The v2 id is 32 hex chars, so "AgnLoRa-"+32 = 40 chars
-    // OVERFLOWS that and gets silently truncated to a garbled shortened name — which broke BLE
-    // discovery/pairing in v2 (the id-widening regression). Use a short, still-unique id slice.
-    char nm[AGN_NAME_MAX + 1]; char idhx[33]; nid_hex(my_id, idhx);
-    if (node_name[0]) snprintf(nm, sizeof(nm), "%s", node_name);          // operator friendly name
-    else              snprintf(nm, sizeof(nm), "AgnLoRa-%.8s", idhx);     // default: "AgnLoRa-B0459C80"
+    // Local Name adds 2 AD bytes). The full 32-hex id would overflow ("ALN-"+32 = 36), so the
+    // default uses a short id slice ("ALN-<8hex>"); a friendly name is capped at 20 chars
+    // ("ALN-"+20 = 24, fits). The "ALN-" prefix is the app's scan filter (see ble_adv_name).
+    char nm[BLE_NAME_BUF]; ble_adv_name(nm, sizeof(nm));   // always "ALN-…" (app scan filter)
     Bluefruit.setName(nm);
     Bluefruit.Security.setPIN(ble_pin);             // static passkey -> phone must enter it
     Bluefruit.Periph.setConnectCallback(ble_connect_cb);
@@ -2296,9 +2305,12 @@ static void handle_command(char* line) {
             if (ble_advertising) ble_start_adv();  // restart clean advertising
             Serial.println("BLE bonds cleared — re-pair from the phone now");
         }
-        char m[96]; char myidhx[33]; nid_hex(my_id, myidhx);
-        snprintf(m, sizeof(m), "BLE name=AgnLoRa-%s advertising=%d connected=%d PIN=%s",
-                 myidhx, (int)ble_advertising, (int)ble_connected, ble_pin);
+        char m[120]; char myidhx[33]; nid_hex(my_id, myidhx);
+        char advnm[BLE_NAME_BUF]; ble_adv_name(advnm, sizeof(advnm));
+        // Show the ACTUAL advertised name AND the full id (the id is the authoritative field
+        // apps/webapps should parse — `id=<32hex>`; the adv name is a discovery filter only).
+        snprintf(m, sizeof(m), "BLE name=%s id=%s advertising=%d connected=%d PIN=%s",
+                 advnm, myidhx, (int)ble_advertising, (int)ble_connected, ble_pin);
         Serial.println(m);
     } else if (!strcmp(cmd, "blepin")) {     // blepin | blepin random | blepin <6 digits>
         char* a = strtok(nullptr, " ");
@@ -2324,19 +2336,20 @@ static void handle_command(char* line) {
         while (rest && *rest == ' ') rest++;   // trim leading space
         if (rest && !strcmp(rest, "clear")) {
             node_name[0] = 0; node_cfg_save();
-            Serial.println("name cleared — advertising AgnLoRa-<id>");
+            Serial.println("name cleared — advertising ALN-<id>");
         } else if (rest && *rest) {
             strncpy(node_name, rest, AGN_NAME_MAX); node_name[AGN_NAME_MAX] = 0;
             node_cfg_save();
             char l[48]; snprintf(l, sizeof(l), "name set: %s", node_name); Serial.println(l);
 #ifdef AGN_BLE
             if (ble_inited) {                  // apply live: re-name + restart advertising
-                Bluefruit.setName(node_name);
+                char nm[BLE_NAME_BUF]; ble_adv_name(nm, sizeof(nm));
+                Bluefruit.setName(nm);
                 if (ble_advertising && !ble_connected) { ble_stop_adv(); ble_start_adv(); }
             }
 #endif
         } else {
-            char l[48]; snprintf(l, sizeof(l), "name: %s", node_name[0] ? node_name : "(none — AgnLoRa-<id>)");
+            char l[48]; snprintf(l, sizeof(l), "name: %s", node_name[0] ? node_name : "(none — ALN-<id>)");
             Serial.println(l);
         }
     } else if (!strcmp(cmd, "net")) {          // net | net beacon <seconds>|auto

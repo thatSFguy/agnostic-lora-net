@@ -48,7 +48,7 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
 <div class="card">
   <h2>Node name</h2>
   <p class="muted">A friendly name for this node. It becomes the BLE advertised name <b>and</b> the alias
-    shown in the controller / dashboards instead of the hex id. Max 20 chars; blank = <b>AgnLoRa-&lt;id&gt;</b>.</p>
+    shown in the controller / dashboards instead of the hex id. Max 20 chars; blank = <b>ALN-&lt;id&gt;</b>.</p>
   <fieldset id="namefs" disabled style="border:none;padding:0;margin:0;">
     <input id="name_in" placeholder="e.g. Rob's Gateway" maxlength="20" style="width:16rem;">
     <button id="name_set">Set name</button>
@@ -72,7 +72,7 @@ path. BLE can't change its own security, so enable/PIN changes still need USB.</
     <input id="setpin" placeholder="6 digits" maxlength="6" inputmode="numeric">
     <button id="setbtn">Set PIN</button>
   </fieldset>
-  <p class="muted">③ On your phone: pair with <b>AgnLoRa-…</b> and enter the PIN above.</p>
+  <p class="muted">③ On your phone: pair with <b>ALN-…</b> and enter the PIN above.</p>
 </div>
 
 <!-- ───────────────────── Radio (PHY) ───────────────────── -->
@@ -198,8 +198,8 @@ function onLine(line){
   let m;
   if((m=line.match(/^fw[= ](\S+)(?:\s+built[= ](.+))?/))) $('fw').textContent=m[1]+(m[2]?' ('+m[2]+')':'');
   if((m=line.match(/PIN=(\d{6})/))) $('pin').textContent=m[1].split('').join(' ');
-  if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
-  if((m=line.match(/node=([0-9A-Fa-f]{8})/))) $('node').textContent=m[1].toUpperCase();
+  // Node id = the full 32-hex from `id=`/`node=`/`registered … at <id>` (NOT the ALN- adv name).
+  if((m=line.match(/(?:\bid=|node=|registered.* at )([0-9A-Fa-f]{32})/))) $('node').textContent=m[1].toUpperCase();
   // friendly name: `name: <v>` / `name set: <v>` (prefill the field); `(none …)`/cleared => blank
   if((m=line.match(/^name(?: set)?: (.+)$/))) $('name_in').value = m[1].startsWith('(none') ? '' : m[1];
   if(/^name cleared/.test(line)) $('name_in').value='';
@@ -215,7 +215,7 @@ function onLine(line){
   if((m=line.match(/batt=(\d+)mV\/(\d+)%/)))
     $('batt_val').textContent=m[1]+' mV — '+m[2]+'%';
   if((m=line.match(/adv(?:ertising)?=([01])/))){ const on=m[1]==='1';
-    $('advstate').textContent='BLE: '+(on?'ON — advertising as AgnLoRa-'+$('node').textContent:'off'); }
+    $('advstate').textContent='BLE: '+(on?'ON — advertising as ALN-'+$('node').textContent:'off'); }
   // Radio config line:
   //   [rf] freq_hz=904375000 bw_hz=250000 sf=11 cr=5 power_dbm=14 sync=0x4D preamble=16 (active)
   if(line.startsWith('[rf]') && line.includes('(active)')){
@@ -273,7 +273,7 @@ async function connectUsb(){
 async function connectBle(){
   if(!navigator.bluetooth){ log('Web Bluetooth unavailable — use Chrome/Edge.'); return; }
   try{
-    bleDev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'AgnLoRa-'}],optionalServices:[NUS]});
+    bleDev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'ALN-'}],optionalServices:[NUS]});
     bleDev.addEventListener('gattserverdisconnected',()=>{
       $('status').textContent='disconnected'; $('status').className='bad'; sendRaw=null; log('BLE disconnected'); });
     const srv=await (await bleDev.gatt.connect()).getPrimaryService(NUS);

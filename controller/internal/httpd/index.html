@@ -188,7 +188,7 @@
     <fieldset id="cfgnamefs" disabled>
       <input id="cfg_name_in" placeholder="e.g. Rob's Gateway" maxlength="20" style="width:14rem">
       <button id="cfg_name_set">Set name</button><button id="cfg_name_clear">Clear</button>
-      <span class="kv">friendly name — becomes the BLE advertised name and the alias shown here instead of the hex id (blank = AgnLoRa-&lt;id&gt;)</span>
+      <span class="kv">friendly name — becomes the BLE advertised name and the alias shown here instead of the hex id (blank = ALN-&lt;id&gt;)</span>
     </fieldset>
   </div>
 
@@ -514,8 +514,8 @@ function cfgFillRf(r){ $('#rf_freq').value=(r.freq_hz/1e6).toFixed(3).replace(/\
 function cfgLine(line){ clog(line); let m;
   if((m=line.match(/^fw[= ](\S+)(?:\s+built[= ](.+))?/))) $('#cfgFw').textContent=m[1]+(m[2]?' ('+m[2]+')':'');
   if((m=line.match(/PIN=(\d{6})/))) $('#pin').textContent=m[1].split('').join(' ');
-  if((m=line.match(/AgnLoRa-([0-9A-Fa-f]{8,32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
-  if((m=line.match(/node[= ]([0-9A-Fa-f]{8,32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
+  // Node id = the full 32-hex from `id=`/`node=`/`registered … at <id>` (NOT the ALN- adv name).
+  if((m=line.match(/(?:\bid=|node[= ]|registered.* at )([0-9A-Fa-f]{32})/))) $('#cfgNode').textContent=m[1].toUpperCase();
   if((m=line.match(/^name(?: set)?: (.+)$/))) $('#cfg_name_in').value = m[1].startsWith('(none') ? '' : m[1];
   if(/^name cleared/.test(line)) $('#cfg_name_in').value='';
   if((m=line.match(/^mobile (on|off)/))||(m=line.match(/mobile=(on|off)/)))
@@ -532,7 +532,7 @@ function cfgLine(line){ clog(line); let m;
   else if((m=line.match(/^batt raw=(\d+) UNCALIBRATED/))) $('#batt_val').textContent='raw '+m[1]+' — UNCALIBRATED';
   else if((m=line.match(/^batt mv=(\d+) pct=(\d+)/))) $('#batt_val').textContent=m[1]+' mV — '+m[2]+'%';
   if((m=line.match(/batt=(\d+)mV\/(\d+)%/))) $('#batt_val').textContent=m[1]+' mV — '+m[2]+'%';
-  if((m=line.match(/adv(?:ertising)?=([01])/))) $('#advstate').textContent='BLE: '+(m[1]==='1'?'ON — advertising as AgnLoRa-'+$('#cfgNode').textContent:'off');
+  if((m=line.match(/adv(?:ertising)?=([01])/))) $('#advstate').textContent='BLE: '+(m[1]==='1'?'ON — advertising as ALN-'+$('#cfgNode').textContent:'off');
   if(line.startsWith('[rf]') && line.includes('(active)')){
     const g=k=>{ const mm=line.match(new RegExp(k+'=(-?(?:0x)?[0-9A-Fa-f]+)')); return mm?mm[1]:null; };
     const r={ freq_hz:+g('freq_hz'), bw_hz:+g('bw_hz'), sf:+g('sf'), cr:+g('cr'), power_dbm:+g('power_dbm'), sync:parseInt(g('sync'),16), preamble:+g('preamble') };
@@ -553,7 +553,7 @@ async function cfgConnectUsb(){ if(!navigator.serial){ clog('Web Serial unavaila
     cfgWriter=cfgPort.writable.getWriter(); cfgSendRaw=async s=>cfgWriter.write(new TextEncoder().encode(s));
     cfgReadLoop(); cfgMarkConnected('USB'); }catch(e){ clog('USB connect error: '+e); } }
 async function cfgConnectBle(){ if(!navigator.bluetooth){ clog('Web Bluetooth unavailable — use Chrome/Edge.'); return; }
-  try{ cfgBleDev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'AgnLoRa-'}],optionalServices:[NUS]});
+  try{ cfgBleDev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'ALN-'}],optionalServices:[NUS]});
     cfgBleDev.addEventListener('gattserverdisconnected',()=>{ $('#cfgStatus').textContent='disconnected'; $('#cfgStatus').className='bad'; cfgSendRaw=null; clog('BLE disconnected'); });
     const srv=await (await cfgBleDev.gatt.connect()).getPrimaryService(NUS);
     const rx=await srv.getCharacteristic(NUS_RX), tx=await srv.getCharacteristic(NUS_TX);
