@@ -2249,6 +2249,37 @@ static void print_info() {
     }
 }
 
+#if defined(ESP32)
+#  include "soc/rtc_cntl_reg.h"   // RTC_CNTL_OPTION1_REG / RTC_CNTL_FORCE_DOWNLOAD_BOOT
+#endif
+
+// Drop into the flashing bootloader on command — no BOOT-button / cable-replug dance.
+//   ESP32-S3: set the ROM force-download-boot flag, then reset into the native-USB download
+//             bootloader (esptool / `pio run -t upload` flashes directly afterwards).
+//   nRF52:    reset into the Adafruit SERIAL DFU mode (GPREGRET magic 0x4E) so adafruit-nrfutil
+//             flashes WITHOUT the flaky 1200-baud touch. Use the SoftDevice-safe setter when the
+//             stack is up; the raw register otherwise.
+// Bench-verify on first use per board (RTC reg name on S3 / serial-DFU magic on each bootloader).
+static void enter_bootloader() {
+#if defined(ESP32)
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
+#else
+    const uint32_t SERIAL_DFU_MAGIC = 0x4E;   // DFU_MAGIC_SERIAL_ONLY_RESET (Adafruit nRF52 boot)
+#  ifdef AGN_BLE
+    if (ble_inited) {                          // SoftDevice owns GPREGRET while it's enabled
+        sd_power_gpregret_clr(0, 0xFF);
+        sd_power_gpregret_set(0, SERIAL_DFU_MAGIC);
+    } else {
+        NRF_POWER->GPREGRET = SERIAL_DFU_MAGIC;
+    }
+#  else
+    NRF_POWER->GPREGRET = SERIAL_DFU_MAGIC;
+#  endif
+    NVIC_SystemReset();
+#endif
+}
+
 static void handle_command(char* line) {
     Print& Serial = *g_con;   // route command output to the source transport (USB or BLE)
     char* cmd = strtok(line, " ");
@@ -2394,6 +2425,15 @@ static void handle_command(char* line) {
                  (unsigned long)(beacon_jitter_ms() / 1000),
                  (unsigned long)(neighbor_timeout_ms() / 1000));
         Serial.println(l);
+    } else if (!strcmp(cmd, "bootloader") || !strcmp(cmd, "dfu")) {  // drop into the flash bootloader
+#if defined(ESP32)
+        Serial.println("[boot] entering ESP32 USB download mode — flash with esptool/`pio -t upload`");
+#else
+        Serial.println("[boot] entering nRF52 serial DFU — flash with adafruit-nrfutil (-t 0)");
+#endif
+        Serial.flush();
+        delay(150);            // let the line reach the host before USB drops
+        enter_bootloader();    // does not return
     } else if (!strcmp(cmd, "batt")) {         // batt | batt cal <measured_mV>
 #ifndef AGN_VBAT_PIN
         Serial.println("batt: no VBAT sense on this board");
