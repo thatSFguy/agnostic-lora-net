@@ -128,6 +128,10 @@
 #  define LORA_SPI_MOSI  9
 #  define LORA_RXEN      38
 #  define LORA_TCXO_VOLTAGE 1.8f
+// User button on the Wio-SX1262 board (active-low, needs pull-up; Meshtastic: BUTTON_PIN 21).
+// Long-press it to enter the flash bootloader — the XIAO's own BOOT button is buried under the
+// LoRa board. See AGN_BTN_PIN handling in main.cpp.
+#  define AGN_BTN_PIN    21
 #endif
 
 // ---------------------------------------------------------------------------
