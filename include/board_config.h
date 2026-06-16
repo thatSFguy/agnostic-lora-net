@@ -114,23 +114,19 @@
 #  endif
 
 #elif defined(AGN_BOARD_XIAO_S3)
-// Seeed XIAO ESP32-S3 + the SAME Wio-SX1262 expansion as the nRF XIAO (Meshtastic: "Seeed Xiao
-// ESP32-S3"). The Wio module plugs into the standard XIAO pad layout, so the LOGICAL pads are
-// identical to AGN_BOARD_XIAO — NSS=D4, DIO1=D1, NRST=D2, BUSY=D3, RXEN=D5, default SPI on
-// D8/D9/D10 — only the silicon behind each pad differs (ESP32-S3 GPIOs vs nRF52). 1.8 V TCXO,
-// DIO2 RF switch + an RXEN LNA line, no FEM. ESP32 brings the bus up via SPI.begin(sck,miso,
-// mosi,ss) in the HAL, so the SPI pins are the XIAO's default SPI pads.
-//   *** Pads match the Wio-SX1262-for-XIAO wiring, but VERIFY ON FIRST FLASH per project policy:
-//   if it comes up "radio: up" but never hears / is never heard, RF-switch/RXEN wiring (or a
-//   D-pad→GPIO mismatch in the board variant) is the first suspect. ***
-#  define LORA_SPI_NSS   D4
-#  define LORA_DIO1      D1
-#  define LORA_NRST      D2
-#  define LORA_BUSY      D3
-#  define LORA_SPI_SCK   D8
-#  define LORA_SPI_MISO  D9
-#  define LORA_SPI_MOSI  D10
-#  define LORA_RXEN      D5
+// Seeed XIAO ESP32-S3 + the Wio-SX1262 expansion kit (Meshtastic: "Seeed Xiao ESP32-S3", variant
+// seeed_xiao_s3). NOTE: unlike the nRF XIAO, the ESP32-S3 kit does NOT route the radio to the
+// D1-D5 header pads — it uses the board's lower GPIO bank (38-42). Pins below are taken verbatim
+// from Meshtastic's variants/esp32s3/seeed_xiao_s3/variant.h. SPI is the XIAO default bus
+// (D8/D9/D10 = GPIO7/8/9), 1.8 V TCXO, SX1262 DIO2 as RF switch + an RXEN line on GPIO38, no FEM.
+#  define LORA_SPI_NSS   41
+#  define LORA_DIO1      39
+#  define LORA_NRST      42
+#  define LORA_BUSY      40
+#  define LORA_SPI_SCK   7
+#  define LORA_SPI_MISO  8
+#  define LORA_SPI_MOSI  9
+#  define LORA_RXEN      38
 #  define LORA_TCXO_VOLTAGE 1.8f
 #endif
 
