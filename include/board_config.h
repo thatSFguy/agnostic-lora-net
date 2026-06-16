@@ -16,7 +16,7 @@
 
 #if !defined(AGN_BOARD_RAK4631) && !defined(AGN_BOARD_XIAO) && \
     !defined(AGN_BOARD_PROMICRO) && !defined(AGN_BOARD_T1000) && \
-    !defined(AGN_BOARD_HELTEC_V4)
+    !defined(AGN_BOARD_HELTEC_V4) && !defined(AGN_BOARD_XIAO_S3)
 #  define AGN_BOARD_RAK4631   // default (also used by the host compile-check env)
 #endif
 
@@ -112,6 +112,26 @@
 #  ifndef LORA_FEM_TX_EN
 #    define LORA_FEM_TX_EN     46
 #  endif
+
+#elif defined(AGN_BOARD_XIAO_S3)
+// Seeed XIAO ESP32-S3 + the SAME Wio-SX1262 expansion as the nRF XIAO (Meshtastic: "Seeed Xiao
+// ESP32-S3"). The Wio module plugs into the standard XIAO pad layout, so the LOGICAL pads are
+// identical to AGN_BOARD_XIAO — NSS=D4, DIO1=D1, NRST=D2, BUSY=D3, RXEN=D5, default SPI on
+// D8/D9/D10 — only the silicon behind each pad differs (ESP32-S3 GPIOs vs nRF52). 1.8 V TCXO,
+// DIO2 RF switch + an RXEN LNA line, no FEM. ESP32 brings the bus up via SPI.begin(sck,miso,
+// mosi,ss) in the HAL, so the SPI pins are the XIAO's default SPI pads.
+//   *** Pads match the Wio-SX1262-for-XIAO wiring, but VERIFY ON FIRST FLASH per project policy:
+//   if it comes up "radio: up" but never hears / is never heard, RF-switch/RXEN wiring (or a
+//   D-pad→GPIO mismatch in the board variant) is the first suspect. ***
+#  define LORA_SPI_NSS   D4
+#  define LORA_DIO1      D1
+#  define LORA_NRST      D2
+#  define LORA_BUSY      D3
+#  define LORA_SPI_SCK   D8
+#  define LORA_SPI_MISO  D9
+#  define LORA_SPI_MOSI  D10
+#  define LORA_RXEN      D5
+#  define LORA_TCXO_VOLTAGE 1.8f
 #endif
 
 // ---------------------------------------------------------------------------
