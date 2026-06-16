@@ -112,6 +112,7 @@
         <option value="promicro">Pro Micro nRF52840 ("faketec")</option>
         <option value="t1000">SenseCAP T1000-E (LR1110)</option>
         <option value="heltec-v4">Heltec V4 (ESP32 — flash via CLI)</option>
+        <option value="xiao-s3">XIAO ESP32-S3 + Wio-SX1262 (ESP32 — flash via CLI)</option>
       </select></label>
       <label>Firmware base URL<input id="fl_base" style="width:100%" placeholder="(/fw/ — served by the control plane)"></label>
     </div>
@@ -629,7 +630,8 @@ $('#prov_key').onclick=()=>{ if(!ctrlPub){ clog('controller has no key — mint 
 window.addEventListener('pagehide',()=>cfgCloseUsb());
 
 // ===================== FLASH: nRF52 serial DFU to a local node (ported from hub.js) =====================
-const FL_BOARD={rak:'agn-rak',xiao:'agn-xiao',promicro:'agn-promicro',t1000:'agn-t1000'}, FL_ESP={'heltec-v4':'agn-heltec-v4'};
+const FL_BOARD={rak:'agn-rak',xiao:'agn-xiao',promicro:'agn-promicro',t1000:'agn-t1000'}, FL_ESP={'heltec-v4':'agn-heltec-v4','xiao-s3':'agn-xiao-s3'};
+const FL_ESP_ENV={'heltec-v4':'heltec_v4','xiao-s3':'xiao_esp32s3'};   // pio env per ESP board, for the CLI hint
 const FL_RELEASE='/fw/';   // served by agnctl from -fwdir (GitHub is private); override in the field below
 function flog(m){ const l=$('#fl_log'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-200).join('\n'); l.scrollTop=l.scrollHeight; }
 function flState(t,cls){ const e=$('#fl_state'); e.textContent=t; e.className='pill'+(cls?' '+cls:''); }
@@ -644,7 +646,11 @@ async function flDoFlash(port){   // DFU a freshly-picked port (the bootloader)
 // can't reuse the handle — the user must pick it at step ② (which also gives requestPort
 // the fresh user gesture it requires).
 async function flStart(){ const board=$('#fl_board').value; $('#fl_finish').classList.add('hide');
-  if(board in FL_ESP){ flState('ESP32 — flash via CLI'); flog('Heltec V4 is ESP32-S3; the nRF52 serial-DFU path does not apply.'); flog('Flash it with:  pio run -e heltec_v4 -t upload'); return; }
+  if(board in FL_ESP){ const env=FL_ESP_ENV[board]||board; flState('ESP32 — flash via CLI');
+    flog('This is an ESP32 board; the in-browser flasher is nRF52 serial-DFU only and does not apply.');
+    flog('Flash it with:  pio run -e '+env+' -t upload');
+    flog('Tip: send `bootloader` on the node console first to drop straight into USB download mode (no BOOT button).');
+    flog('(In-browser ESP32 flashing would need esptool-js / ESP Web Tools — not wired up yet.)'); return; }
   $('#fl_uf2').classList.remove('hide'); $('#fl_uf2').onclick=()=>window.open(flBase()+FL_BOARD[board]+'.uf2','_blank'); $('#fl_prog').style.width='0';
   if(typeof DFU==='undefined'){ flState('DFU module not loaded','bad'); return; }
   if(!navigator.serial){ flState('Web Serial unsupported — use Chrome/Edge','bad'); return; }
