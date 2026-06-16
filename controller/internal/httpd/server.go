@@ -279,6 +279,8 @@ type stateJSON struct {
 type policyJSON struct {
 	Governor  string `json:"governor"`   // "worst-neighbour" | "connectivity-floor"
 	ConnFloor int    `json:"conn_floor"` // 0 = worst-neighbour, N = keep N gateway-ward uplinks
+	Apply     bool   `json:"apply"`      // true = sending live commands; false = dry-run
+	CanApply  bool   `json:"can_apply"`  // false when there's no controller key (apply is a no-op)
 }
 
 type uiReq struct {
@@ -363,7 +365,8 @@ func (s *Server) Handler() http.Handler {
 		}
 		if s.eng != nil {
 			cf := s.eng.Governor()
-			st.Policy = &policyJSON{Governor: governorName(cf), ConnFloor: cf}
+			st.Policy = &policyJSON{Governor: governorName(cf), ConnFloor: cf,
+				Apply: s.eng.Apply(), CanApply: s.ks != nil}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
@@ -393,6 +396,35 @@ func (s *Server) Handler() http.Handler {
 			label = label + " (keep " + strconv.Itoa(cf) + ")"
 		}
 		writeJSON(w, map[string]any{"ok": true, "msg": "governor → " + label, "conn_floor": cf})
+	})
+	mux.HandleFunc("/api/apply", func(w http.ResponseWriter, r *http.Request) {
+		// Flip the optimiser between dry-run and APPLY (live power commands to the fleet). The UI
+		// guards the enable with a confirm; the server guards against applying with no key.
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.eng == nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "optimiser not running (start agnctl with -optimize)"})
+			return
+		}
+		var req struct {
+			Apply bool `json:"apply"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "bad request"})
+			return
+		}
+		if req.Apply && s.ks == nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "no controller key — APPLY can't send commands; mint/import a key in Settings first"})
+			return
+		}
+		s.eng.SetApply(req.Apply)
+		mode := "dry-run (log only)"
+		if s.eng.Apply() {
+			mode = "APPLY — sending live commands"
+		}
+		writeJSON(w, map[string]any{"ok": true, "msg": "optimiser → " + mode, "apply": s.eng.Apply()})
 	})
 	mux.HandleFunc("/api/ui", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

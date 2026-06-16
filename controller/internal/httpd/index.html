@@ -223,6 +223,10 @@
       </select>
     </div>
     <div class="kv" id="set_gov_now" style="margin-top:.4rem">—</div>
+    <hr style="border:none;border-top:1px solid var(--line);margin:.7rem 0">
+    <div class="kv">Mode: <b id="set_apply_now">—</b></div>
+    <div class="row" style="margin-top:.4rem"><button id="set_apply_btn" class="primary">—</button></div>
+    <div class="kv" id="set_apply_hint" style="margin-top:.3rem;color:var(--dim)">Dry-run logs what it would do; APPLY sends signed power commands to the fleet.</div>
   </div>
   <div class="cfgcard"><h3>Backup</h3>
     <div class="kv">Download the controller key + replay counter + node aliases/positions as one JSON. <b>Keep it secret</b> — it's the network's WRITE key.</div>
@@ -259,7 +263,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const SNR_LIMIT = {5:-2.5,6:-5,7:-7.5,8:-10,9:-12.5,10:-15,11:-17.5,12:-20};
-let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null, selected = null;
+let aliases = {}, positions = {}, gateway = '', hasKey = false, lastOk = 0, view = 'dash', dragging = null, selected = null, applyState = false;
 let nodeNames = {};   // node-reported friendly names (telemetry/info name=), keyed by id
 // Label: a manual dashboard alias wins; else the node's own friendly name; else the hex id.
 const nm = id => aliases[id] || nodeNames[id] || id;
@@ -502,7 +506,13 @@ function render(st){
   // Optimiser governor: reflect the live mode (hide the card if -optimize is off).
   if(st.policy){ $('#set_optcard').style.display=''; const cf=st.policy.conn_floor|0, sel=$('#set_gov');
     if(document.activeElement!==sel) sel.value=String(cf);
-    $('#set_gov_now').textContent='current: '+st.policy.governor+(cf>0?' (keep '+cf+' uplink'+(cf>1?'s':'')+')':''); }
+    $('#set_gov_now').textContent='current: '+st.policy.governor+(cf>0?' (keep '+cf+' uplink'+(cf>1?'s':'')+')':'');
+    applyState=!!st.policy.apply; const can=!!st.policy.can_apply;
+    $('#set_apply_now').innerHTML=applyState?'<span style="color:#ff5c5c">🔴 APPLY — sending live commands</span>':'🟢 dry-run (log only)';
+    const b=$('#set_apply_btn'); b.textContent=applyState?'Switch to dry-run':'Enable APPLY (live commands)';
+    b.disabled=!can; b.style.opacity=can?'1':'.5';
+    b.style.borderColor=applyState?'#ff5c5c':''; b.style.color=applyState?'#ff5c5c':'';
+    $('#set_apply_hint').textContent=can?'Dry-run logs what it would do; APPLY sends signed power commands to the fleet.':'APPLY needs a controller key — mint/import one above first.'; }
   else { $('#set_optcard').style.display='none'; }
   // Header badge: count of nodes needing attention (pending approval) so the operator notices.
   const pendN=hasKey?((st.snapshot?.nodes)||[]).filter(n=>n.acl==='pending').length:0;
@@ -514,6 +524,9 @@ async function tick(){ try{ const r=await fetch('/api/state'); if(r.ok) render(a
 $('#consend').onclick=()=>{ const v=$('#conline').value.trim(); if(v){api('raw',{line:v});$('#conline').value='';} };
 $('#set_gov').onchange=async()=>{ const cf=parseInt($('#set_gov').value)||0;
   try{ const r=await fetch('/api/policy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conn_floor:cf})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); }catch(e){ toast('✗ '+e); } };
+$('#set_apply_btn').onclick=async()=>{ const target=!applyState;
+  if(target && !confirm('Enable APPLY mode?\n\nThe optimiser will send SIGNED POWER COMMANDS to your fleet — nodes will change their TX power for real. Decreases auto-revert in 60s if a node goes unreachable, but this acts on live hardware.\n\nProceed?')) return;
+  try{ const r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apply:target})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); }catch(e){ toast('✗ '+e); } };
 $('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').click(); });
 // ===================== CONFIGURE: direct Web Serial / BLE to a local node =====================
 // Ported from web/manage.html. This talks to a node plugged into THIS machine, not the mesh.

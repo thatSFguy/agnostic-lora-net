@@ -360,6 +360,22 @@ func (e *Engine) Governor() int {
 	return e.cfg.ConnFloor
 }
 
+// SetApply flips the optimiser between dry-run (log only) and APPLY (send live power commands).
+// Safe to call while Tick runs. Applying still requires a controller key — without one Tick's
+// e.ks==nil guard makes apply a no-op, so the dashboard refuses the toggle when there's no key.
+func (e *Engine) SetApply(on bool) {
+	e.mu.Lock()
+	e.apply = on
+	e.mu.Unlock()
+}
+
+// Apply reports whether the optimiser is currently sending live commands (vs dry-run).
+func (e *Engine) Apply() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.apply
+}
+
 // NoteAck records a node's control ACK in the audit trail (correlated by node + time with
 // the decision that triggered it).
 func (e *Engine) NoteAck(now time.Time, node string, applied, provisional int) {
