@@ -53,6 +53,7 @@ func main() {
 		pollMax   = flag.Duration("poll-max", 5*time.Minute, "max telemetry poll interval a stable (unchanging) node backs off to")
 		pollBusy  = flag.Duration("poll-busy-quiet", 8*time.Second, "pause telemetry polling until the mesh has been this quiet of messaging (PKT_DATA/ACK)")
 		summary   = flag.Duration("summary", 10*time.Second, "how often to print a chattiness summary")
+		pruneAge  = flag.Duration("prune-unverified", 10*time.Minute, "auto-remove unverified, non-gateway nodes (e.g. phantoms from a garbled id) not seen for this long; 0 = off")
 		snapshot  = flag.String("snapshot", "", "on exit, write the final topology JSON here")
 		keydir    = flag.String("keydir", "state", "directory holding the controller key + replay counter")
 		importBak = flag.String("import-backup", "", "adopt the controller key from a map-app backup JSON (reuse the browser key)")
@@ -235,12 +236,22 @@ func main() {
 	lines := src.Lines()
 	sumTick := time.NewTicker(*summary)
 	defer sumTick.Stop()
+	// Auto-prune stale unverified phantom nodes (garbled ids over weak links) so they don't clutter
+	// the graph. Verified nodes + the gateway are never pruned. 0 disables.
+	pruneTick := time.NewTicker(time.Minute)
+	defer pruneTick.Stop()
 
 loop:
 	for {
 		select {
 		case <-ctx.Done():
 			break loop
+		case <-pruneTick.C:
+			if gone := graph.Prune(time.Now(), *pruneAge); len(gone) > 0 {
+				for _, id := range gone {
+					fmt.Fprintf(os.Stderr, "pruned unverified phantom node %s (not seen for %s)\n", id, *pruneAge)
+				}
+			}
 		case <-sumTick.C:
 			fmt.Fprintln(os.Stderr, logger.Summary())
 		case line, ok := <-lines:

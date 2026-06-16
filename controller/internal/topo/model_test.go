@@ -1,11 +1,42 @@
 package topo
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"agnostic-lora-net/controller/internal/ingest"
 )
+
+// Prune removes stale UNVERIFIED phantom nodes (garbled ids), but never the gateway or a node
+// with a valid signed announce.
+func TestPruneRemovesStaleUnverifiedPhantoms(t *testing.T) {
+	g := New()
+	t0 := time.Unix(1_000_000, 0)
+	feed(g, t0, "node AAAA0001 neighbors=1 routes=0 blocked=0")           // gateway
+	feed(g, t0, "nbr CCCC0003 q_rx=50 q_tx=40 rssi=-102 snr=0")           // phantom: unverified, a nbr line
+	feed(g, t0, "[ann] BBBB0002 pub="+strings.Repeat("ab", 32)+" sig=ok") // verified real node
+
+	// Nothing stale yet.
+	if got := g.Prune(t0.Add(5*time.Minute), 10*time.Minute); len(got) != 0 {
+		t.Fatalf("nothing should prune at 5min: %v", got)
+	}
+	// Past maxAge: only the unverified phantom is removed.
+	got := g.Prune(t0.Add(11*time.Minute), 10*time.Minute)
+	if len(got) != 1 || got[0] != "CCCC0003" {
+		t.Fatalf("want only CCCC0003 pruned, got %v", got)
+	}
+	present := map[string]bool{}
+	for _, n := range g.Snapshot().Nodes {
+		present[n.ID] = true
+	}
+	if present["CCCC0003"] {
+		t.Fatal("phantom still present after prune")
+	}
+	if !present["AAAA0001"] || !present["BBBB0002"] {
+		t.Fatal("gateway or verified node wrongly pruned")
+	}
+}
 
 // feed parses a console line and folds it into the graph at time t.
 func feed(g *Graph, t time.Time, line string) {

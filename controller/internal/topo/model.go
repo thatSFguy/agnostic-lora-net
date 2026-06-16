@@ -329,6 +329,38 @@ func (g *Graph) ManagedIDs() []string {
 	return ids
 }
 
+// Prune removes stale UNVERIFIED, non-gateway nodes (and their links) — e.g. phantom nodes minted
+// from a garbled id over a weak RF link, which can never produce a valid signed announce. Verified
+// nodes and the gateway are kept regardless of how quiet they've been (a real node that went
+// offline is not junk). Returns the pruned ids for the audit log.
+func (g *Graph) Prune(now time.Time, maxAge time.Duration) []string {
+	if maxAge <= 0 {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var pruned []string
+	gone := map[string]bool{}
+	for id, n := range g.nodes {
+		if n.IsGateway || id == g.Gateway || n.Verified {
+			continue // never prune the gateway or a node with a valid signed announce
+		}
+		if now.Sub(n.LastSeen) <= maxAge {
+			continue // still recent — give a real-but-not-yet-verified node time
+		}
+		delete(g.nodes, id)
+		gone[id] = true
+		pruned = append(pruned, id)
+	}
+	for k, l := range g.links {
+		if gone[l.From] || gone[l.To] {
+			delete(g.links, k)
+		}
+	}
+	sort.Strings(pruned)
+	return pruned
+}
+
 // GatewayID returns the tethered gateway's node id ("" if not yet known). Used by the
 // write API to drive the gateway's BLE directly over the console instead of the mesh.
 func (g *Graph) GatewayID() string {
