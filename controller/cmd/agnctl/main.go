@@ -49,6 +49,9 @@ func main() {
 		baud      = flag.Int("baud", 115200, "serial baud (USB-CDC usually ignores this)")
 		csvPath   = flag.String("csv", "capture.csv", "passive-capture CSV output path")
 		poll      = flag.Bool("poll", true, "on serial: send `trace on` then poll info/nbrdump")
+		pollBase  = flag.Duration("poll-base", 15*time.Second, "telemetry poll interval right after a node changes (adaptive poller floor)")
+		pollMax   = flag.Duration("poll-max", 5*time.Minute, "max telemetry poll interval a stable (unchanging) node backs off to")
+		pollBusy  = flag.Duration("poll-busy-quiet", 8*time.Second, "pause telemetry polling until the mesh has been this quiet of messaging (PKT_DATA/ACK)")
 		summary   = flag.Duration("summary", 10*time.Second, "how often to print a chattiness summary")
 		snapshot  = flag.String("snapshot", "", "on exit, write the final topology JSON here")
 		keydir    = flag.String("keydir", "state", "directory holding the controller key + replay counter")
@@ -143,8 +146,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	act := &activity{}
 	if serial && *poll {
-		go pollLoop(ctx, src, graph)
+		pcfg := defaultPollCfg()
+		pcfg.base, pcfg.max, pcfg.busyQuiet = *pollBase, *pollMax, *pollBusy
+		go pollLoop(ctx, src, graph, act, pcfg)
+		fmt.Fprintf(os.Stderr, "telemetry poll: adaptive %s→%s (×%.1f, mobile≤%s), pause while messaging until %s quiet\n",
+			pcfg.base, pcfg.max, pcfg.factor, pcfg.mobileMax, pcfg.busyQuiet)
 	}
 	if serial && ks != nil {
 		go commandREPL(ctx, src, ks, graph)
@@ -233,6 +241,7 @@ loop:
 			now := time.Now()
 			e, _ := ingest.ParseLine(line)
 			graph.Apply(e, now)
+			act.record(e, now) // track messaging so the poller can yield the channel
 			logger.Log(e, now)
 			if dash != nil {
 				dash.Console(line) // raw console line -> dashboard console pane
@@ -300,43 +309,6 @@ func openSource(port, file string, baud int) (ingest.Source, bool, error) {
 	// Configure/Flash tabs, which don't use the gateway) stays up across node blips.
 	s := ingest.NewReconnectingSerial(port, baud, func(m string) { fmt.Fprintln(os.Stderr, m) })
 	return s, true, nil
-}
-
-func pollLoop(ctx context.Context, src ingest.Source, graph *topo.Graph) {
-	time.Sleep(400 * time.Millisecond)
-	// reinit re-arms per-connection node state: `trace on` (airframe capture) and `anndump`
-	// (the node re-emits every verified `[ann] <id> pub=… sig=ok` binding). The live proof is
-	// printed only once per boot per peer, so without anndump a controller that connects after
-	// that — or reconnects after a node reboot — never learns the identity and leaves the node
-	// "unverified". Sent at startup and periodically so any reconnect self-heals.
-	reinit := func() { _ = src.Send("trace on"); _ = src.Send("anndump") }
-	reinit()
-	t := time.NewTicker(3 * time.Second)
-	defer t.Stop()
-	tick, rr := 0, 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			_ = src.Send("info")
-			if tick%3 == 0 {
-				_ = src.Send("nbrdump")
-			}
-			if tick > 0 && tick%20 == 0 { // ~every 60s: resync after any silent reconnect
-				reinit()
-			}
-			// Round-robin one remote telemetry query per tick. The reply (a routed `[status] N`
-			// + its `nbr …` table) feeds the mesh-wide topology the optimiser needs to tune
-			// nodes that can't reach the gateway directly. One per tick keeps airtime modest;
-			// each known node is polled every (3s × node-count).
-			if ids := graph.ManagedIDs(); len(ids) > 0 {
-				_ = src.Send("status " + ids[rr%len(ids)])
-				rr++
-			}
-			tick++
-		}
-	}
 }
 
 // commandREPL reads controller commands from stdin and pushes signed control messages to
