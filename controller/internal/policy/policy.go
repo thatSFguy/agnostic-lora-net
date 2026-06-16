@@ -73,11 +73,19 @@ type Config struct {
 	// left to fade, so the node can turn down. 1 = keep a single best uplink (most aggressive);
 	// 2 = keep one backup. 0 = classic worst-neighbour. See engine.go observeConnFloor.
 	ConnFloor int
+
+	// Criticality: when true, harden links proportional to how much routed traffic crosses them.
+	// The controller computes all-pairs quality-weighted (cost=1/q) shortest paths over the live
+	// link graph — the same metric the firmware's DV uses — and raises a node's target margin band
+	// by ReserveDB × (governing link's normalised load). Backbone links self-harden; leaf/mobile
+	// links keep trimming. 0 load => no reserve, so it never penalises a true leaf.
+	Criticality bool
+	ReserveDB   float64 // max extra margin (dB) added to a fully-loaded (load=1.0) link
 }
 
 func DefaultConfig() Config {
 	return Config{MarginLow: 6, MarginHigh: 12, MaxStep: 3, PowerMin: -9, PowerMax: 22, DefaultSF: 9, SeedPower: 22,
-		MobileReserve: 6, MobileUpStep: 5, MobileLowerStep: 1, MobileLowerHold: 3}
+		MobileReserve: 6, MobileUpStep: 5, MobileLowerStep: 1, MobileLowerHold: 3, ReserveDB: 8}
 }
 
 // Observation is what we know about one managed node this cycle: the worst-case view of
@@ -93,6 +101,7 @@ type Observation struct {
 	Mobile  bool    // node self-reports it moves — higher reserve band, raise fast / trim slow
 	GovPeer string  // receiver of the governing (weakest) link, for the audit log
 	FloorNote string // connectivity-floor: audit note (which uplink governs, how many links faded); "" in classic mode
+	Load    float64 // criticality: normalised routed load [0,1] of the GOVERNING link (0 = no reserve)
 }
 
 // Action is the verdict for one node.
@@ -120,6 +129,8 @@ type Decision struct {
 	Soft      bool    `json:"soft,omitempty"`    // governing margin estimated from quality, not measured SNR
 	Mobile    bool    `json:"mobile,omitempty"`  // node flagged mobile — reserve band, raise fast / trim slow
 	Governs   string  `json:"governs,omitempty"` // receiver of the weakest outbound link
+	Load      float64 `json:"load,omitempty"`    // criticality: routed load of the governing link [0,1]
+	Reserve   float64 `json:"reserve,omitempty"` // criticality: extra margin (dB) added for that load
 }
 
 func clampI8(v, lo, hi int8) int8 {
@@ -143,12 +154,20 @@ func Decide(obs Observation, curTarget int8, cfg Config) Decision {
 		return d
 	}
 	margin := obs.Margin // already the worst-link margin (min over outbound links)
-	d.HeardSNR, d.Margin = obs.SNR, margin
+	d.HeardSNR, d.Margin, d.Load = obs.SNR, margin, obs.Load
 
 	// Mobile nodes target a higher band (movement reserve) and respond asymmetrically: raise
 	// fast (big step), trim slow (small step). The trim is further gated to N consecutive
 	// over-band cycles in the engine — this just sets the per-cycle band/steps.
 	low, high := cfg.MarginLow, cfg.MarginHigh
+	// Criticality reserve: harden a loaded backbone link by shifting its whole band up, so the node
+	// holds more power to keep it robust. 0 load (a leaf) => no shift, so leaves still trim freely.
+	if cfg.Criticality && obs.Load > 0 {
+		r := cfg.ReserveDB * obs.Load
+		low += r
+		high += r
+		d.Reserve = r
+	}
 	upStep, downStep := cfg.MaxStep, cfg.MaxStep
 	if obs.Mobile {
 		low += cfg.MobileReserve

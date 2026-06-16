@@ -59,14 +59,6 @@ type Server struct {
 // at startup after the engine is built (it's constructed after this Server).
 func (s *Server) SetEngine(e *policy.Engine) { s.eng = e }
 
-// governorName maps a ConnFloor setting to a human label for the UI.
-func governorName(connFloor int) string {
-	if connFloor <= 0 {
-		return "worst-neighbour"
-	}
-	return "connectivity-floor"
-}
-
 // New builds the server. uiPath persists aliases + map positions ("" = in-memory only).
 // fwDir is the directory of firmware packages served at /fw/ ("" disables it).
 func New(graph *topo.Graph, ks *keystore.Store, send func(string) error, uiPath, fwDir string) *Server {
@@ -277,10 +269,9 @@ type stateJSON struct {
 }
 
 type policyJSON struct {
-	Governor  string `json:"governor"`   // "worst-neighbour" | "connectivity-floor"
-	ConnFloor int    `json:"conn_floor"` // 0 = worst-neighbour, N = keep N gateway-ward uplinks
-	Apply     bool   `json:"apply"`      // true = sending live commands; false = dry-run
-	CanApply  bool   `json:"can_apply"`  // false when there's no controller key (apply is a no-op)
+	Apply    bool             `json:"apply"`    // true = sending live commands; false = dry-run
+	CanApply bool             `json:"can_apply"` // false when there's no controller key (apply is a no-op)
+	Tune     []policy.TuneSpec `json:"tune"`     // all runtime-tunable knobs (data-driven UI)
 }
 
 type uiReq struct {
@@ -364,38 +355,40 @@ func (s *Server) Handler() http.Handler {
 			st.Allowlist = s.ks.Allowlist()
 		}
 		if s.eng != nil {
-			cf := s.eng.Governor()
-			st.Policy = &policyJSON{Governor: governorName(cf), ConnFloor: cf,
-				Apply: s.eng.Apply(), CanApply: s.ks != nil}
+			st.Policy = &policyJSON{Apply: s.eng.Apply(), CanApply: s.ks != nil, Tune: s.eng.Tunables()}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
 	})
-	mux.HandleFunc("/api/policy", func(w http.ResponseWriter, r *http.Request) {
-		// Switch the optimiser governor at runtime: conn_floor 0 = worst-neighbour, N>=1 =
-		// connectivity-floor keeping N uplinks. No restart needed.
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/api/tune", func(w http.ResponseWriter, r *http.Request) {
+		// Generic runtime tuning. GET -> every knob's spec+value; POST {key,value} -> set one.
+		// New knobs appear here automatically (see policy.tuneKnobs). No restart needed.
 		if s.eng == nil {
 			writeJSON(w, map[string]any{"ok": false, "msg": "optimiser not running (start agnctl with -optimize)"})
 			return
 		}
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{"ok": true, "tune": s.eng.Tunables()})
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+			return
+		}
 		var req struct {
-			ConnFloor int `json:"conn_floor"`
+			Key   string  `json:"key"`
+			Value float64 `json:"value"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]any{"ok": false, "msg": "bad request"})
 			return
 		}
-		s.eng.SetConnFloor(req.ConnFloor)
-		cf := s.eng.Governor()
-		label := governorName(cf)
-		if cf > 0 {
-			label = label + " (keep " + strconv.Itoa(cf) + ")"
+		spec, err := s.eng.SetTune(req.Key, req.Value)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": err.Error()})
+			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "msg": "governor → " + label, "conn_floor": cf})
+		writeJSON(w, map[string]any{"ok": true, "msg": spec.Label + " set", "spec": spec})
 	})
 	mux.HandleFunc("/api/apply", func(w http.ResponseWriter, r *http.Request) {
 		// Flip the optimiser between dry-run and APPLY (live power commands to the fleet). The UI

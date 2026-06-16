@@ -213,17 +213,9 @@
     <div class="kv">pubkey: <b id="set_pub" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all">—</b></div>
     <div class="kv" style="margin-top:.4rem">Provision nodes with this key (Configure → Provisioning, or <code>ctrlkey &lt;pubkey&gt;</code> on the node).</div>
   </div>
-  <div class="cfgcard" id="set_optcard"><h3>Optimizer governor</h3>
-    <div class="kv">How the power optimiser picks each node's binding constraint. Applies live — no restart.</div>
-    <div class="row" style="margin-top:.5rem">
-      <select id="set_gov">
-        <option value="0">Worst-neighbour — satisfy every link (conservative)</option>
-        <option value="1">Connectivity-floor — keep 1 uplink (most aggressive)</option>
-        <option value="2">Connectivity-floor — keep 2 uplinks (1 backup)</option>
-        <option value="3">Connectivity-floor — keep 3 uplinks</option>
-      </select>
-    </div>
-    <div class="kv" id="set_gov_now" style="margin-top:.4rem">—</div>
+  <div class="cfgcard" id="set_optcard"><h3>Optimizer tuning</h3>
+    <div class="kv">All knobs apply live — no restart. Hover a row for what it does.</div>
+    <div id="set_tune" style="margin-top:.5rem"></div>
     <hr style="border:none;border-top:1px solid var(--line);margin:.7rem 0">
     <div class="kv">Mode: <b id="set_apply_now">—</b></div>
     <div class="row" style="margin-top:.4rem"><button id="set_apply_btn" class="primary">—</button></div>
@@ -504,10 +496,9 @@ function render(st){
   ctrlPub=st.pub||'';
   $('#prov_pub').textContent=ctrlPub||'(controller has no key — mint/import one)';
   $('#set_pub').textContent=ctrlPub||'(no key — read-only)';
-  // Optimiser governor: reflect the live mode (hide the card if -optimize is off).
-  if(st.policy){ $('#set_optcard').style.display=''; const cf=st.policy.conn_floor|0, sel=$('#set_gov');
-    if(document.activeElement!==sel) sel.value=String(cf);
-    $('#set_gov_now').textContent='current: '+st.policy.governor+(cf>0?' (keep '+cf+' uplink'+(cf>1?'s':'')+')':'');
+  // Optimiser: data-driven tuning knobs + the apply toggle (hide the card if -optimize is off).
+  if(st.policy){ $('#set_optcard').style.display='';
+    renderTune(st.policy.tune||[]);
     applyState=!!st.policy.apply; const can=!!st.policy.can_apply;
     $('#set_apply_now').innerHTML=applyState?'<span style="color:#ff5c5c">🔴 APPLY — sending live commands</span>':'🟢 dry-run (log only)';
     const b=$('#set_apply_btn'); b.textContent=applyState?'Switch to dry-run':'Enable APPLY (live commands)';
@@ -523,8 +514,33 @@ function render(st){
 }
 async function tick(){ try{ const r=await fetch('/api/state'); if(r.ok) render(await r.json()); }catch(e){} if(Date.now()-lastOk>6000)$('#stale').textContent='● controller not responding'; }
 $('#consend').onclick=()=>{ const v=$('#conline').value.trim(); if(v){api('raw',{line:v});$('#conline').value='';} };
-$('#set_gov').onchange=async()=>{ const cf=parseInt($('#set_gov').value)||0;
-  try{ const r=await fetch('/api/policy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conn_floor:cf})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); }catch(e){ toast('✗ '+e); } };
+// Data-driven optimiser tuning: render one control per knob from /api/tune specs. Build the
+// structure once; afterwards only sync values (skip a control the user is editing) so the 6s poll
+// never clobbers an in-progress change. New knobs added server-side appear here automatically.
+let tuneKeys='';
+async function setTune(key,value){
+  try{ const r=await fetch('/api/tune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+(j.msg||'')); }catch(e){ toast('✗ '+e); } }
+function renderTune(specs){
+  const box=$('#set_tune'); if(!box) return;
+  const keys=specs.map(s=>s.key).join(',');
+  if(keys!==tuneKeys){            // (re)build structure
+    tuneKeys=keys;
+    box.innerHTML=specs.map(s=>{
+      let ctrl;
+      if(s.kind==='enum'){ ctrl=`<select data-tune="${s.key}">`+s.options.map((o,i)=>`<option value="${i}">${o}</option>`).join('')+`</select>`; }
+      else if(s.kind==='bool'){ ctrl=`<input type="checkbox" data-tune="${s.key}" data-bool="1">`; }
+      else { ctrl=`<input type="number" data-tune="${s.key}" min="${s.min}" max="${s.max}" step="${s.step||1}" style="width:72px">`+(s.unit?`<span class="dim"> ${s.unit}</span>`:''); }
+      return `<div class="row" style="margin:.25rem 0;align-items:center" title="${(s.help||'').replace(/"/g,'&quot;')}"><span style="flex:1;font-size:12.5px">${s.label}</span>${ctrl}</div>`;
+    }).join('');
+    box.querySelectorAll('[data-tune]').forEach(el=>{
+      el.onchange=()=>setTune(el.dataset.tune, el.dataset.bool?(el.checked?1:0):parseFloat(el.value));
+    });
+  }
+  specs.forEach(s=>{             // sync values without clobbering an in-progress edit
+    const el=box.querySelector('[data-tune="'+s.key+'"]'); if(!el||el===document.activeElement) return;
+    if(s.kind==='bool') el.checked=!!s.value; else el.value=s.value;
+  });
+}
 $('#set_apply_btn').onclick=async()=>{ const target=!applyState;
   if(target && !confirm('Enable APPLY mode?\n\nThe optimiser will send SIGNED POWER COMMANDS to your fleet — nodes will change their TX power for real. Decreases auto-revert in 60s if a node goes unreachable, but this acts on live hardware.\n\nProceed?')) return;
   try{ const r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apply:target})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); }catch(e){ toast('✗ '+e); } };

@@ -225,6 +225,47 @@ func TestEngineSerialisesPowerChanges(t *testing.T) {
 	}
 }
 
+// Criticality: a loaded backbone link gets a margin reserve, so a node that would normally trim
+// instead holds it up. Same margin, opposite verdict depending on the link's routed load.
+func TestCriticalityReserveHardensLoadedLink(t *testing.T) {
+	cfg := DefaultConfig() // band [6,12], reserve_db 8
+	obs := Observation{Node: "NODE0001", SF: 9, HasObs: true, Margin: 13, SNR: 0.5, GovPeer: "PEER0002"}
+	// Baseline: margin 13 is above the band -> Lower (trim the loud link).
+	if d := Decide(obs, 10, cfg); d.Action != Lower {
+		t.Fatalf("baseline margin 13: want Lower, got %v", d.Action)
+	}
+	// Fully-loaded backbone link + criticality on: band shifts up +8 to [14,20], so margin 13 is
+	// now BELOW band -> Raise (keep the backbone robust) with the reserve recorded.
+	cfg.Criticality = true
+	obs.Load = 1.0
+	d := Decide(obs, 10, cfg)
+	if d.Action != Raise || d.Reserve != 8 {
+		t.Fatalf("loaded backbone: want Raise +8dB reserve, got action=%v reserve=%v", d.Action, d.Reserve)
+	}
+}
+
+// The generic tuning registry: list knobs, set one, clamp to range, reject unknown.
+func TestTuneRegistry(t *testing.T) {
+	eng := NewEngine(DefaultConfig(), newLogger(t), nil, nil, false, time.Minute, time.Hour)
+	if len(eng.Tunables()) == 0 {
+		t.Fatal("no tunables registered")
+	}
+	if _, err := eng.SetTune("governor", 2); err != nil {
+		t.Fatalf("set governor: %v", err)
+	}
+	if s, err := eng.SetTune("reserve_db", 999); err != nil || s.Value != 15 { // clamp to Max
+		t.Fatalf("clamp reserve_db: err=%v val=%v", err, s.Value)
+	}
+	if _, err := eng.SetTune("nope", 1); err == nil {
+		t.Fatal("unknown key should error")
+	}
+	for _, s := range eng.Tunables() {
+		if s.Key == "governor" && s.Value != 2 {
+			t.Fatalf("governor not reflected: %v", s.Value)
+		}
+	}
+}
+
 // A node reachable only by quality-only (telemetry) links: a weak one raises (low q is
 // trustworthy), but a "loud" one holds — the q->SNR estimate saturates, so we never trim
 // power blind on it.

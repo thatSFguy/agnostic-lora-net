@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -11,6 +12,88 @@ import (
 	"agnostic-lora-net/controller/internal/sign"
 	"agnostic-lora-net/controller/internal/topo"
 )
+
+// linkLoad computes the routed "load" of every directed fresh+usable link: the share of all-pairs
+// quality-weighted shortest paths that cross it, normalised to [0,1]. Per-link cost is 1/q — the
+// SAME metric the firmware's DV uses (tx_cost = 1/q_tx) — so the paths it counts are the ones the
+// mesh actually routes data over (shortcuts included). Keyed "from>to". Empty when no graph.
+func linkLoad(snap topo.Snapshot, now time.Time, fresh time.Duration) map[string]float64 {
+	type edge struct {
+		to   string
+		cost float64
+	}
+	adj := map[string][]edge{}
+	nodes := map[string]struct{}{}
+	for _, l := range snap.Links {
+		if now.Sub(l.At) >= fresh {
+			continue
+		}
+		q := l.Q
+		if q <= 0 {
+			if l.RSSI == 0 {
+				continue // no quality and no measurement — unusable
+			}
+			q = 0.5 // measured but no q reported — assume mid
+		}
+		if q < 0.05 {
+			q = 0.05 // clamp so a near-dead link is costly but finite (matches firmware Q_MIN)
+		}
+		adj[l.From] = append(adj[l.From], edge{l.To, 1.0 / q})
+		nodes[l.From], nodes[l.To] = struct{}{}, struct{}{}
+	}
+	load := map[string]float64{}
+	for src := range nodes {
+		dist := map[string]float64{}
+		prev := map[string]string{}
+		visited := map[string]bool{}
+		for id := range nodes {
+			dist[id] = math.Inf(1)
+		}
+		dist[src] = 0
+		for {
+			u, best := "", math.Inf(1)
+			for id := range nodes {
+				if !visited[id] && dist[id] < best {
+					best, u = dist[id], id
+				}
+			}
+			if u == "" {
+				break
+			}
+			visited[u] = true
+			for _, e := range adj[u] {
+				if nd := dist[u] + e.cost; nd < dist[e.to] {
+					dist[e.to], prev[e.to] = nd, u
+				}
+			}
+		}
+		for dst := range nodes {
+			if dst == src || math.IsInf(dist[dst], 1) {
+				continue
+			}
+			for cur := dst; cur != src; {
+				p, ok := prev[cur]
+				if !ok {
+					break
+				}
+				load[p+">"+cur]++
+				cur = p
+			}
+		}
+	}
+	max := 0.0
+	for _, v := range load {
+		if v > max {
+			max = v
+		}
+	}
+	if max > 0 {
+		for k := range load {
+			load[k] /= max
+		}
+	}
+	return load
+}
 
 // Engine runs the policy each cycle against a topology snapshot, tracking the power it
 // targets per node and managing the decrease->confirm safety dance. All I/O goes through
@@ -266,6 +349,10 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 	if e.cfg.ConnFloor > 0 {
 		gwAdj = adjUndirected(snap, now, e.fresh)
 	}
+	var load map[string]float64 // criticality: routed load per directed link
+	if e.cfg.Criticality {
+		load = linkLoad(snap, now, e.fresh)
+	}
 	type cand struct {
 		id  string
 		d   Decision
@@ -291,6 +378,9 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 			obs = observe(snap, n.ID, sf, now, e.fresh)
 		}
 		obs.Mobile = n.Mobile // the node self-reports mobility in telemetry (mob=1)
+		if load != nil && obs.GovPeer != "" {
+			obs.Load = load[n.ID+">"+obs.GovPeer] // routed load of THIS node's governing link
+		}
 
 		cur, seeded := e.targets[n.ID]
 		if !seeded {
@@ -306,6 +396,9 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		d := Decide(obs, cur, e.cfg)
 		if obs.FloorNote != "" {
 			d.Reason += " | " + obs.FloorNote // connectivity-floor audit trail
+		}
+		if d.Reserve > 0 {
+			d.Reason += fmt.Sprintf(" | load %.0f%% → +%.1fdB reserve", d.Load*100, d.Reserve)
 		}
 
 		// Mobile slow-trim hysteresis: only trim a mobile node after MobileLowerHold consecutive
@@ -393,25 +486,6 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		out = append(out, d)
 	}
 	return out
-}
-
-// SetConnFloor switches the governor at runtime: 0 = classic worst-neighbour, N>=1 =
-// connectivity-floor keeping N gateway-ward uplinks. Safe to call from the dashboard while
-// Tick runs (shares e.mu with Tick, which reads cfg.ConnFloor).
-func (e *Engine) SetConnFloor(n int) {
-	if n < 0 {
-		n = 0
-	}
-	e.mu.Lock()
-	e.cfg.ConnFloor = n
-	e.mu.Unlock()
-}
-
-// Governor returns the current ConnFloor setting (0 = worst-neighbour, N = keep N uplinks).
-func (e *Engine) Governor() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.cfg.ConnFloor
 }
 
 // SetApply flips the optimiser between dry-run (log only) and APPLY (send live power commands).

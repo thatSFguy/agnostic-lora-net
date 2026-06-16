@@ -68,6 +68,8 @@ func main() {
 		marginHi  = flag.Float64("margin-high", 12, "lower power above this SNR margin (dB)")
 		maxStep   = flag.Int("max-step", 3, "max dBm power change per cycle")
 		connFloor = flag.Int("conn-floor", 0, "EXPERIMENTAL connectivity-floor governor: keep each node's best N gateway-ward uplinks (+ any link a dependent peer needs) and let redundant weak links a repeater already covers fade (0 = off / classic worst-neighbour; 1 = single best uplink; 2 = keep one backup)")
+		critical  = flag.Bool("criticality", false, "harden links proportional to routed traffic (backbone links carrying many all-pairs shortest paths get extra margin and resist trimming)")
+		reserveDB = flag.Float64("reserve-db", 8, "with -criticality: max extra margin (dB) added to a fully-loaded backbone link (scales with the link's routed load)")
 		heartbeat = flag.Duration("heartbeat", 2*time.Hour, "re-assert held nodes this often (keeps their flash-default watchdog fresh; must be < the node's 6h window)")
 		httpAddr  = flag.String("http", "", "serve the live dashboard on this address (e.g. :8080)")
 		fwDir     = flag.String("fwdir", "../web/fw", "directory of firmware packages to serve at /fw/ for the dashboard Flash tab")
@@ -195,6 +197,7 @@ func main() {
 		cfg.MarginLow, cfg.MarginHigh, cfg.MaxStep = *marginLo, *marginHi, int8(*maxStep)
 		cfg.ConnFloor = *connFloor
 		cfg.Settle = *settle
+		cfg.Criticality, cfg.ReserveDB = *critical, *reserveDB
 		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat)
 		if dash != nil {
 			dash.SetEngine(eng) // let the dashboard read/switch the governor at runtime
