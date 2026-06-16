@@ -341,6 +341,25 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 	return out
 }
 
+// SetConnFloor switches the governor at runtime: 0 = classic worst-neighbour, N>=1 =
+// connectivity-floor keeping N gateway-ward uplinks. Safe to call from the dashboard while
+// Tick runs (shares e.mu with Tick, which reads cfg.ConnFloor).
+func (e *Engine) SetConnFloor(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.mu.Lock()
+	e.cfg.ConnFloor = n
+	e.mu.Unlock()
+}
+
+// Governor returns the current ConnFloor setting (0 = worst-neighbour, N = keep N uplinks).
+func (e *Engine) Governor() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cfg.ConnFloor
+}
+
 // NoteAck records a node's control ACK in the audit trail (correlated by node + time with
 // the decision that triggered it).
 func (e *Engine) NoteAck(now time.Time, node string, applied, provisional int) {

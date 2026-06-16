@@ -212,6 +212,18 @@
     <div class="kv">pubkey: <b id="set_pub" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all">—</b></div>
     <div class="kv" style="margin-top:.4rem">Provision nodes with this key (Configure → Provisioning, or <code>ctrlkey &lt;pubkey&gt;</code> on the node).</div>
   </div>
+  <div class="cfgcard" id="set_optcard"><h3>Optimizer governor</h3>
+    <div class="kv">How the power optimiser picks each node's binding constraint. Applies live — no restart.</div>
+    <div class="row" style="margin-top:.5rem">
+      <select id="set_gov">
+        <option value="0">Worst-neighbour — satisfy every link (conservative)</option>
+        <option value="1">Connectivity-floor — keep 1 uplink (most aggressive)</option>
+        <option value="2">Connectivity-floor — keep 2 uplinks (1 backup)</option>
+        <option value="3">Connectivity-floor — keep 3 uplinks</option>
+      </select>
+    </div>
+    <div class="kv" id="set_gov_now" style="margin-top:.4rem">—</div>
+  </div>
   <div class="cfgcard"><h3>Backup</h3>
     <div class="kv">Download the controller key + replay counter + node aliases/positions as one JSON. <b>Keep it secret</b> — it's the network's WRITE key.</div>
     <a class="primary" style="display:inline-block;margin-top:.5rem;padding:4px 10px;border:1px solid var(--acc);border-radius:6px;text-decoration:none;color:var(--txt)" href="/api/backup" download="agnlora-controller-backup.json">⤓ Download backup</a>
@@ -487,6 +499,11 @@ function render(st){
   ctrlPub=st.pub||'';
   $('#prov_pub').textContent=ctrlPub||'(controller has no key — mint/import one)';
   $('#set_pub').textContent=ctrlPub||'(no key — read-only)';
+  // Optimiser governor: reflect the live mode (hide the card if -optimize is off).
+  if(st.policy){ $('#set_optcard').style.display=''; const cf=st.policy.conn_floor|0, sel=$('#set_gov');
+    if(document.activeElement!==sel) sel.value=String(cf);
+    $('#set_gov_now').textContent='current: '+st.policy.governor+(cf>0?' (keep '+cf+' uplink'+(cf>1?'s':'')+')':''); }
+  else { $('#set_optcard').style.display='none'; }
   // Header badge: count of nodes needing attention (pending approval) so the operator notices.
   const pendN=hasKey?((st.snapshot?.nodes)||[]).filter(n=>n.acl==='pending').length:0;
   $('#tab_sec_badge').textContent=pendN?pendN:'';
@@ -495,6 +512,8 @@ function render(st){
 }
 async function tick(){ try{ const r=await fetch('/api/state'); if(r.ok) render(await r.json()); }catch(e){} if(Date.now()-lastOk>6000)$('#stale').textContent='● controller not responding'; }
 $('#consend').onclick=()=>{ const v=$('#conline').value.trim(); if(v){api('raw',{line:v});$('#conline').value='';} };
+$('#set_gov').onchange=async()=>{ const cf=parseInt($('#set_gov').value)||0;
+  try{ const r=await fetch('/api/policy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conn_floor:cf})}); const j=await r.json(); toast((j.ok?'✓ ':'✗ ')+j.msg); }catch(e){ toast('✗ '+e); } };
 $('#conline').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#consend').click(); });
 // ===================== CONFIGURE: direct Web Serial / BLE to a local node =====================
 // Ported from web/manage.html. This talks to a node plugged into THIS machine, not the mesh.

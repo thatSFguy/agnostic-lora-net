@@ -193,6 +193,9 @@ func main() {
 		cfg.MarginLow, cfg.MarginHigh, cfg.MaxStep = *marginLo, *marginHi, int8(*maxStep)
 		cfg.ConnFloor = *connFloor
 		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat)
+		if dash != nil {
+			dash.SetEngine(eng) // let the dashboard read/switch the governor at runtime
+		}
 		mode := "dry-run (log only)"
 		if *apply {
 			mode = "APPLY"

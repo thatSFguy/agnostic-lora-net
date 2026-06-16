@@ -52,6 +52,19 @@ type Server struct {
 	mu      sync.Mutex
 	events  []policy.Record
 	console []string
+	eng     *policy.Engine // optimiser, for runtime governor switching ("" if -optimize off)
+}
+
+// SetEngine attaches the optimiser so the dashboard can read/switch its governor. Called once
+// at startup after the engine is built (it's constructed after this Server).
+func (s *Server) SetEngine(e *policy.Engine) { s.eng = e }
+
+// governorName maps a ConnFloor setting to a human label for the UI.
+func governorName(connFloor int) string {
+	if connFloor <= 0 {
+		return "worst-neighbour"
+	}
+	return "connectivity-floor"
 }
 
 // New builds the server. uiPath persists aliases + map positions ("" = in-memory only).
@@ -260,6 +273,12 @@ type stateJSON struct {
 	HasKey    bool                 `json:"has_key"`
 	Pub       string               `json:"pub,omitempty"`
 	Allowlist map[string]int64     `json:"allowlist,omitempty"` // approved pubkeyHex → approval unix-secs
+	Policy    *policyJSON          `json:"policy,omitempty"`    // optimiser mode (nil if -optimize off)
+}
+
+type policyJSON struct {
+	Governor  string `json:"governor"`   // "worst-neighbour" | "connectivity-floor"
+	ConnFloor int    `json:"conn_floor"` // 0 = worst-neighbour, N = keep N gateway-ward uplinks
 }
 
 type uiReq struct {
@@ -342,8 +361,38 @@ func (s *Server) Handler() http.Handler {
 			st.Pub = s.ks.PubHex()
 			st.Allowlist = s.ks.Allowlist()
 		}
+		if s.eng != nil {
+			cf := s.eng.Governor()
+			st.Policy = &policyJSON{Governor: governorName(cf), ConnFloor: cf}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
+	})
+	mux.HandleFunc("/api/policy", func(w http.ResponseWriter, r *http.Request) {
+		// Switch the optimiser governor at runtime: conn_floor 0 = worst-neighbour, N>=1 =
+		// connectivity-floor keeping N uplinks. No restart needed.
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.eng == nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "optimiser not running (start agnctl with -optimize)"})
+			return
+		}
+		var req struct {
+			ConnFloor int `json:"conn_floor"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "msg": "bad request"})
+			return
+		}
+		s.eng.SetConnFloor(req.ConnFloor)
+		cf := s.eng.Governor()
+		label := governorName(cf)
+		if cf > 0 {
+			label = label + " (keep " + strconv.Itoa(cf) + ")"
+		}
+		writeJSON(w, map[string]any{"ok": true, "msg": "governor → " + label, "conn_floor": cf})
 	})
 	mux.HandleFunc("/api/ui", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
