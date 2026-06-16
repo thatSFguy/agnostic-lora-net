@@ -2280,31 +2280,6 @@ static void enter_bootloader() {
 #endif
 }
 
-#ifdef AGN_BTN_PIN
-// Long-press the board user button (AGN_BTN_PIN, active-low) to enter the flash bootloader, so a
-// reflash never needs the buried on-board BOOT button. Long-press only (>= AGN_BTN_HOLD_MS) so a
-// stray tap can't drop a live node into download mode. Polled from the loop; non-blocking.
-#  ifndef AGN_BTN_HOLD_MS
-#    define AGN_BTN_HOLD_MS 2500
-#  endif
-static void button_poll() {
-    static uint32_t down_ms = 0;
-    static bool     fired   = false;
-    if (digitalRead(AGN_BTN_PIN) == LOW) {       // pressed
-        if (!down_ms) { down_ms = millis(); fired = false; }
-        else if (!fired && (uint32_t)(millis() - down_ms) >= AGN_BTN_HOLD_MS) {
-            fired = true;                         // one-shot; release resets
-            g_con->println("[btn] long-press -> entering bootloader");
-            g_con->flush();
-            delay(150);
-            enter_bootloader();                   // does not return
-        }
-    } else {
-        down_ms = 0;                              // released
-    }
-}
-#endif
-
 static void handle_command(char* line) {
     Print& Serial = *g_con;   // route command output to the source transport (USB or BLE)
     char* cmd = strtok(line, " ");
@@ -2790,9 +2765,6 @@ extern "C" __attribute__((naked)) void HardFault_Handler(void) {
 void setup() {
     boot_ms = millis();
     Serial.begin(115200);
-#ifdef AGN_BTN_PIN
-    pinMode(AGN_BTN_PIN, INPUT_PULLUP);   // board user button -> long-press enters bootloader
-#endif
 #ifdef LED_BUILTIN
     pinMode(LED_BUILTIN, OUTPUT); led_off();   // heartbeat / radio-fault indicator (see loop & below)
 #endif
@@ -2885,9 +2857,6 @@ void setup() {
 }
 
 static void agn_loop_once() {
-#ifdef AGN_BTN_PIN
-    button_poll();   // long-press the board button -> flash bootloader (non-blocking)
-#endif
     // 0) Bring-up heartbeat: a line every ~3 s so a monitor opened at any moment
     //    sees the node is alive (and whether it has found neighbours), without
     //    waiting for the ~10 s beacon cadence.
