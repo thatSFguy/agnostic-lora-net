@@ -25,11 +25,22 @@ type Engine struct {
 	fresh     time.Duration
 	heartbeat time.Duration // re-assert a held node this often (keeps its #3 watchdog fresh)
 
-	targets  map[string]int8      // power the controller currently targets per node
-	pending  map[string]int8      // nodes whose decrease awaits a CONFIRM (value = power)
-	miss     map[string]int       // cycles a pending node has been unreachable
-	lastSent map[string]time.Time // last time we sent any command to a node
-	overband map[string]int       // mobile nodes: consecutive over-band cycles (slow-trim gate)
+	targets      map[string]int8      // power the controller currently targets per node
+	pending      map[string]int8      // nodes whose decrease awaits a CONFIRM (value = power)
+	miss         map[string]int       // cycles a pending node has been unreachable
+	lastSent     map[string]time.Time // last time we sent any command to a node
+	overband     map[string]int       // mobile nodes: consecutive over-band cycles (slow-trim gate)
+	lastMutation time.Time            // last time ANY node's power was changed (for Settle serialisation)
+}
+
+// mutationPriority ranks which single node gets to change in a serialised cycle: RAISES
+// (under-powered, marginal links) always outrank LOWERS (optimisation); within each, the more
+// out-of-band wins (most-marginal raise / loudest lower).
+func mutationPriority(d Decision) float64 {
+	if d.Action == Raise {
+		return 1e6 - d.Margin // any raise >> any lower; lower margin (more marginal) ranks higher
+	}
+	return d.Margin // lowers: loudest (highest margin) first
 }
 
 func NewEngine(cfg Config, log *Logger, ks *keystore.Store, send func(string) error, apply bool, fresh, heartbeat time.Duration) *Engine {
@@ -248,20 +259,24 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		}
 	}
 
-	// 2) Decide per managed (non-gateway) node.
-	// Connectivity-floor mode needs the whole-mesh adjacency to tell each node's redundant links
-	// from the ones it must keep — build it once per cycle.
+	// 2) Decide per managed (non-gateway) node — compute every decision first, then apply AT MOST
+	// ONE power change per Settle window (serialise mutations so two neighbours never retune under
+	// each other). Connectivity-floor needs whole-mesh adjacency; build it once per cycle.
 	var gwAdj map[string][]string
 	if e.cfg.ConnFloor > 0 {
 		gwAdj = adjUndirected(snap, now, e.fresh)
 	}
-	var out []Decision
+	type cand struct {
+		id  string
+		d   Decision
+		cur int8
+	}
+	var cands []cand
 	for _, n := range snap.Nodes {
 		if n.IsGateway || n.ID == snap.Gateway {
 			continue
 		}
-		// ACL: when membership is configured, only tune verified-and-allowed nodes. ACL=="" means
-		// no ACL (replay / no key) → manage everything, as before identity landed.
+		// ACL: when membership is configured, only tune verified-and-allowed nodes.
 		if n.ACL != "" && n.ACL != "allowed" {
 			continue
 		}
@@ -293,9 +308,8 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 			d.Reason += " | " + obs.FloorNote // connectivity-floor audit trail
 		}
 
-		// Mobile slow-trim hysteresis: only trim a mobile node after MobileLowerHold
-		// consecutive over-band cycles, so a transient strong reading from a moving node
-		// (it'll drift again) doesn't cut its movement headroom. Raises are never gated.
+		// Mobile slow-trim hysteresis: only trim a mobile node after MobileLowerHold consecutive
+		// over-band cycles, so a transient strong reading from a moving node doesn't cut its headroom.
 		if obs.Mobile && d.Action == Lower {
 			e.overband[n.ID]++
 			if e.overband[n.ID] < e.cfg.MobileLowerHold {
@@ -307,30 +321,70 @@ func (e *Engine) Tick(snap topo.Snapshot, now time.Time) []Decision {
 		} else {
 			delete(e.overband, n.ID)
 		}
+		cands = append(cands, cand{n.ID, d, cur})
+	}
 
+	// Serialisation: when Settle>0, pick the single node allowed to change this cycle, and only once
+	// the previous change has had Settle to settle. Raises outrank lowers (mutationPriority).
+	// Settle==0 disables it — every change applies each cycle (the original behaviour).
+	serialize := e.cfg.Settle > 0
+	pick := -1
+	if serialize && now.Sub(e.lastMutation) >= e.cfg.Settle {
+		for i := range cands {
+			if a := cands[i].d.Action; a != Lower && a != Raise {
+				continue
+			}
+			if pick < 0 || mutationPriority(cands[i].d) > mutationPriority(cands[pick].d) {
+				pick = i
+			}
+		}
+	}
+
+	var out []Decision
+	for i := range cands {
+		id, cur := cands[i].id, cands[i].cur
+		d := cands[i].d
 		var ctr uint32
 		applied := false
-		if e.apply && e.ks != nil && (d.Action == Lower || d.Action == Raise) {
-			if c, err := e.ks.Next(); err == nil {
-				if line, err := commander.Power(parseHexID(n.ID), d.NewTarget, c, e.ks.Priv()); err == nil && e.send(line) == nil {
-					applied, ctr = true, c
-					e.lastSent[n.ID] = now
-					e.targets[n.ID] = d.NewTarget // controller owns the power; track what we set
-					if d.Action == Lower {
-						e.pending[n.ID] = d.NewTarget // a decrease must be CONFIRMed next cycle
-						e.miss[n.ID] = 0
+		isChange := d.Action == Lower || d.Action == Raise
+		switch {
+		case isChange && serialize && i != pick:
+			// Not this node's turn — defer until the RF settles.
+			wait := e.cfg.Settle - now.Sub(e.lastMutation)
+			if wait < 0 {
+				wait = 0
+			}
+			was := d.Action
+			d.Action, d.Delta, d.NewTarget = Hold, 0, cur
+			d.Reason = fmt.Sprintf("serialised: %s deferred — one change per %s, RF settling (%.0fs left)", was, e.cfg.Settle, wait.Seconds())
+		case isChange:
+			// Apply this change (not serialising, or this is the chosen node).
+			if e.apply && e.ks != nil {
+				if c, err := e.ks.Next(); err == nil {
+					if line, err := commander.Power(parseHexID(id), d.NewTarget, c, e.ks.Priv()); err == nil && e.send(line) == nil {
+						applied, ctr = true, c
+						e.lastSent[id] = now
+						e.targets[id] = d.NewTarget // controller owns the power; track what we set
+						if d.Action == Lower {
+							e.pending[id] = d.NewTarget // a decrease must be CONFIRMed next cycle
+							e.miss[id] = 0
+						}
+						if serialize {
+							e.lastMutation = now
+						}
 					}
 				}
+			} else if serialize {
+				e.lastMutation = now // dry-run: advance the window so the log previews the cadence
 			}
-		} else if e.apply && e.ks != nil && d.Action == Hold && e.heartbeat > 0 {
-			// Heartbeat: re-assert a held node's runtime power so its node-side #3 watchdog
-			// doesn't expire and snap it back to the loud flash default. Only for nodes we've
-			// actually commanded (lastSent set).
-			if t, ok := e.lastSent[n.ID]; ok && now.Sub(t) >= e.heartbeat {
+		case d.Action == Hold && e.apply && e.ks != nil && e.heartbeat > 0:
+			// Heartbeat: re-assert a held node's runtime power so its #3 watchdog doesn't expire
+			// and snap it to the loud flash default. Not an RF change — never gated by Settle.
+			if t, ok := e.lastSent[id]; ok && now.Sub(t) >= e.heartbeat {
 				if c, err := e.ks.Next(); err == nil {
-					if line, err := commander.Power(parseHexID(n.ID), cur, c, e.ks.Priv()); err == nil && e.send(line) == nil {
-						e.lastSent[n.ID] = now
-						e.log.Event(now, "heartbeat", n.ID, fmt.Sprintf("re-assert %ddBm (keep node watchdog fresh)", cur))
+					if line, err := commander.Power(parseHexID(id), cur, c, e.ks.Priv()); err == nil && e.send(line) == nil {
+						e.lastSent[id] = now
+						e.log.Event(now, "heartbeat", id, fmt.Sprintf("re-assert %ddBm (keep node watchdog fresh)", cur))
 					}
 				}
 			}

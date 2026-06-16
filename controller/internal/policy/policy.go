@@ -23,7 +23,10 @@
 // Everything it observes and decides is logged (JSONL + console) for troubleshooting.
 package policy
 
-import "math"
+import (
+	"math"
+	"time"
+)
 
 // SNRLimit is the demodulation floor (dB) per spreading factor — the same table the map
 // app uses. Margin = observed SNR - this.
@@ -55,6 +58,12 @@ type Config struct {
 	MobileUpStep    int8    // raise step for mobile (fast up); <=0 falls back to MaxStep
 	MobileLowerStep int8    // trim step for mobile (slow down)
 	MobileLowerHold int     // consecutive over-band cycles before a mobile node is trimmed
+
+	// Settle serialises power changes: the engine applies AT MOST ONE node's power change per this
+	// window, deferring every other wanted change until the RF has settled. Prevents two (or many)
+	// neighbours retuning under each other — the greedy-floor oscillation. 0 = off (apply every
+	// change each cycle). Confirms/heartbeats are not RF changes and are never gated by this.
+	Settle time.Duration
 
 	// ConnFloor (experimental, off by default). When > 0, a node's power is governed not by its
 	// single weakest neighbour (classic worst-neighbour) but by the weakest link it must KEEP for

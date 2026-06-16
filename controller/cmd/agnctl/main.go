@@ -62,6 +62,7 @@ func main() {
 		apply     = flag.Bool("apply", false, "with -optimize: actually send commands (default is dry-run, log only)")
 		polLog    = flag.String("policy-log", "policy.jsonl", "policy decision audit trail (JSONL)")
 		polEvery  = flag.Duration("policy-interval", 15*time.Second, "optimisation cycle interval")
+		settle    = flag.Duration("settle", 3*time.Minute, "serialise power changes: apply at most ONE node's change per this window, letting the RF settle between (so neighbours never retune at once). 0 = off (all changes each cycle)")
 		marginLo  = flag.Float64("margin-low", 6, "raise power below this SNR margin (dB)")
 		marginHi  = flag.Float64("margin-high", 12, "lower power above this SNR margin (dB)")
 		maxStep   = flag.Int("max-step", 3, "max dBm power change per cycle")
@@ -192,6 +193,7 @@ func main() {
 		cfg := policy.DefaultConfig()
 		cfg.MarginLow, cfg.MarginHigh, cfg.MaxStep = *marginLo, *marginHi, int8(*maxStep)
 		cfg.ConnFloor = *connFloor
+		cfg.Settle = *settle
 		eng = policy.NewEngine(cfg, plog, ks, src.Send, *apply, 3*(*polEvery), *heartbeat)
 		if dash != nil {
 			dash.SetEngine(eng) // let the dashboard read/switch the governor at runtime
@@ -204,8 +206,12 @@ func main() {
 		if *connFloor > 0 {
 			governor = fmt.Sprintf("connectivity-floor (keep %d uplink(s))", *connFloor)
 		}
-		fmt.Fprintf(os.Stderr, "optimiser: %s, band [%.0f,%.0f] dB, ≤%d dB/cycle every %s, governor=%s → %s\n",
-			mode, *marginLo, *marginHi, *maxStep, *polEvery, governor, *polLog)
+		serial := "off (all changes each cycle)"
+		if *settle > 0 {
+			serial = fmt.Sprintf("one change per %s", *settle)
+		}
+		fmt.Fprintf(os.Stderr, "optimiser: %s, band [%.0f,%.0f] dB, ≤%d dB/cycle every %s, governor=%s, serialise=%s → %s\n",
+			mode, *marginLo, *marginHi, *maxStep, *polEvery, governor, serial, *polLog)
 		go func() {
 			t := time.NewTicker(*polEvery)
 			defer t.Stop()

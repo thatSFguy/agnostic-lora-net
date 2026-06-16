@@ -178,6 +178,53 @@ func TestEngineConnFloorDisabledMatchesClassic(t *testing.T) {
 	}
 }
 
+// Serialisation: with Settle>0 and two loud nodes both wanting to lower, only ONE changes per
+// settle window; the other is deferred until the window elapses — so neighbours never retune at once.
+func TestEngineSerialisesPowerChanges(t *testing.T) {
+	now := time.Now()
+	s := topo.Snapshot{
+		Gateway: gwID,
+		Nodes: []topo.Node{
+			{ID: gwID, IsGateway: true},
+			{ID: aID, SF: 9, Power: 22}, // loud -> wants to lower
+			{ID: nID, SF: 9, Power: 22}, // loud -> wants to lower
+		},
+		Links: []topo.Link{
+			{From: aID, To: gwID, RSSI: -42, SNR: 9, At: now},
+			{From: nID, To: gwID, RSSI: -42, SNR: 9, At: now},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.Settle = time.Minute
+	// fresh window > the test's 90s span so the static links don't age out (in production beacons
+	// keep links fresh every ~25s, so the settle window never outruns freshness).
+	eng := NewEngine(cfg, newLogger(t), nil, nil, false, 10*time.Minute, time.Hour)
+
+	count := func(ds []Decision) (lowers, serDefers int) {
+		for _, d := range ds {
+			if d.Action == Lower {
+				lowers++
+			}
+			if d.Action == Hold && strings.Contains(d.Reason, "serialised") {
+				serDefers++
+			}
+		}
+		return
+	}
+	// t0: exactly one lowers, the other is serialised-deferred.
+	if l, sd := count(eng.Tick(s, now)); l != 1 || sd != 1 {
+		t.Fatalf("t0: want 1 lower + 1 serialised defer, got lowers=%d defers=%d", l, sd)
+	}
+	// t0+30s (inside the 60s window): nothing changes.
+	if l, _ := count(eng.Tick(s, now.Add(30*time.Second))); l != 0 {
+		t.Fatalf("within settle window a change leaked: %d lowers", l)
+	}
+	// t0+90s (window elapsed): one node changes again.
+	if l, _ := count(eng.Tick(s, now.Add(90*time.Second))); l != 1 {
+		t.Fatalf("after settle: want exactly 1 lower, got %d", l)
+	}
+}
+
 // A node reachable only by quality-only (telemetry) links: a weak one raises (low q is
 // trustworthy), but a "loud" one holds — the q->SNR estimate saturates, so we never trim
 // power blind on it.
