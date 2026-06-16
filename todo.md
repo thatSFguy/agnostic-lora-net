@@ -145,3 +145,7 @@ existing toggle to the signed control plane* + the confirmation gate, not new BL
       link/config time — fewer concurrent connections, smaller ATT table, shorter event length →
       lower `RAM_START` → relink for a few KB back. Build-time only; lower priority than the
       relay-only buffer trim.
+
+- [x] **Controller optimiser is now runtime-tunable (2026-06-15).** Connectivity-floor governor
+      (`-conn-floor`), adaptive telemetry polling (back off stable nodes + yield to messaging),
+      and a live governor + dry-run↔APPLY selector in the dashboard Settings tab.
