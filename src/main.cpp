@@ -2991,10 +2991,11 @@ static void agn_loop_once() {
 }
 
 #if defined(ESP32)
-// On ESP32 the Arduino loopTask already runs with an 8 KB stack
-// (CONFIG_ARDUINO_LOOP_STACK_SIZE) — ample for the deepest paths below — so the real
-// loop runs inline with no extra task. (Contrast the nRF52 path: its core gives
-// loop() only a 4 KB stack, forcing the dedicated task spawned below.)
+// The Arduino loopTask's DEFAULT 8 KB stack (CONFIG_ARDUINO_LOOP_STACK_SIZE) is NOT enough: v2's
+// Ed25519 announce-verify is the deepest path and overflows it — the S3 hits "Stack canary
+// watchpoint triggered (loopTask)" right after boot. Match the nRF path's 16 KB. The macro
+// overrides the core's loopTask stack and must sit at global scope. RAM is ample (S3 has PSRAM).
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 void loop() { agn_loop_once(); }
 #else
 // The Adafruit core hard-codes loop()'s stack at LOOP_STACK_SZ = 1024 words (4 KB,
