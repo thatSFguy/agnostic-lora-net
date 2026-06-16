@@ -2290,17 +2290,23 @@ static void enter_bootloader() {
 static void button_poll() {
     static uint32_t down_ms = 0;
     static bool     fired   = false;
-    if (digitalRead(AGN_BTN_PIN) == LOW) {       // pressed
-        if (!down_ms) { down_ms = millis(); fired = false; }
-        else if (!fired && (uint32_t)(millis() - down_ms) >= AGN_BTN_HOLD_MS) {
-            fired = true;                         // one-shot; release resets
-            g_con->println("[btn] long-press -> entering bootloader");
-            g_con->flush();
-            delay(150);
-            enter_bootloader();                   // does not return
-        }
-    } else {
-        down_ms = 0;                              // released
+    static bool     armed   = false;   // SAFETY: require one RELEASED (HIGH) reading before any
+                                       // press counts. If the pin idles LOW (not actually a button
+                                       // on this unit, wrong GPIO, or an LED), we must NEVER
+                                       // auto-enter the bootloader at boot — which would brick the
+                                       // node's console (this exact regression, fixed here).
+    if (digitalRead(AGN_BTN_PIN) == HIGH) {       // released
+        armed = true; down_ms = 0; fired = false;
+        return;
+    }
+    if (!armed) return;                           // never seen released -> ignore the LOW level
+    if (!down_ms) down_ms = millis();             // press started (after a real release)
+    else if (!fired && (uint32_t)(millis() - down_ms) >= AGN_BTN_HOLD_MS) {
+        fired = true;                             // one-shot; release re-arms
+        g_con->println("[btn] long-press -> entering bootloader");
+        g_con->flush();
+        delay(150);
+        enter_bootloader();                       // does not return
     }
 }
 #endif
