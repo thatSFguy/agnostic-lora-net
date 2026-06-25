@@ -195,8 +195,10 @@ function gwUp(label) {
     if (tick % 3 === 0) setTimeout(() => gw && gw.sendLine('nbrdump').catch(()=>{}), 1200);
     if (tick % 12 === 0) setTimeout(() => gw && gw.sendLine('rf show').catch(()=>{}), 2400);
     if (tick % 12 === 6) setTimeout(() => gw && gw.sendLine('battdump').catch(()=>{}), 2400);
-    if (tick % 12 === 9) {              // STATUS round-robin: one remote node per minute
-      const remotes = [...nodes.keys()].filter(id => id !== gatewayId && positions[id]);
+    if (tick % 4 === 2) {               // STATUS round-robin: ~one remote node every 20 s
+      // Poll every discovered remote (not just placed ones) so names / fw / battery populate
+      // for the whole node list — placement is for the map, not for knowing a node's name.
+      const remotes = [...nodes.keys()].filter(id => id !== gatewayId);
       if (remotes.length) {
         const t = remotes[rrIdx++ % remotes.length];
         setTimeout(() => gw && gw.sendLine('status ' + t).catch(()=>{}), 2400);
