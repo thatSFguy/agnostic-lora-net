@@ -1,15 +1,11 @@
 <!DOCTYPE html>
-<!-- flash.html — AgnLoRa STANDALONE commissioning hub (offline / no-controller use).
-     When a controller is running, the same Flash + Configure live in the agnctl dashboard
-     (localhost:8080, Flash/Configure tabs) — that's the primary path now. This hub stays
-     for flashing/provisioning without agnctl. Firmware is served same-origin from ./fw/
-     (the GitHub Pages deploy and refresh_web_fw.sh both stage it there); the GitHub release
-     URL is an optional fallback. Flash, provision, and hand off to management, all in one
-     page. Needs a secure context (HTTPS or localhost) for Web Serial / Web Bluetooth.
-
-     Flash:    in-browser nRF52 serial DFU (web/nrf-dfu.js), UF2 drag-drop fallback.
-     Provision: BLE PIN + controller pubkey (`ctrlkey`) -> node ready for remote admin.
-     Manage:   the live mesh map (map.html).                                          -->
+<!-- flash.html — AgnLoRa commissioning hub: flash a board, then provision & fully
+     configure it on ONE connected page (Provision step): controller key, BLE PIN,
+     node name, radio PHY, battery calibration, mobility, console. Firmware is served
+     same-origin from ./fw/ (the GitHub Pages deploy + refresh_web_fw.sh stage it there);
+     the GitHub release URL is an optional fallback. Needs a secure context (HTTPS or
+     localhost) for Web Serial / Web Bluetooth. Flashing uses in-browser nRF52 serial DFU
+     (web/nrf-dfu.js) with a UF2 drag-drop fallback. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -27,12 +23,13 @@
   nav { display:flex; gap:4px; margin-left:auto; }
   nav button { background:transparent; border:1px solid transparent; color:var(--dim);
                padding:7px 14px; border-radius:8px; cursor:pointer; font-size:14px; }
-  nav button.on { background:#21304a; color:var(--fg); border-color:var(--line); }
+  nav button:hover { color:var(--fg); border-color:var(--line); }
   main { max-width:840px; margin:0 auto; padding:22px 20px 60px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
           padding:18px 20px; margin:0 0 18px; }
   h2 { font-size:15px; margin:0 0 4px; } h3 { font-size:13px; color:var(--dim); text-transform:uppercase;
        letter-spacing:.05em; margin:18px 0 8px; }
+  h3:first-child { margin-top:0; }
   p.hint { color:var(--dim); font-size:13.5px; margin:4px 0 12px; }
   button.act { background:#21304a; color:var(--fg); border:1px solid var(--line); border-radius:8px;
                padding:9px 16px; font-size:14px; cursor:pointer; }
@@ -50,15 +47,26 @@
   .steps div.done { color:var(--ok); border-color:var(--ok); }
   .bar { height:10px; background:#0e1722; border-radius:6px; overflow:hidden; margin:10px 0; }
   .bar > div { height:100%; width:0; background:var(--acc); transition:width .2s; }
-  #log { font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim); white-space:pre-wrap;
+  #log, #provLog { font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim); white-space:pre-wrap;
          background:#0b1118; border-radius:8px; padding:10px; max-height:200px; overflow:auto; margin-top:10px; }
   .pill { padding:2px 9px; border-radius:11px; font-size:12px; background:#26303d; color:var(--dim); }
-  .pill.ok { color:var(--ok); } .pill.bad { color:var(--bad); }
+  .pill.ok { color:var(--ok); } .pill.bad { color:var(--bad); } .pill.warn { color:var(--warn); }
   .mono { font-family:ui-monospace,monospace; }
   code { background:#0e1722; padding:1px 6px; border-radius:5px; font-size:13px; }
   a { color:var(--acc); }
   .hide { display:none; }
   .ok-box { background:#11261a; border:1px solid #2c5e3c; border-radius:10px; padding:14px 16px; }
+  /* manager component styles (dark) */
+  .pinbox { background:#0a2540; border:1px solid var(--line); border-radius:10px; padding:12px 16px;
+            margin:10px 0; text-align:center; }
+  .pinbig { font-family:ui-monospace,monospace; font-size:2.1rem; letter-spacing:.35rem; font-weight:bold; color:#fff; }
+  .powerbox { background:#13233b; border:1px solid var(--line); border-radius:10px; padding:12px 16px;
+              margin:10px 0; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .powerbox input[type=range] { flex:1; min-width:12rem; }
+  .pwrval { font-family:ui-monospace,monospace; font-size:1.5rem; font-weight:bold; min-width:5rem; text-align:right; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(11rem,1fr)); gap:12px 16px; margin:8px 0 12px; }
+  .grid label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--dim); }
+  .grid input, .grid select { width:100%; }
 </style>
 </head>
 <body>
@@ -66,19 +74,16 @@
   <h1>AgnLoRa</h1><span class="sub">node commissioning hub</span>
   <nav>
     <button onclick="location.href='index.html'">↩ All tools</button>
-    <button id="nav-flash" class="on" onclick="showTab('flash')">Flash &amp; Provision</button>
-    <button id="nav-manage" onclick="showTab('manage')">Manage</button>
     <button onclick="location.href='map.html'">Map ↗</button>
   </nav>
 </header>
 <main>
 
-<!-- ============================ FLASH & PROVISION ============================ -->
 <section id="tab-flash">
   <div class="steps">
     <div id="st-1" class="on">1 · Board</div>
     <div id="st-2">2 · Flash</div>
-    <div id="st-3">3 · Provision</div>
+    <div id="st-3">3 · Provision &amp; configure</div>
     <div id="st-4">4 · Ready</div>
   </div>
 
@@ -106,7 +111,7 @@
       blocked by cross-origin rules).</p>
     <div class="row">
       <button class="act primary" onclick="doFlash()">Connect &amp; flash →</button>
-      <button class="act" onclick="setStep(3)">Skip — already flashed, just provision →</button>
+      <button class="act" onclick="setStep(3)">Skip — already flashed, just configure →</button>
     </div>
   </div>
 
@@ -122,39 +127,129 @@
         bootloader drive, then drag the firmware file onto it. Click Continue when the drive disappears.</p>
       <div class="row">
         <button class="act" id="dlUf2">Download firmware (.uf2)</button>
-        <button class="act primary" onclick="afterFlash()">Continue → provision</button>
+        <button class="act primary" onclick="afterFlash()">Continue → configure</button>
       </div>
     </div>
   </div>
 
-  <!-- step 3 provision -->
-  <div class="card hide" id="step3">
-    <h2>Provision for remote administration</h2>
-    <p class="hint">Connect to the freshly-flashed node and set it up so you can manage it remotely:
-      a BLE pairing PIN and this browser’s controller key (which authorizes signed remote commands
-      like power changes).</p>
-    <div class="row">
-      <button class="act" id="provConnectUsb">Connect (USB)</button>
-      <button class="act" id="provConnectBle">Connect (BLE)</button>
-      <span id="provNode" class="pill">not connected</span>
+  <!-- step 3 : provision & full configuration, one connection -->
+  <div class="hide" id="step3">
+    <div class="card">
+      <h2>Provision &amp; configure</h2>
+      <p class="hint">Connect to the node, then everything below acts on it. <b>USB</b> (Web Serial)
+        configures any node, including BLE security. <b>BLE</b> (Web Bluetooth) works on an
+        already-paired node with BLE enabled — BLE can’t change its own security, so enable/PIN
+        changes still need USB.</p>
+      <div class="row">
+        <button class="act" id="provConnectUsb">Connect (USB)</button>
+        <button class="act" id="provConnectBle">Connect (BLE)</button>
+        <span id="provNode" class="pill">not connected</span>
+        <span id="provFw" class="pill">fw —</span>
+      </div>
     </div>
-    <h3>1 · BLE pairing PIN <span id="ck-pin" class="pill">pending</span></h3>
-    <div class="row">
-      <input type="text" id="pin" maxlength="6" placeholder="6 digits" value="123456" style="width:8rem">
-      <button class="act" id="setPin">Set PIN &amp; enable BLE</button>
+
+    <div class="card">
+      <h3>Controller key — remote admin <span id="ck-key" class="pill">pending</span></h3>
+      <p class="hint">This browser’s Ed25519 public key. Provisioning it authorizes signed remote
+        commands (power, block, retune). <span class="mono" id="pubShort"></span></p>
+      <button class="act" id="provKey">Provision controller key</button>
     </div>
-    <h3>2 · Controller key (remote admin) <span id="ck-key" class="pill">pending</span></h3>
-    <p class="hint">This browser’s Ed25519 public key. Provisioning it lets you change this node’s
-      settings remotely (signed). <span class="mono" id="pubShort"></span></p>
-    <button class="act" id="provKey">Provision controller key</button>
-    <h3>3 · Radio (optional) <span id="ck-rf" class="pill">unchanged</span></h3>
-    <div class="row">
-      <label>SF <select id="sf"><option>7</option><option>8</option><option selected>9</option><option>10</option><option>11</option><option>12</option></select></label>
-      <label>Power <input type="number" id="pwr" value="22" min="-9" max="22" style="width:5rem"> dBm</label>
-      <button class="act" id="applyRf">Apply</button>
+
+    <div class="card">
+      <h3>Node name</h3>
+      <p class="hint">A friendly name — becomes the BLE advertised name and the alias shown in the
+        controller / dashboards instead of the hex id. Max 20 chars; blank = <code>ALN-&lt;id&gt;</code>.</p>
+      <div class="row">
+        <input type="text" id="name_in" placeholder="e.g. Rob's Gateway" maxlength="20" style="width:18rem">
+        <button class="act" id="name_set">Set name</button>
+        <button class="act" id="name_clear">Clear</button>
+      </div>
     </div>
-    <div id="provLog" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dim);
-         white-space:pre-wrap;background:#0b1118;border-radius:8px;padding:10px;max-height:160px;overflow:auto;margin-top:12px"></div>
+
+    <div class="card">
+      <h3>BLE pairing PIN <span id="ck-pin" class="pill">pending</span></h3>
+      <div class="pinbox">
+        <div class="hint" style="margin:0">BLE pairing PIN</div>
+        <div class="pinbig" id="pin">— — — — — —</div>
+        <div class="hint" id="advstate" style="margin:0">BLE: off</div>
+      </div>
+      <div class="row">
+        <button class="act" id="enable">① Enable BLE</button>
+        <button class="act" id="disable">Disable BLE</button>
+        <button class="act" id="newpin">② New random PIN</button>
+        <input type="text" id="setpin" placeholder="6 digits" maxlength="6" inputmode="numeric" style="width:8rem">
+        <button class="act" id="setbtn">Set PIN</button>
+      </div>
+      <p class="hint">③ On your phone: pair with <b>ALN-…</b> and enter the PIN above.</p>
+    </div>
+
+    <div class="card">
+      <h3>Radio (PHY)</h3>
+      <p class="hint">The node’s <b>current</b> settings (read on connect). All nodes must share
+        frequency / bandwidth / SF / coding-rate / sync to hear each other.</p>
+      <p class="hint" style="color:var(--warn)">⚠ Changing <b>frequency, bandwidth or SF</b> retunes
+        this node — it drops off-air from any node still on the old settings. <b>TX power</b> is safe
+        to change on its own.</p>
+      <div class="powerbox">
+        <div>TX&nbsp;Power</div>
+        <input id="rf_pwr" type="range" min="-9" max="22" step="1" value="14">
+        <span class="pwrval"><span id="rf_pwr_val">14</span> dBm</span>
+      </div>
+      <div class="grid">
+        <label>Frequency (MHz)<input id="rf_freq" type="number" step="0.001" min="137" max="1020"></label>
+        <label>Bandwidth (kHz)<select id="rf_bw">
+          <option>7.81</option><option>10.42</option><option>15.63</option><option>20.83</option>
+          <option>31.25</option><option>41.67</option><option>62.5</option><option>125</option>
+          <option>250</option><option>500</option></select></label>
+        <label>Spreading factor<select id="rf_sf">
+          <option>5</option><option>6</option><option>7</option><option>8</option>
+          <option>9</option><option>10</option><option>11</option><option>12</option></select></label>
+        <label>Coding rate<select id="rf_cr">
+          <option value="5">4/5</option><option value="6">4/6</option>
+          <option value="7">4/7</option><option value="8">4/8</option></select></label>
+        <label>Sync word (hex)<input id="rf_sync" maxlength="2" placeholder="4D"></label>
+        <label>Preamble (symbols)<input id="rf_pre" type="number" min="6" max="255"></label>
+      </div>
+      <div class="row">
+        <button class="act primary" id="rf_apply">Apply radio settings</button>
+        <button class="act" id="rf_reload">Reload from node</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Battery calibration</h3>
+      <div class="row">
+        <span class="hint" style="margin:0">reading: <b id="batt_val">—</b></span>
+        <button class="act" id="batt_read">Read now</button>
+        <input id="batt_mv" type="number" step="0.01" placeholder="measured V (4.02) or mV (4020)" style="width:16rem">
+        <button class="act" id="batt_cal">Calibrate</button>
+      </div>
+      <p class="hint">Measure the battery with a meter, enter the value, then Calibrate. The node
+        derives its ADC scale from that one reading, stores it in flash (survives firmware updates),
+        and reports battery as mV + % from then on.</p>
+    </div>
+
+    <div class="card">
+      <h3>Mobility</h3>
+      <div class="row">
+        <span class="hint" style="margin:0">this node is: <b id="mob_val">—</b></span>
+        <button class="act" id="mob_fixed">📍 Fixed</button>
+        <button class="act" id="mob_mobile">🚗 Mobile</button>
+      </div>
+      <p class="hint">Flag a node that moves around. The controller gives it a higher margin reserve
+        and an asymmetric loop — raises power fast when the link weakens, trims slowly — versus a
+        fixed node it optimises straight down. Stored in flash and reported in telemetry.</p>
+    </div>
+
+    <div class="card">
+      <h3>Console</h3>
+      <div class="row">
+        <input type="text" id="cmd" placeholder="console command (info, rf show, help …)" style="flex:1">
+        <button class="act" id="cmdsend">Send</button>
+      </div>
+      <div id="provLog"></div>
+    </div>
+
     <div class="row" style="margin-top:14px">
       <button class="act" id="verifyProv">Verify provisioning</button>
       <button class="act primary" onclick="markReady()">Done → mark ready</button>
@@ -165,7 +260,7 @@
   <div class="card hide" id="step4">
     <div class="ok-box">
       <h2>✓ <span id="readyNode"></span> is ready for remote administration</h2>
-      <p class="hint" style="margin-bottom:0">Flashed, BLE-paired, and bound to this controller key.
+      <p class="hint" style="margin-bottom:0">Flashed, configured, and bound to this controller key.
         Deploy it, then place it on the <a href="map.html">map</a> to monitor and manage it remotely.
         Flashed two or more nodes? <a href="chat-demo.html">Open the chat demo</a> to message
         across the mesh and confirm it works.</p>
@@ -176,16 +271,6 @@
       <button class="act" onclick="location.href='chat-demo.html'">Chat demo ↗</button>
     </div>
   </div>
-</section>
-
-<!-- ================================ CONFIGURE ================================ -->
-<section id="tab-manage" class="hide">
-  <p class="hint" style="margin:.2rem 0 .6rem">Full node manager — connect one node over USB or BLE
-    to set its name, BLE PIN, radio PHY, battery calibration and mobility, or drive the raw console.
-    For live multi-node monitoring use the <a href="map.html">map</a>.</p>
-  <iframe id="manageFrame" title="Node manager"
-          allow="serial; bluetooth"
-          style="width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:#0f1620"></iframe>
 </section>
 
 </main>

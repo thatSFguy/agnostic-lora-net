@@ -98,7 +98,8 @@ controller/README.md      Tier-1 controller: flags, margins, step, cadence, key 
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
 web/chat-demo.html        Web Bluetooth clear-text chat demo: phone/laptop ⇄ BLE ⇄ mesh
-web/manage.html           Web Serial/BT node manager: BLE PIN · radio config · battery calibration
+web/flash.html            Web Serial/BT commissioning hub: flash + provision & configure
+                          (controller key · BLE PIN · radio · battery · mobility · console)
 web/map.html              live mesh map (Leaflet): nodes on real geography, per-direction link
                           quality/asymmetry/SNR margin, battery badges, gateway console
 docs/INTEGRATING-AGNOSTIC-LORA-NET.md  third-party integration guide
@@ -231,8 +232,9 @@ Req 1.
 
 **Pairing is PIN-secured.** The UART requires `SECMODE_ENC_WITH_MITM`, BLE is off by
 default, and a 6-digit pairing PIN is set per node. Management is **out-of-band over USB**
-(you can't configure BLE security over BLE itself) via `web/manage.html` (Web Serial):
-**Connect → Enable BLE → read the PIN → pair your phone with it.** Console equivalents:
+(you can't configure BLE security over BLE itself) via `web/flash.html`'s Provision &
+configure step (Web Serial): **Connect → Enable BLE → read the PIN → pair your phone with
+it.** Console equivalents:
 `ble on|off`, `blepin [random|<6 digits>]`. The PIN is shown **on demand only**
 (never in periodic output).
 
@@ -255,14 +257,14 @@ python3 -m http.server 8000        # then open http://localhost:8000/web/
 
 - **`web/index.html`** — landing page: a simple menu that routes to the apps below (served at
   the GitHub Pages site root).
-- **`web/flash.html`** — commissioning hub, two tabs: **Flash & Provision** (in-browser nRF52
-  serial DFU via `web/nrf-dfu.js`, a byte-faithful port of adafruit-nrfutil, with UF2 fallback,
-  plus BLE-PIN + controller-key provisioning) and **Manage** (the full node manager below,
-  embedded). The firmware source defaults to the local `./fw/`; the GitHub release URL is an
-  optional fallback.
-- **`web/manage.html`** — node manager: radio PHY (with retune warning), battery calibration,
-  BLE pairing/PIN, the mobile flag, raw console. Works standalone and is embedded as the
-  flasher's **Manage** tab.
+- **`web/flash.html`** — commissioning hub: **flash** a board (in-browser nRF52 serial DFU via
+  `web/nrf-dfu.js`, a byte-faithful port of adafruit-nrfutil, with UF2 fallback) then **provision
+  & configure** it on one connected page — controller key, BLE PIN, node name, radio PHY (with
+  retune warning), battery calibration, mobility, and a raw console. ("Skip — already flashed,
+  just configure" jumps straight to that page for an existing node.) The firmware source defaults
+  to the local `./fw/`; the GitHub release URL is an optional fallback.
+- **`web/manage.html`** — the standalone node manager was folded into `flash.html`'s
+  Provision & configure step; this file now just redirects there.
 - **`web/map.html`** — gateway-centric mesh map (Leaflet, real geography): per-direction link
   quality/asymmetry/SNR-margin, battery badges, gateway console.
 - **`web/chat-demo.html`** — Web Bluetooth **clear-text chat demo**: flash a couple of nodes,
