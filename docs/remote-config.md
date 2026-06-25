@@ -33,7 +33,7 @@ node deaf to the network. TX power is the one PHY knob that is always safe to tu
 independently.
 
 Edits are **staged** (`rf <field> <val>`) and committed atomically with `rf apply`,
-which reconfigures the SX1262 and persists the result (save-if-dirty, Agent.md Req 4).
+which reconfigures the SX1262 and persists the result (save-if-dirty, to minimise flash wear).
 `rf revert` discards staged edits; `rf default` stages the compile-time network
 defaults. `rf show` prints the active config in a machine-parseable line:
 

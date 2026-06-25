@@ -1,6 +1,6 @@
 // link_metric.h — turn a single received frame's RF stats into a link quality.
 //
-// The metric model is from the routing sandbox (Agent.md §6): derive a
+// The metric model is from the routing sandbox: derive a
 // per-direction quality q ∈ [0,1] from RSSI/SNR. LoRa demodulation is
 // SNR-limited, so SNR is the primary signal; RSSI only guards against the
 // pathological "decoded but absurdly weak" case.

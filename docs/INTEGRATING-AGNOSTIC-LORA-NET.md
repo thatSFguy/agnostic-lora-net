@@ -10,7 +10,7 @@ into its context first.
 **Sources of truth** (this doc summarizes them; they win on conflict):
 - `agnostic-lora-net/docs/tcp-bridge.md` — wire contract (envelope, HDLC, reliability)
 - `agnostic-lora-net/docs/mobile-app-testing.md` — phone-transport contract + test plan
-- `agnostic-lora-net/docs/distributed-lookup-plan.md` — the directory (identity addressing)
+- `agnostic-lora-net/docs/identity-vs-locator.md` — addressing model (locators vs identity hashes)
 - This repo — a complete, field-tested Kotlin implementation (file map in §11)
 
 **Tested against:** node firmware **0.4.6**, this app **v1.2.56** (2026-06-11).

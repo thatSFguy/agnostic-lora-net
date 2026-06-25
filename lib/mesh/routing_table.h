@@ -1,7 +1,7 @@
-// routing_table.h — distance-vector routes with per-direction cost (Agent.md §6).
+// routing_table.h — distance-vector routes with per-direction cost.
 //
 // Babel-inspired DV (Babel is proven on exactly this kind of lossy/asymmetric
-// link). The key to Req 3 (independent forward/return paths) is that the link
+// link). The key to independent forward/return paths is that the link
 // cost used to reach a neighbour is DIRECTIONAL — it's the cost of frames
 // travelling *toward* that neighbour (1/q_tx). Because each node computes its own
 // routes using its own directional costs, the path A->C and the path C->A fall

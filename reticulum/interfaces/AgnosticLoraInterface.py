@@ -2,7 +2,7 @@
 #
 # Reticulum sees this as a point-to-point link to one peer node; underneath, the
 # LoRa backbone routes the opaque RNS packet to that peer (multi-hop, ARQ, the lot).
-# This is the "apps ride on top as opaque payload" model from Agent.md §1 — NOT
+# This is the "apps ride on top as opaque payload" model — NOT
 # RNode emulation (which would bypass our routing).
 #
 # Wire to a node running tunnel mode over USB serial. Tunnel frames are HDLC carrying
@@ -15,7 +15,7 @@
 #   * BY IDENTITY — config `identity`/`peer_identity` (opaque hex). The interface
 #     `register`s its own identity and `resolve`s the peer's via the node's distributed
 #     locator directory, so the far node id is *discovered* (and tracks mobility) rather
-#     than hardcoded. This is Phase 4 of docs/distributed-lookup-plan.md.
+#     than hardcoded. This is Phase 4.
 #
 # Config (in the Reticulum config file):
 #   [[Mesh Link]]

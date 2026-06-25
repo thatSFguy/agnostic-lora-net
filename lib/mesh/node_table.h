@@ -1,4 +1,4 @@
-// node_table.h — the interned node-id directory (docs/node-id-widening-impl.md §1).
+// node_table.h — the interned node-id directory.
 //
 // The ONLY place a full 16-byte NodeId is stored in RAM. Every other table keys on
 // a 2-byte node_ref into here, so widening ids from 4→16 B stays ~RAM-neutral and a

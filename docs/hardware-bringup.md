@@ -7,10 +7,11 @@ for multi-hop forwarding + ARQ.
 > ⚠️ **Attach the antenna before powering any node.** Transmitting without an
 > antenna can damage the SX1262 PA. Every node here transmits (beacons).
 
-> Scope: this firmware is the **radio + routing** layer. It has **no BLE** yet — the
-> phone/BLE-coexistence requirement (Req 1) is validated later, on the MeshCore fork
-> (`docs/meshcore-integration.md`). Step 1 proves beacons, link metrics, neighbour/
-> route tables, and (with a 3rd node) forwarding + per-hop ACK.
+> Scope: this runbook brings up the **radio + routing** layer. BLE+LoRa coexistence
+> (the phone/BLE requirement) is built into the firmware and proven natively — no
+> MeshCore fork needed — but it's **off by default**, so this bring-up doesn't exercise
+> it. Step 1 proves beacons, link metrics, neighbour/route tables, and (with a 3rd node)
+> forwarding + per-hop ACK.
 
 ## 0. Environment note (WSL)
 

@@ -1,7 +1,7 @@
 // announce_codec.h — compact, airtime-conscious wire format for an Announce.
 //
-// Beacons carry the routing state (Agent.md §6: "Updates piggyback on beacons").
-// Airtime is the scarcest resource (§2.4), so the encoding is tight and quantised:
+// Beacons carry the routing state — updates piggyback on beacons.
+// Airtime is the scarcest resource, so the encoding is tight and quantised:
 //   * link quality q ∈ [0,1]  -> 1 byte  (q * 255)
 //   * route cost              -> 2 bytes (cost * 16, saturating)
 // The sender's node ID is NOT carried here — it's already in the network header,
@@ -37,7 +37,7 @@ uint16_t announce_serialize(const Announce& a, uint8_t* buf, uint16_t cap);
 // Returns false on any truncation or malformed count, leaving `out` cleared.
 bool announce_deserialize(const uint8_t* buf, uint16_t len, Announce& out);
 
-// --- signed-announce identity tail (docs/node-keygen-signed-announce-impl.md §5/6) ---
+// --- signed-announce identity tail ---
 // A beacon's serialized announce body is followed by [pubkey:32][sig:64]; the Ed25519
 // signature covers "AGN-ANN-1" || pubkey || announce-body (domain-tagged, so it can never
 // be confused with a control signature). This proves the sender owns the key whose hash is

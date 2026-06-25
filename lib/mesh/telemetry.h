@@ -1,7 +1,6 @@
 // telemetry.h — sparse node-health telemetry (battery + remote status).
 //
-// Two mechanisms, both deliberately stingy with airtime (Agent.md §2.4 and
-// docs/node-map-webapp-plan.md §6):
+// Two mechanisms, both deliberately stingy with airtime:
 //
 //   * BATT flood — each node floods its battery (~7 B payload) every ~6 h,
 //     jittered. Every node caches every node's last report, so connecting to

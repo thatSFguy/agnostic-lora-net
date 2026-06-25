@@ -1,7 +1,7 @@
 // router.h — the routing brain: neighbours + per-direction DV, driven by beacons.
 //
-// This is the part Agent.md §9 calls out as genuinely ours to build ("asymmetric
-// routing is ours to build, not inherited"). It is deliberately transport- and
+// This is the genuinely novel part: asymmetric routing is ours to build, not
+// inherited. It is deliberately transport- and
 // platform-agnostic: it consumes an Announce (whatever carried it — a LoRa beacon
 // on-device, a synthetic topology in a host test) and answers "what's the next hop
 // to D". It performs no I/O and knows nothing about RadioLib, BLE, or MeshCore;
@@ -60,7 +60,7 @@ public:
     // Forwarding decision: next hop toward `dst`, or 0 if unknown.
     node_id_t next_hop(node_id_t dst) const { return routes_.next_hop(dst); }
 
-    // --- administrative link blocking (Agent.md §4/§6 Tier-1 "block a bad link") ---
+    // --- administrative link blocking (Tier-1 "block a bad link") ---
     // Block the link to neighbour `id`: its beacons are ignored and existing routes
     // through it are torn down, so the node routes *around* it. This is the node-local
     // half of the controller's "block a bad/asymmetric link" command; the same API is
@@ -75,7 +75,7 @@ public:
     // table, so "blocked" can't be inferred from the `nbr` lines.
     node_id_t blocked_at(uint8_t i) const { return i < n_blocked_ ? blocked_[i] : node_id_t{}; }
 
-    // Link addressing (Agent.md §5): resolve aliases for directed sends.
+    // Link addressing: resolve aliases for directed sends.
     link_addr_t link_addr_for(node_id_t dst) const { return neighbors_.their_alias_for(dst); }
     link_addr_t my_alias_for(node_id_t dst)  const { return neighbors_.my_alias_for(dst); }
     bool        is_my_alias(link_addr_t a)   const { return neighbors_.is_my_alias(a); }

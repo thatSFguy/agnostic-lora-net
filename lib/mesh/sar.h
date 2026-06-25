@@ -1,7 +1,7 @@
 // sar.h — segmentation & reassembly for payloads larger than one LoRa frame.
 //
 // The backbone moves opaque packets of a few hundred bytes; anything bigger is an
-// application's problem (Agent.md §2.5). This is that application layer: it chops a
+// application's problem. This is that application layer: it chops a
 // blob into fixed chunks, ships each as an ordinary DATA payload (carried by the
 // mesh's routing + per-hop ARQ), and reassembles + integrity-checks the whole thing
 // on the far side. Pure/portable — unit-tested on the host, runs on the nRF52.

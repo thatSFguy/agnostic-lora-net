@@ -1,14 +1,18 @@
-# agnctl — Phase 4 controller (Go scaffold)
+# agnctl — Tier-1 controller
 
-The Tier-1 controller, written in Go so it runs on **this laptop first** and deploys to
-the RPi Zero 2 W unchanged. See [`../docs/phase4-controller-plan.md`](../docs/phase4-controller-plan.md)
-for the full plan.
+The Tier-1 controller, written in Go so it runs on a laptop and deploys to a small
+SBC (e.g. an RPi Zero 2 W) unchanged. It stays **optional** — kill it and the Tier-0
+mesh keeps running, and every connectivity-reducing command has an on-device auto-revert.
+See the **Control plane** section of the [top-level README](../README.md) for the wider design.
 
-**Covers workstream 4a (ingest), §8 (passive RF-utilisation capture), and 4b (signed
-control: POWER/CONFIRM/BLOCK/UNBLOCK).** It reads a tethered node's console stream, builds
-the live topology, logs chattiness data to CSV, and — with a controller key — signs and
-pushes commands into the mesh. The RF policy engine and served dashboard come next. **No
-external deps (Go stdlib only)** — builds offline; Ed25519 signing is `crypto/ed25519`.
+It reads a tethered node's console stream into a **live global topology**, logs chattiness
+data to CSV, runs the **autonomous RF power optimiser**, serves a **web dashboard**, and —
+with a controller key — signs and pushes control commands (POWER/CONFIRM/BLOCK/UNBLOCK)
+into the mesh. **No external deps (Go stdlib only)** — builds offline; Ed25519 signing is
+`crypto/ed25519`.
+
+> ⚠️ **Alpha**, like the rest of the project — flags, the console grammar it drives, and the
+> controller protocol can change between commits. See the top-level README for the full status.
 
 ## Layout
 
@@ -110,7 +114,7 @@ call (or the controller dying) self-heals via the on-device 60 s revert. *Scope
 (mesh-wide):* a node has one TX power, so it optimises against the **weakest outbound link
 the node must keep** — the neighbour that hears it worst — gathered from every link
 `node→X`. The tethered gateway's own links carry measured SNR; remote links arrive via round-robin
-`status <id>` telemetry polls. As of **fw 0.10.0** that telemetry carries per-neighbour
+`status <id>` telemetry polls. As of **fw 0.11.0** that telemetry carries per-neighbour
 SNR/RSSI (Phase 2), so remote links are measured too and can be **trimmed**, not just
 raised. A link still lacking RSSI (older fw, or a neighbour not yet RF-measured) falls back
 to link *quality*, inverted to an approximate SNR; that estimate saturates at high SNR, so a
@@ -131,9 +135,8 @@ chattiness read (airframes/sec, broken down by class).
   byte-identical to the firmware (gold-standard gate in `test/test_ctrl_interop`);
   `keystore`+`commander` push them via the node's `ctrlsend` bridge. Every connectivity-
   reducing command has an auto-revert rail (power 60 s; block TTL), so killing the
-  controller returns the mesh to a safe state. **ROUTE override is deferred** (optional;
-  needs a Router override API). **Web block button** still uses the local console path
-  until the controller `httpd` lands.
+  controller returns the mesh to a safe state. **ROUTE override and remote PHY retune are
+  deferred** (optional; ROUTE needs a Router override API).
 - **The `state/` dir holds the secret controller key — gitignored, never commit it.** It
   is the network's write credential; back it up like one.
 - **Serial source is Linux/WSL/RPi** (raw tty via best-effort `stty`, USB-CDC ignores
@@ -141,7 +144,7 @@ chattiness read (airframes/sec, broken down by class).
 
 ## Toolchain
 
-Go is **not yet installed** on this laptop. Install it, then the commands above work:
+Needs a Go toolchain (stdlib only — no module downloads):
 
 ```bash
 # Debian/Ubuntu/WSL:

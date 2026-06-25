@@ -1,4 +1,4 @@
-// link_arq.h — hop-by-hop acknowledgement + small retry (Agent.md §3 "Reliability").
+// link_arq.h — hop-by-hop acknowledgement + small retry (reliability layer).
 //
 // Each directed unicast (a frame addressed to a specific next hop's alias) can ask
 // that hop for a tiny link-layer ACK. This engine remembers a sent frame by its

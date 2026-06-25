@@ -3,7 +3,7 @@
 //
 //   pio test -e native
 //
-// What's proven here is the project's core novelty (Agent.md §6/§9): link-quality
+// What's proven here is the project's core novelty: link-quality
 // routing, and independent forward/return paths over asymmetric links (Req 3).
 
 #include <unity.h>

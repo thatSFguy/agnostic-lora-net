@@ -1,7 +1,7 @@
 // Command agnctl is the Phase 4 controller (Go, laptop-first). It reads a tethered
 // node's console stream (or replays a saved log), builds the live topology, passively
 // records RF-utilisation/chattiness data, and — with a controller key — signs and pushes
-// POWER/BLOCK commands into the mesh. See docs/phase4-controller-plan.md.
+// POWER/BLOCK commands into the mesh. See controller/README.md.
 //
 //	# live: collect + capture + issue signed commands (interactive, on stdin):
 //	agnctl -port /dev/ttyACM0 -csv capture.csv

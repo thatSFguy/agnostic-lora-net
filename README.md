@@ -2,13 +2,20 @@
 
 [![build](https://github.com/thatSFguy/agnostic-lora-net/actions/workflows/build.yml/badge.svg)](https://github.com/thatSFguy/agnostic-lora-net/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/thatSFguy/agnostic-lora-net)](https://github.com/thatSFguy/agnostic-lora-net/releases/latest)
+[![status: alpha](https://img.shields.io/badge/status-alpha-orange)](#project-status--alpha)
 MIT licensed.
+
+> ⚠️ **Alpha.** This is an early, single-maintainer project under active development.
+> It works — everything below is measured on real hardware — but APIs, the wire
+> format, and the console/controller interfaces can change without notice, and there
+> is **no stability or support guarantee**. Treat it as a research/hacking platform,
+> not a product. New features and new-board requests are **not guaranteed** to be
+> picked up. **PRs are very welcome** — see [Contributing](#contributing).
 
 An **app-agnostic LoRa mesh backbone** — a dumb, efficient transport that moves
 addressed packets between nodes the way the internet moves IP. Applications ride on
 top as **opaque payload** (a Reticulum app, a phone over BLE, anything); the backbone
-itself is never programmed per-app. See [`Agent.md`](Agent.md) for the full design and
-the non-negotiable requirements.
+itself is never programmed per-app.
 
 The novelty (vs. Meshtastic/MeshCore/Reticulum): **link-quality-aware routing with
 independent per-direction paths** — asymmetric/one-way links are *used*, not discarded.
@@ -58,9 +65,9 @@ Validated end-to-end on 2× RAK4631 + a Seeed XIAO nRF52840 (Wio-SX1262), all SX
 | **Consolidated web control plane** — live map · decision feed · node Configure · in-browser Flash | `controller/` (`agnctl`, served at `:8080`) |
 
 The routing/codec/relay/alias/ARQ/SAR logic is **portable C++ in `lib/mesh`**, host
-unit-tested (**66 cases, `pio test -e native`**) and cross-compiled unchanged onto the
+unit-tested (**77 cases, `pio test -e native`**) and cross-compiled unchanged onto the
 nRF52. The Tier-1 controller is **Go** (`controller/`, stdlib-only), with its own host
-tests (`go test ./...`). Current firmware: **v0.11.0**.
+tests (`go test ./...`). Current firmware: **v0.14.0**.
 
 > **BLE note:** the original plan assumed BLE+LoRa coexistence required forking
 > MeshCore (because every hand-rolled attempt had failed). On this firmware it **works
@@ -87,16 +94,14 @@ controller/               Tier-1 controller (Go, stdlib-only): `agnctl` — cons
 test/test_*/              host unit tests (Unity): mesh · codec · forward · alias · arq · sar · control · telemetry · …
 docs/hardware-bringup.md  flashing + bring-up runbook
 docs/tcp-bridge.md        app-integration guide: TCP bridge + tunnel protocol (distributable)
-docs/phase4-controller-plan.md  Tier-1 controller plan (largely built — see controller/README.md)
-docs/meshcore-integration.md   Phase-1 fork seam design — SUPERSEDED (firmware is native, not a fork)
+controller/README.md      Tier-1 controller: flags, margins, step, cadence, key custody
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
 web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
 web/manage.html           Web Serial/BT node manager: BLE PIN · radio config · battery calibration
 web/map.html              live mesh map (Leaflet): nodes on real geography, per-direction link
                           quality/asymmetry/SNR margin, battery badges, gateway console
-docs/INTEGRATING-AGNOSTIC-LORA-NET.md  third-party integration guide (authored by the mobile-app agent)
-docs/node-map-webapp-plan.md           map app + telemetry architecture (gateway model, phases)
+docs/INTEGRATING-AGNOSTIC-LORA-NET.md  third-party integration guide
 docs/remote-config.md     remote node config + the network-wide retune safety protocol (Tier-1)
 docs/identity-vs-locator.md  design boundary: mesh routes on node-id locators, apps address on identity hashes
 ```
@@ -106,7 +111,7 @@ docs/identity-vs-locator.md  design boundary: mesh routes on node-id locators, a
 PlatformIO (`nordicnrf52` + Adafruit nRF52 core + RadioLib 7.x; host `g++` for tests):
 
 ```bash
-pio test -e native               # 66 host unit tests for lib/mesh (no hardware)
+pio test -e native               # 77 host unit tests for lib/mesh (no hardware)
 pio run  -e wiscore_rak4631      # RAK4631 mesh firmware (BLE compiled in, off by default)
 pio run  -e xiao_nrf52           # Seeed XIAO nRF52840 + Wio-SX1262 (SoftDevice s140 v7)
 pio run  -e promicro             # Pro Micro nRF52840 + SX1262
@@ -199,8 +204,7 @@ context, so Web Serial / Web Bluetooth work):
 - **Flash** — in-browser nRF52 serial DFU: pick a board, ① reboot to bootloader, ② select the
   re-enumerated bootloader port & flash, with a UF2 fallback. (A port of the standalone hub.)
 
-See [`controller/README.md`](controller/README.md) for flags (margins, step, cadence, key custody)
-and [`docs/phase4-controller-plan.md`](docs/phase4-controller-plan.md) for scope.
+See [`controller/README.md`](controller/README.md) for flags (margins, step, cadence, key custody) and scope.
 
 ## Reticulum over the mesh
 
@@ -278,6 +282,44 @@ integration surface for everything:
   BLE. Honest caveat: KISS carries no destination, so a KISS node pins traffic
   to its configured peer — point-to-point by construction, not a replacement
   for the typed envelope.
+
+## Project status — Alpha
+
+This is **alpha software**, built and maintained by one person in the open. What that
+means in practice:
+
+- **It runs, and the numbers are real** — the capabilities and measurements above are
+  validated on actual hardware, not aspirational. But coverage is bench-scale (a handful
+  of nodes), not field-hardened at fleet scale.
+- **Nothing is frozen.** The on-air frame format, console grammar, controller protocol,
+  and web/controller APIs can all change between commits. There are no compatibility
+  promises across versions yet — expect to reflash the whole mesh together.
+- **No roadmap commitments.** Feature requests and new-board requests are appreciated as
+  signal, but may not be implemented — see [What's left](#whats-left) for where effort is
+  actually going. If you need a board or feature now, the fastest path is a PR.
+- **No support guarantee.** Best-effort only. File issues for bugs by all means, but
+  there's no SLA.
+
+## Contributing
+
+**PRs are very welcome** — this is exactly the kind of project that gets better with more
+hands and more radios.
+
+- **Good first contributions:** new board support (add a variant under `variants/` + a
+  `board_config.h` block + a `platformio.ini` env — the radio HAL is the only chip-specific
+  seam), docs fixes, and host-test coverage in `test/`.
+- **Keep the core portable.** The mesh logic in `lib/mesh/` builds for both the host and
+  the MCU with **no Arduino dependencies** — please keep it that way so the unit tests stay
+  meaningful.
+- **Run the tests before you push:** `pio test -e native` (firmware core) and
+  `go test ./...` in `controller/` (Go control plane). CI runs the build matrix in
+  [`.github/workflows/build.yml`](.github/workflows/build.yml).
+- **New boards you can't fully bench-test:** that's fine — say so in the PR. Several
+  in-tree targets are compile-clean but flagged as not-yet-bench-validated (FEM/RF-switch
+  details in particular); call out what you did and didn't verify.
+
+No formal CLA or contribution process yet — open an issue to discuss anything substantial,
+or just send the PR. Be kind; assume good faith.
 
 ## What's left
 

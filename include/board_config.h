@@ -131,7 +131,7 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// Network-wide PHY (Agent.md §3 "Confirmed parameters"). ALL nodes must match
+// Network-wide PHY (confirmed parameters). ALL nodes must match
 // these to hear each other — LongFast preset on a single US channel.
 // ---------------------------------------------------------------------------
 #define PHY_FREQ_MHZ      906.625f  // single fixed channel for v1. One 250 kHz slot below

@@ -3,13 +3,13 @@
 // Maps an opaque endpoint **identity** (e.g. an RNS destination hash) to the mesh
 // **node it's currently served by** (its locator), so a sender can stamp the right
 // destination and let the mesh route directly — no hub, no relaying through a central
-// node. See docs/distributed-lookup-plan.md and docs/identity-vs-locator.md.
+// node. See docs/identity-vs-locator.md.
 //
 // Design invariants (app-agnostic):
 //   * the key is an OPAQUE, length-prefixed id (≤16 B) — this code never interprets it;
 //   * this sits BESIDE locator routing — it only answers "which node", it does not make
 //     the mesh forward on identities;
-//   * RAM-only (Agent.md Req 4) — bindings rebuild from re-registration, never persisted.
+//   * RAM-only — bindings rebuild from re-registration, never persisted.
 //
 // Three wire messages (carried as opaque payload in a PKT_LOC packet):
 //   REGISTER  an endpoint asserts "id is served at me" (locator = the packet's src node)

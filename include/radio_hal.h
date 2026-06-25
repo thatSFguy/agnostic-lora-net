@@ -1,6 +1,6 @@
 // radio_hal.h — interrupt-driven, never-blocking SX1262 transport.
 //
-// Design principle #6 (Agent.md §2): the radio core NEVER blocks. At SF11/BW250 a
+// Design principle: the radio core NEVER blocks. At SF11/BW250 a
 // single TX/RX is hundreds of ms to >1 s; busy-waiting that long starves the BLE
 // stack and drops the phone link (observed in a prior LoRaMesher attempt). So:
 //

@@ -7,8 +7,7 @@ path (`scripts/rns_demo.py`, validated on hardware) — same wire contract, BLE 
 USB.
 
 Read alongside: [`tcp-bridge.md`](tcp-bridge.md) (wire contract), [`remote-config.md`]
-(remote-config.md) (BLE PIN), [`identity-vs-locator.md`](identity-vs-locator.md) and
-[`distributed-lookup-plan.md`](distributed-lookup-plan.md) (addressing).
+(remote-config.md) (BLE PIN), and [`identity-vs-locator.md`](identity-vs-locator.md) (addressing).
 
 ---
 

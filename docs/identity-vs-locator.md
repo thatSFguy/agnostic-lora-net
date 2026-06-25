@@ -33,7 +33,7 @@ hard.
   prove it owns its id via signature) and collision-free in practice (2¹²⁸).
 - This is the long-term form of the id; today it's a 32-bit `FICR.DEVICEID` XOR-fold
   placeholder (see [[node-id-identity]]). Widening + signing lands with the signed
-  control plane (Agent.md §3/§5 / Tier-1 identity work), not before.
+  control plane (the Tier-1 identity work), not before.
 
 **(B) The mesh does NOT route on RNS/app identity hashes.** A node never "inherits" the
 attached phone's RNS hash to route on it. The app's RNS hash is carried **end-to-end as
@@ -51,7 +51,7 @@ name. See [`tcp-bridge.md`](tcp-bridge.md) / [`remote-config.md`](remote-config.
 
 It's tempting — "one address everywhere, no node-id field" — but it breaks the design:
 
-1. **It makes the backbone RNS-specific.** The premise (Agent.md §1) is an *app-agnostic*
+1. **It makes the backbone RNS-specific.** The core premise is an *app-agnostic*
    transport that moves opaque addressed packets like IP moves IP. If mesh routing keys
    on RNS destination hashes, the backbone *is* Reticulum, and a non-RNS app — or a
    second RNS aspect on the same phone — has no address.

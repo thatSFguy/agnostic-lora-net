@@ -1,4 +1,4 @@
-// main.cpp — agnostic-LoRa-Net node firmware (Agent.md §6/§7).
+// main.cpp — agnostic-LoRa-Net node firmware.
 //
 // Each node beacons periodically; every beacon carries the node's announce
 // (neighbour reports + distance-vector table), and every received frame's RSSI/SNR
@@ -178,7 +178,7 @@ static void console_exec(char* line, Print* out);  // fwd decl (run one line, ro
 // --- persistent radio PHY config (freq/BW/SF/CR/power/sync/preamble) ------------
 // Stored in LittleFS, separate from the BLE config. `rf_work` is the staging copy
 // the console edits; `rf apply` commits it to the radio + flash. Save-if-dirty
-// (read-back + byte-compare) honours Agent.md Req 4 (don't churn nRF52 flash).
+// (read-back + byte-compare) avoids churning nRF52 flash.
 // These same fields are what the future authenticated remote-config control plane
 // will set over LoRa (see docs/remote-config.md).
 static const char     RF_PATH[]  = "/agn_rf.cfg";
@@ -206,7 +206,7 @@ static void rf_save(const RadioCfg& c) {
     if (f.open(RF_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
 }
 
-// --- battery sense (solar telemetry, docs/node-map-webapp-plan.md §6) -------
+// --- battery sense (solar telemetry) ----------------------------------------
 // Per-board VBAT pin; the divider/reference product is deliberately NOT
 // hardcoded — one scale factor (mV per ADC count) is calibrated against a real
 // meter (`batt cal <measured_mV>`, typed into the map app at install time) and
@@ -482,8 +482,8 @@ static void ble_gen_pin() {
 }
 
 // --- persistent config (PIN + BLE-enabled) in internal flash ----------------
-// Stored in LittleFS on the nRF52's internal flash. Following Agent.md Req 4
-// (nRF52 flash is ~10k erase cycles/page — a sloppy write loop can brick a solar
+// Stored in LittleFS on the nRF52's internal flash. Because
+// nRF52 flash is ~10k erase cycles/page — a sloppy write loop can brick a solar
 // node), we only write on a real change: read-back + byte-equal compare first.
 static const char     CFG_PATH[]  = "/agn_ble.cfg";
 static const uint32_t CFG_MAGIC   = 0x314E4741;   // "AGN1"
@@ -730,7 +730,7 @@ static void net_cfg_save() {
     if (f.open(NET_PATH, FILE_O_WRITE)) { f.write((const uint8_t*)&want, sizeof(want)); f.close(); }
 }
 
-// --- Node identity keypair (self-certifying id; docs/node-keygen-signed-announce-impl.md) ---
+// --- Node identity keypair (self-certifying id) ---
 // Each node mints its OWN Ed25519 keypair once, at first boot, and persists it. The node id
 // is blake2b(pubkey)[0:16] — self-certifying and collision-free. The secret key never leaves
 // the node; it signs the node's own announces (see signed-announce work). This is independent
@@ -801,7 +801,7 @@ static node_id_t node_key_init() {
     return mesh::nid_from_pubkey(node_pk);
 }
 
-// --- Signed announces (docs/node-keygen-signed-announce-impl.md §5/6) -----------
+// --- Signed announces -----------------------------------------------------------
 // A node signs its own announce (announce_sign/announce_verify in the codec) so peers —
 // and, via the gateway console, the controller — can verify the id<->pubkey binding:
 // id == blake2b(pubkey) AND a valid Ed25519 sig over the announce body.
@@ -923,7 +923,7 @@ static void send_beacon() {
     memcpy(frame + HEADER_BYTES, &pl, sizeof(pl));
 
     // Piggyback this node's announce so distance-vector + reverse-link quality
-    // propagate (Agent.md §6).
+    // propagate.
     uint16_t ann_len = 0;
     // Reserve room for the identity tail when we can sign, so the announce never
     // crowds it out (graceful: fewer routes per beacon, never an overflow).
@@ -1026,7 +1026,7 @@ static void forward_frame(const uint8_t* buf, uint16_t len, node_id_t next, uint
 // --- distributed locator directory (Phase 2) ------------------------------------
 // REGISTER/QUERY flood across the mesh, REPLY routes back by DV. The directory only
 // answers "which node hosts identity X"; the mesh still routes on locators (node ids).
-// See docs/distributed-lookup-plan.md / docs/identity-vs-locator.md.
+// See docs/identity-vs-locator.md.
 static mesh::LocatorDir      locdir;
 static mesh::LocatorResolver locres;
 static uint16_t loc_epoch   = 0;            // per-boot nonce of this node as an id-owner

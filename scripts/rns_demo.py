@@ -31,7 +31,7 @@ def write_config(cfgdir, port, identity, peer_identity):
     with open(os.path.join(cfgdir, "config"), "w") as f:
         # Identity-addressed: the interface REGISTERs `identity` and RESOLVEs
         # `peer_identity` to a node id via the distributed directory — the far node id is
-        # discovered, not hardcoded (Phase 4 of docs/distributed-lookup-plan.md).
+        # discovered, not hardcoded (Phase 4).
         f.write(f"""[reticulum]
   enable_transport = True
   share_instance = No

@@ -1,4 +1,4 @@
-// Host unit tests for the interned node-id directory (docs/node-id-widening-impl.md §1).
+// Host unit tests for the interned node-id directory.
 //
 //   pio test -e native
 //

@@ -116,7 +116,7 @@ int16_t RadioHal::begin(RadioRxCallback on_rx, const RadioCfg& cfg) {
     const float freq_mhz = (float)cfg_.freq_hz / 1.0e6f;
     const float bw_khz   = (float)cfg_.bw_hz / 1000.0f;
 
-    // Apply the full network-wide PHY in one shot (Agent.md §3). All nodes share
+    // Apply the full network-wide PHY in one shot. All nodes share
     // these exact values or they can't hear each other.
     int16_t st = radio_.begin(
         freq_mhz,              // carrier (default 904.375 MHz)

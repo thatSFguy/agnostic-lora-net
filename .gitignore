@@ -15,7 +15,20 @@ reticulum/inst_*/
 test_recv*.png
 web/fw/
 
+# Internal design + planning docs (kept local, not published)
+Agent.md
+todo.md
+docs/distributed-lookup-plan.md
+docs/self-certifying-identity-plan.md
+docs/node-map-webapp-plan.md
+docs/phase4-controller-plan.md
+docs/controller-verify-acl-impl.md
+docs/node-id-widening-impl.md
+docs/node-keygen-signed-announce-impl.md
+docs/meshcore-integration.md
+
 # Controller key backup (SECRET — the network WRITE credential; never commit)
+agnlora*.json
 agnlora-controller-backup.json
 *controller-backup*.json
 

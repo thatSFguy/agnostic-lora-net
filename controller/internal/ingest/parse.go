@@ -8,7 +8,7 @@ import (
 
 // idHex matches a node id in either width: 8 hex (v1) or 32 hex (v2, the self-certifying
 // 16-byte NodeId). Kept tolerant of both so a mixed-version bench still parses during the
-// v2 rollout (`self-certifying-identity-plan.md` §2). The greedy 32 alternative wins when
+// v2 rollout. The greedy 32 alternative wins when
 // present. `§` is the placeholder idre() substitutes.
 const idHex = `[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}`
 
@@ -71,7 +71,7 @@ func ParseLine(line string) (Event, bool) {
 	if m := reAnn.FindStringSubmatch(t); m != nil {
 		// Gateway-verified identity binding: `[ann] <id> pub=<64hex> sig=ok` (or `… sig=bad`,
 		// no pub). The gateway ran ed25519_check + id==hash(pub) on the announce; we trust its
-		// verdict (Model A, controller-verify-acl-impl.md §0).
+		// verdict (Model A).
 		e := newEvent(KindIdentity, t)
 		e.ID = up(m[1])
 		if m[2] != "" {

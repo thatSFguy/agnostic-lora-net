@@ -1,4 +1,4 @@
-// packet.h — on-air frame format (Agent.md §5, draft; finalized in Phase 0).
+// packet.h — on-air frame format.
 //
 // Two stacked headers so hop-by-hop reliability is cleanly separated from
 // end-to-end routing, and asymmetric paths fall out for free:
@@ -21,7 +21,7 @@
 #include "mesh_types.h"   // node_id_t (16-byte NodeId), link_addr_t, NODE_ID_BROADCAST
 
 // node_id_t is the 16-byte self-certifying id (= blake2b(pubkey)[0:16]); see
-// mesh_types.h and docs/self-certifying-identity-plan.md. NODE_ID_BROADCAST is the
+// mesh_types.h. NODE_ID_BROADCAST is the
 // all-0xFF flood destination.
 
 // 1-byte link-local neighbour aliases, negotiated per link (§5). 0 = unassigned;

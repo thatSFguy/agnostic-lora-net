@@ -1,15 +1,15 @@
 // neighbor_table.h — direct neighbours and their per-direction link quality.
 //
-// The asymmetry model (Agent.md §6): for each neighbour we track TWO qualities,
+// The asymmetry model: for each neighbour we track TWO qualities,
 // independently:
 //   q_rx  — how well *I hear them*  (learned locally from frames I receive)
 //   q_tx  — how well *they hear me*  (learned from their report back to me)
 // A link is flagged `asym` when the two differ by more than a threshold. One-way
 // links (good in one direction, dead in the other) are first-class citizens —
-// they get *used*, not discarded (Req 3).
+// they get *used*, not discarded.
 //
 // Fixed-capacity, no heap: routing state lives in RAM and rebuilds from announces
-// on boot (Req 4 — nothing here is ever persisted to flash).
+// on boot (nothing here is ever persisted to flash).
 #pragma once
 
 #include <stdint.h>
@@ -22,7 +22,7 @@ constexpr uint8_t MAX_NEIGHBORS = 32;
 // |q_tx - q_rx| above this marks the link asymmetric.
 constexpr float ASYM_THRESHOLD = 0.35f;
 
-// Reserved link-alias values (Agent.md §5). Real aliases are 1..254.
+// Reserved link-alias values. Real aliases are 1..254.
 constexpr link_addr_t ALIAS_NONE      = 0x00;
 constexpr link_addr_t ALIAS_BROADCAST = 0xFF;
 
@@ -30,7 +30,7 @@ struct Neighbor {
     node_id_t id        = {};
     float     q_rx      = -1.0f;  // <0 = unknown
     float     q_tx      = -1.0f;  // <0 = unknown (no report received yet)
-    // Link-local aliases (1 byte each, Agent.md §5):
+    // Link-local aliases (1 byte each):
     //   my_alias    — the alias I assigned to this neighbour. I advertise it; the
     //                 neighbour stamps it as next_hop when sending to me.
     //   their_alias — the alias this neighbour assigned to me. I stamp it as

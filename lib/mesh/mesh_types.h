@@ -3,9 +3,9 @@
 // The routing library is deliberately self-contained: it does NOT depend on the
 // firmware's wire-format header (packet.h), so it builds standalone for host unit
 // tests and drops into any transport. packet.h includes THIS header for node_id_t
-// (single source of truth — see docs/node-id-widening-impl.md §1).
+// (single source of truth).
 //
-// Identity model (docs/self-certifying-identity-plan.md):
+// Identity model:
 //   * node_id_t is a 16-byte self-certifying id = blake2b(node pubkey)[0:16].
 //   * It is stored ONCE per distinct node in a NodeTable (node_table.h); the
 //     routing tables reference it by a compact node_ref to keep RAM flat and to
@@ -34,7 +34,7 @@ typedef NodeId node_id_t;
 constexpr NodeId NODE_ID_BROADCAST = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
 
-// 1-byte link-local neighbour alias (Agent.md §5). Identical typedef to packet.h's,
+// 1-byte link-local neighbour alias. Identical typedef to packet.h's,
 // so both headers can be included together.
 typedef uint8_t link_addr_t;
 

@@ -1,4 +1,4 @@
-// Host unit tests for link-local neighbour alias negotiation (Agent.md §5).
+// Host unit tests for link-local neighbour alias negotiation.
 //
 //   pio test -e native
 //
