@@ -320,6 +320,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
             { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
 const layerLinks = L.layerGroup().addTo(map);
 const markers = new Map();
+let draggingId = null;   // marker currently being dragged — render() must not reset its position/icon
 
 function freshColor(n) {
   if (!n.lastSeen) return '#777';
@@ -332,7 +333,8 @@ function markerFor(id) {
   if (markers.has(id)) return markers.get(id);
   const pos = positions[id]; if (!pos) return null;
   const mk = L.marker(pos, { draggable: true, icon: nodeIcon(node(id)) }).addTo(map);
-  mk.on('dragend', () => { positions[id] = [mk.getLatLng().lat, mk.getLatLng().lng]; savePos(); render(); });
+  mk.on('dragstart', () => { draggingId = id; });
+  mk.on('dragend', () => { positions[id] = [mk.getLatLng().lat, mk.getLatLng().lng]; draggingId = null; savePos(); render(); });
   mk.on('click', () => select(id));
   markers.set(id, mk);
   return mk;
@@ -460,7 +462,8 @@ function render() {
   // markers
   for (const [id] of nodes) {
     const mk = markerFor(id);
-    if (mk) { mk.setIcon(nodeIcon(node(id))); mk.setLatLng(positions[id]); }
+    // Don't touch the marker being dragged — setIcon/setLatLng mid-drag yanks it back.
+    if (mk && id !== draggingId) { mk.setIcon(nodeIcon(node(id))); mk.setLatLng(positions[id]); }
   }
   drawLinks();
   renderHealth();
