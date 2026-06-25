@@ -648,7 +648,7 @@ window.addEventListener('pagehide',()=>cfgCloseUsb());
 // ===================== FLASH: nRF52 serial DFU to a local node (ported from hub.js) =====================
 const FL_BOARD={rak:'agn-rak',xiao:'agn-xiao',promicro:'agn-promicro',t1000:'agn-t1000'}, FL_ESP={'heltec-v4':'agn-heltec-v4','xiao-s3':'agn-xiao-s3'};
 const FL_ESP_ENV={'heltec-v4':'heltec_v4','xiao-s3':'xiao_esp32s3'};   // pio env per ESP board, for the CLI hint
-const FL_RELEASE='/fw/';   // served by agnctl from -fwdir (GitHub is private); override in the field below
+const FL_RELEASE='/fw/';   // served by agnctl from -fwdir (same-origin); override in the field below
 function flog(m){ const l=$('#fl_log'); l.textContent=(l.textContent+m+'\n').split('\n').slice(-200).join('\n'); l.scrollTop=l.scrollHeight; }
 function flState(t,cls){ const e=$('#fl_state'); e.textContent=t; e.className='pill'+(cls?' '+cls:''); }
 function flBase(){ return $('#fl_base').value.trim()||FL_RELEASE; }

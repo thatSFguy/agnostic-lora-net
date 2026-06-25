@@ -1,10 +1,11 @@
 // hub.js — logic for the commissioning hub (index.html).
 'use strict';
 const $ = id => document.getElementById(id);
-// GitHub releases are PRIVATE — set the firmware source to a local ./fw/ (refresh_web_fw.sh).
-// This URL is a fallback for a future public deploy. The agnctl dashboard serves /fw/ itself.
+// Firmware is served same-origin from ./fw/ (the Pages deploy + refresh_web_fw.sh stage it
+// there; the agnctl dashboard serves /fw/ itself). The release URL is an optional fallback
+// (UF2 download works; serial-DFU fetch may be blocked cross-origin).
 const RELEASE_BASE = 'https://github.com/thatSFguy/agnostic-lora-net/releases/latest/download/';
-const BOARD_FILE = { rak:'agn-rak', xiao:'agn-xiao', promicro:'agn-promicro', t1000:'agn-t1000' };
+const BOARD_FILE = { rak:'agn-rak', xiao:'agn-xiao', promicro:'agn-promicro' };
 // ESP32 boards don't use the nRF52 serial-DFU path below — they flash with esptool /
 // ESP Web Tools. The hub can't drive that, so selecting one shows guidance instead.
 const ESP32_BOARD_FILE = { 'heltec-v4':'agn-heltec-v4' };
@@ -17,7 +18,7 @@ function showTab(t) {
   }
 }
 function log(m) { const el=$('log'); el.textContent=(el.textContent+m+'\n').split('\n').slice(-200).join('\n'); el.scrollTop=el.scrollHeight; }
-function fwBaseUrl() { return ($('fwBase').value.trim() || RELEASE_BASE); }
+function fwBaseUrl() { return ($('fwBase').value.trim() || './fw/'); }
 
 // ---------- shared controller key (same localStorage key as map.html) ----------
 let ctrlKeys = null;

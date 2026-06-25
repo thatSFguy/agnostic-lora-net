@@ -241,7 +241,12 @@ default, and a 6-digit pairing PIN is set per node. Management is **out-of-band 
 When a controller is running, flashing/config/map all live in the **`agnctl` dashboard**
 (above) — that's the primary path. The standalone single-file web apps remain for
 **offline / no-controller** use (e.g. bench-flashing before a controller exists). Web Serial /
-Web Bluetooth need a secure context — `localhost` qualifies:
+Web Bluetooth need a secure context — `localhost` and HTTPS both qualify.
+
+The hub is also published to **GitHub Pages** at
+<https://thatsfguy.github.io/agnostic-lora-net/> (CI stages the latest firmware into `./fw/`
+same-origin, so the in-browser flasher works straight from the hosted page). To run it
+locally instead:
 
 ```bash
 bash scripts/refresh_web_fw.sh     # build firmware for all boards into web/fw/

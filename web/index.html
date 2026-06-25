@@ -2,10 +2,10 @@
 <!-- index.html — AgnLoRa STANDALONE commissioning hub (offline / no-controller use).
      When a controller is running, the same Flash + Configure live in the agnctl dashboard
      (localhost:8080, Flash/Configure tabs) — that's the primary path now. This hub stays
-     for flashing/provisioning without agnctl. NOTE: GitHub releases are private, so set the
-     firmware source to a local ./fw/ (refresh_web_fw.sh) — the release URL is a fallback.
-     Flash, provision, and hand off to management, all in one page. Run on localhost (HTTPS
-     or localhost = the secure context Web Serial / Web Bluetooth require).
+     for flashing/provisioning without agnctl. Firmware is served same-origin from ./fw/
+     (the GitHub Pages deploy and refresh_web_fw.sh both stage it there); the GitHub release
+     URL is an optional fallback. Flash, provision, and hand off to management, all in one
+     page. Needs a secure context (HTTPS or localhost) for Web Serial / Web Bluetooth.
 
      Flash:    in-browser nRF52 serial DFU (web/nrf-dfu.js), UF2 drag-drop fallback.
      Provision: BLE PIN + controller pubkey (`ctrlkey`) -> node ready for remote admin.
@@ -91,16 +91,18 @@
         <option value="rak">RAK4631 (WisBlock)</option>
         <option value="xiao">XIAO nRF52840 + Wio-SX1262</option>
         <option value="promicro">Pro Micro nRF52840 (“faketec”)</option>
-        <option value="t1000">Seeed SenseCAP T1000-E (LR1110)</option>
-        <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (ESP32 — flash via CLI)</option>
       </select>
       <label class="row" style="margin:0"><input type="checkbox" id="isBoot"> already in bootloader</label>
     </div>
+    <p class="hint">Experimental boards aren’t published to the web flasher yet — build &amp; flash
+      them locally: <code>pio run -e tracker_t1000_e -t upload</code> (T1000-E / LR1110) or
+      <code>-e heltec_v4</code> (Heltec V4 / ESP32, via esptool).</p>
     <div class="row">
-      <input type="text" id="fwBase" value="" placeholder="firmware source (blank = latest release)" style="flex:1">
+      <input type="text" id="fwBase" value="" placeholder="firmware source (blank = ./fw/)" style="flex:1">
     </div>
-    <p class="hint">Leave firmware source blank to fetch the latest GitHub release, or point it at a
-      local folder (e.g. <code>./fw/</code>) for development.</p>
+    <p class="hint">Firmware is served from <code>./fw/</code> (same origin) — leave this blank to use
+      it. You can paste the GitHub release URL as a fallback (UF2 download only; serial DFU may be
+      blocked by cross-origin rules).</p>
     <div class="row">
       <button class="act primary" onclick="doFlash()">Connect &amp; flash →</button>
       <button class="act" onclick="setStep(3)">Skip — already flashed, just provision →</button>

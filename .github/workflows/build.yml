@@ -1,7 +1,8 @@
-# CI: host-test the routing core, build the two release boards, package UF2s.
-# On a v* tag, attach the UF2s to a GitHub release. The RAK4631 board def and the
-# XIAO/promicro variants are vendored in-repo (boards/, variants/), so a stock
-# PlatformIO install builds everything with no extra setup.
+# CI: host-test the routing core, build the three release boards, package UF2s.
+# On a v* tag, attach the UF2s to a GitHub release; on pushes to main, publish the
+# web commissioning hub (web/) to GitHub Pages with the firmware staged same-origin.
+# The RAK4631 board def and the XIAO/promicro variants are vendored in-repo (boards/,
+# variants/), so a stock PlatformIO install builds everything with no extra setup.
 name: build
 
 on:
@@ -76,3 +77,42 @@ jobs:
             agn-xiao.dfu.json
             agn-promicro.dfu.json
           generate_release_notes: true
+
+  # Publish the web commissioning hub (web/) to GitHub Pages, with the freshly built
+  # firmware staged into web/fw/ so the in-browser flasher fetches it SAME-ORIGIN (no
+  # cross-origin/CORS dependency on release downloads). Reuses the firmware-uf2 artifact
+  # from the build job above — no rebuild. Runs only on pushes to main.
+  #
+  # One-time setup (after the repo is public): Settings → Pages → Build and deployment →
+  # Source = "GitHub Actions". Pages on the free tier requires a PUBLIC repo, so this job
+  # will not succeed while the repo is private.
+  deploy-pages:
+    needs: firmware
+    # Skips cleanly while the repo is private (Pages needs a public repo); auto-activates on the flip.
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage firmware into web/fw/
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-uf2
+          path: web/fw
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web            # site root = web/, so the hub is index.html and ./fw/ is same-origin
+      - id: deploy
+        uses: actions/deploy-pages@v4
