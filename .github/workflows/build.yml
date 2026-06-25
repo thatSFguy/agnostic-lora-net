@@ -40,6 +40,9 @@ jobs:
       - name: Build firmware (RAK4631 + XIAO nRF52840)
         run: pio run -e wiscore_rak4631 -e xiao_nrf52 -e promicro
 
+      - name: Build ESP32 firmware (XIAO ESP32-S3 + Heltec V4)
+        run: pio run -e xiao_esp32s3 -e heltec_v4
+
       - name: Package UF2s
         run: |
           UF2CONV=$(find ~/.platformio/packages -name uf2conv.py | head -1)
@@ -54,6 +57,24 @@ jobs:
           python scripts/mk_dfu_json.py .pio/build/xiao_nrf52/firmware.zip      agn-xiao.dfu.json
           python scripts/mk_dfu_json.py .pio/build/promicro/firmware.zip        agn-promicro.dfu.json
 
+      - name: Package ESP32 (parts + ESP Web Tools manifest)
+        run: |
+          # ESP32-S3 (XIAO ESP32-S3, Heltec V4) flash in-browser via ESP Web Tools, which
+          # takes a manifest of parts at their standard Arduino-ESP32-S3 flash offsets:
+          #   bootloader 0x0 (0) · partition table 0x8000 (32768) · boot_app0 0xe000 (57344) · app 0x10000 (65536).
+          BOOT_APP0=$(find ~/.platformio/packages -name boot_app0.bin | head -1)
+          echo "boot_app0: $BOOT_APP0"
+          M='{"name":"agnostic-LoRa-Net %s","new_install_prompt_erase":true,"builds":[{"chipFamily":"ESP32-S3","parts":[{"path":"%s-bootloader.bin","offset":0},{"path":"%s-partitions.bin","offset":32768},{"path":"%s-bootapp0.bin","offset":57344},{"path":"%s.bin","offset":65536}]}]}\n'
+          for b in xiao_esp32s3:agn-xiao-s3 heltec_v4:agn-heltec-v4; do
+            env=${b%%:*}; name=${b##*:}
+            cp ".pio/build/$env/bootloader.bin" "${name}-bootloader.bin"
+            cp ".pio/build/$env/partitions.bin" "${name}-partitions.bin"
+            cp "$BOOT_APP0"                      "${name}-bootapp0.bin"
+            cp ".pio/build/$env/firmware.bin"    "${name}.bin"
+            printf "$M" "$name" "$name" "$name" "$name" "$name" > "${name}.manifest.json"
+          done
+          ls -la agn-xiao-s3* agn-heltec-v4*
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-uf2
@@ -64,6 +85,8 @@ jobs:
             agn-rak.dfu.json
             agn-xiao.dfu.json
             agn-promicro.dfu.json
+            agn-xiao-s3*
+            agn-heltec-v4*
 
       - name: Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -76,6 +99,8 @@ jobs:
             agn-rak.dfu.json
             agn-xiao.dfu.json
             agn-promicro.dfu.json
+            agn-xiao-s3*
+            agn-heltec-v4*
           generate_release_notes: true
 
   # Publish the web commissioning hub (web/) to GitHub Pages, with the freshly built

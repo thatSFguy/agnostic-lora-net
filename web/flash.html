@@ -12,6 +12,8 @@
 <title>AgnLoRa — node commissioning hub</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="nrf-dfu.js"></script>
+<!-- ESP Web Tools: in-browser ESP32 flashing over Web Serial (for the ESP32-S3 boards) -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 <style>
   :root { --bg:#0f1620; --panel:#19222e; --line:#2b3645; --fg:#e6edf5; --dim:#8b98aa;
           --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; }
@@ -97,12 +99,14 @@
         <option value="rak">RAK4631 (WisBlock)</option>
         <option value="xiao">XIAO nRF52840 + Wio-SX1262</option>
         <option value="promicro">Pro Micro nRF52840 (“faketec”)</option>
+        <option value="xiao-s3">XIAO ESP32-S3 + Wio-SX1262</option>
+        <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (ESP32-S3)</option>
       </select>
       <label class="row" style="margin:0"><input type="checkbox" id="isBoot"> already in bootloader</label>
     </div>
-    <p class="hint">Experimental boards aren’t published to the web flasher yet — build &amp; flash
-      them locally: <code>pio run -e tracker_t1000_e -t upload</code> (T1000-E / LR1110) or
-      <code>-e heltec_v4</code> (Heltec V4 / ESP32, via esptool).</p>
+    <p class="hint">nRF52 boards flash via in-browser serial DFU; ESP32-S3 boards via ESP Web Tools
+      (the “already in bootloader” option is nRF52-only). The T1000-E (LR1110) isn’t on the web
+      flasher yet — build &amp; flash it locally: <code>pio run -e tracker_t1000_e -t upload</code>.</p>
     <div class="row">
       <input type="text" id="fwBase" value="" placeholder="firmware source (blank = ./fw/)" style="flex:1">
     </div>
@@ -118,16 +122,33 @@
   <!-- step 2 progress -->
   <div class="card hide" id="step2">
     <h2>Flashing <span id="flashBoard"></span></h2>
-    <div class="bar"><div id="prog"></div></div>
-    <div id="flashState" class="pill">starting…</div>
-    <div id="log"></div>
-    <div id="uf2Fallback" class="hide" style="margin-top:14px">
-      <h3>Couldn’t auto-flash — UF2 fallback</h3>
-      <p class="hint">Double-tap the board’s reset (or unplug/replug while pressing reset) to mount its
-        bootloader drive, then drag the firmware file onto it. Click Continue when the drive disappears.</p>
-      <div class="row">
-        <button class="act" id="dlUf2">Download firmware (.uf2)</button>
-        <button class="act primary" onclick="afterFlash()">Continue → configure</button>
+    <!-- nRF52: in-browser serial DFU -->
+    <div id="nrfFlash">
+      <div class="bar"><div id="prog"></div></div>
+      <div id="flashState" class="pill">starting…</div>
+      <div id="log"></div>
+      <div id="uf2Fallback" class="hide" style="margin-top:14px">
+        <h3>Couldn’t auto-flash — UF2 fallback</h3>
+        <p class="hint">Double-tap the board’s reset (or unplug/replug while pressing reset) to mount its
+          bootloader drive, then drag the firmware file onto it. Click Continue when the drive disappears.</p>
+        <div class="row">
+          <button class="act" id="dlUf2">Download firmware (.uf2)</button>
+          <button class="act primary" onclick="afterFlash()">Continue → configure</button>
+        </div>
+      </div>
+    </div>
+    <!-- ESP32-S3: in-browser flashing via ESP Web Tools (Web Serial) -->
+    <div id="espFlash" class="hide">
+      <p class="hint">ESP32-S3 boards flash over USB serial with <b>ESP Web Tools</b>. Plug the board
+        in, click below, choose its serial port, and confirm. (If it isn’t detected, hold its
+        <b>BOOT</b> button while plugging in.)</p>
+      <esp-web-install-button id="espBtn">
+        <button slot="activate" class="act primary">Flash via ESP Web Tools →</button>
+        <span slot="unsupported">Web Serial isn’t supported — use Chrome or Edge.</span>
+        <span slot="not-allowed">Must be served over HTTPS or localhost.</span>
+      </esp-web-install-button>
+      <div class="row" style="margin-top:14px">
+        <button class="act primary" onclick="afterFlash()">Done → configure</button>
       </div>
     </div>
   </div>
