@@ -253,7 +253,9 @@ bash scripts/refresh_web_fw.sh     # build firmware for all boards into web/fw/
 python3 -m http.server 8000        # then open http://localhost:8000/web/
 ```
 
-- **`web/index.html`** — commissioning hub: in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a
+- **`web/index.html`** — landing page: a simple menu that routes to the apps below (served at
+  the GitHub Pages site root).
+- **`web/flash.html`** — commissioning hub: in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a
   byte-faithful port of adafruit-nrfutil) with UF2 fallback, plus BLE-PIN + controller-key
   provisioning. The firmware source defaults to the local `./fw/`; the GitHub release URL is
   an optional fallback.

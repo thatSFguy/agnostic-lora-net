@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build firmware for all boards and stage UF2 + .dfu.json into web/fw/ so the
-# local commissioning hub (web/index.html) can flash without a public release.
+# local commissioning hub (web/flash.html) can flash without a public release.
 # Run from the repo root:  bash scripts/refresh_web_fw.sh
 set -e
 PIO=~/.platformio/penv/bin/pio

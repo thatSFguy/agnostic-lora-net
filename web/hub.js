@@ -1,4 +1,4 @@
-// hub.js — logic for the commissioning hub (index.html).
+// hub.js — logic for the commissioning hub (flash.html).
 'use strict';
 const $ = id => document.getElementById(id);
 // Firmware is served same-origin from ./fw/ (the Pages deploy + refresh_web_fw.sh stage it

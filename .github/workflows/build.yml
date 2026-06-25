@@ -113,6 +113,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web            # site root = web/, so the hub is index.html and ./fw/ is same-origin
+          path: web            # site root = web/, so index.html (the landing) is at the root and ./fw/ is same-origin
       - id: deploy
         uses: actions/deploy-pages@v4
