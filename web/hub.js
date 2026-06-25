@@ -12,7 +12,7 @@ const ESP32_BOARD_FILE = { 'heltec-v4':'agn-heltec-v4' };
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e', NUS_RX='6e400002-b5a3-f393-e0a9-e50e24dcca9e', NUS_TX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 function showTab(t) {
-  for (const x of ['flash','config']) {
+  for (const x of ['flash','manage']) {
     $('tab-'+x).classList.toggle('hide', x !== t);
     $('nav-'+x).classList.toggle('on', x === t);
   }
@@ -198,13 +198,13 @@ $('applyRf').onclick=async()=>{ if(!needConn())return; mark('ck-rf','warn','appl
 $('verifyProv').onclick=async()=>{ if(!needConn())return; plog('— verifying —');
   await prov.send('ctrlkey'); await prov.send('ble'); await prov.send('rf show'); };
 
-// ---------- configure tab ----------
-let cfg = makeConn();
-cfg.onLine = t => { const el=$('cfgLog'); el.textContent=(el.textContent+t+'\n').split('\n').slice(-300).join('\n'); el.scrollTop=el.scrollHeight;
-  let m; if((m=t.match(/node[= ]([0-9A-F]{8})/i))){ $('cfgNode').textContent=m[1].toUpperCase(); $('cfgNode').className='pill ok'; } };
-async function cfgConnect(kind){ try{ const l=await(kind==='usb'?cfg.serial():cfg.ble()); $('cfgNode').textContent=l;
-  $('cfgCmd').disabled=$('cfgSend').disabled=false; setTimeout(()=>cfg.send('info'),400);}catch(e){$('cfgLog').textContent+='connect: '+e+'\n';} }
-$('cfgUsb').onclick=()=>cfgConnect('usb');
-$('cfgBle').onclick=()=>cfgConnect('ble');
-$('cfgSend').onclick=()=>{ const v=$('cfgCmd').value.trim(); if(v){cfg.send(v);$('cfgCmd').value='';} };
-$('cfgCmd').addEventListener('keydown',e=>{ if(e.key==='Enter')$('cfgSend').click(); });
+// ---------- manage tab ----------
+// The Manage tab embeds the full node manager (manage.html) in an iframe. It's
+// same-origin, so its Web Serial / Web Bluetooth work normally. Load it lazily on
+// first open so the page doesn't grab a serial port until the user wants it.
+(function () {
+  const f = $('manageFrame');
+  if (!f) return;
+  const nav = $('nav-manage');
+  if (nav) nav.addEventListener('click', () => { if (!f.src) f.src = 'manage.html'; }, { once: true });
+})();

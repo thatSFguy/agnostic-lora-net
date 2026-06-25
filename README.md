@@ -255,12 +255,14 @@ python3 -m http.server 8000        # then open http://localhost:8000/web/
 
 - **`web/index.html`** — landing page: a simple menu that routes to the apps below (served at
   the GitHub Pages site root).
-- **`web/flash.html`** — commissioning hub: in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a
-  byte-faithful port of adafruit-nrfutil) with UF2 fallback, plus BLE-PIN + controller-key
-  provisioning. The firmware source defaults to the local `./fw/`; the GitHub release URL is
-  an optional fallback.
+- **`web/flash.html`** — commissioning hub, two tabs: **Flash & Provision** (in-browser nRF52
+  serial DFU via `web/nrf-dfu.js`, a byte-faithful port of adafruit-nrfutil, with UF2 fallback,
+  plus BLE-PIN + controller-key provisioning) and **Manage** (the full node manager below,
+  embedded). The firmware source defaults to the local `./fw/`; the GitHub release URL is an
+  optional fallback.
 - **`web/manage.html`** — node manager: radio PHY (with retune warning), battery calibration,
-  BLE pairing/PIN, the mobile flag, raw console.
+  BLE pairing/PIN, the mobile flag, raw console. Works standalone and is embedded as the
+  flasher's **Manage** tab.
 - **`web/map.html`** — gateway-centric mesh map (Leaflet, real geography): per-direction link
   quality/asymmetry/SNR-margin, battery badges, gateway console.
 - **`web/chat-demo.html`** — Web Bluetooth **clear-text chat demo**: flash a couple of nodes,

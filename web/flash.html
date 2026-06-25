@@ -67,8 +67,8 @@
   <nav>
     <button onclick="location.href='index.html'">↩ All tools</button>
     <button id="nav-flash" class="on" onclick="showTab('flash')">Flash &amp; Provision</button>
-    <button id="nav-config" onclick="showTab('config')">Configure</button>
-    <button id="nav-manage" onclick="location.href='map.html'">Monitor &amp; Manage ↗</button>
+    <button id="nav-manage" onclick="showTab('manage')">Manage</button>
+    <button onclick="location.href='map.html'">Map ↗</button>
   </nav>
 </header>
 <main>
@@ -179,24 +179,13 @@
 </section>
 
 <!-- ================================ CONFIGURE ================================ -->
-<section id="tab-config" class="hide">
-  <div class="card">
-    <h2>Configure a node</h2>
-    <p class="hint">Direct access to a single node over USB or BLE — the same controls as the
-      provisioning step, plus the raw console. For full monitoring use the
-      <a href="map.html">map</a>.</p>
-    <div class="row">
-      <button class="act" id="cfgUsb">Connect (USB)</button>
-      <button class="act" id="cfgBle">Connect (BLE)</button>
-      <span id="cfgNode" class="pill">not connected</span>
-    </div>
-    <div class="row">
-      <input type="text" id="cfgCmd" placeholder="console command (info, rf show, batt, help…)" style="flex:1" disabled>
-      <button class="act" id="cfgSend" disabled>Send</button>
-    </div>
-    <div id="cfgLog" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dim);
-         white-space:pre-wrap;background:#0b1118;border-radius:8px;padding:10px;max-height:280px;overflow:auto;margin-top:10px"></div>
-  </div>
+<section id="tab-manage" class="hide">
+  <p class="hint" style="margin:.2rem 0 .6rem">Full node manager — connect one node over USB or BLE
+    to set its name, BLE PIN, radio PHY, battery calibration and mobility, or drive the raw console.
+    For live multi-node monitoring use the <a href="map.html">map</a>.</p>
+  <iframe id="manageFrame" title="Node manager"
+          allow="serial; bluetooth"
+          style="width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:#0f1620"></iframe>
 </section>
 
 </main>
