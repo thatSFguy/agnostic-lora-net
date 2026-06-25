@@ -120,7 +120,10 @@ let gatewayId = null, selected = null, placing = null;
 const positions = JSON.parse(localStorage.getItem('agn-node-pos') || '{}');
 const aliases = JSON.parse(localStorage.getItem('agn-node-alias') || '{}');   // id -> manual override
 function saveAlias() { localStorage.setItem('agn-node-alias', JSON.stringify(aliases)); }
-const names = {};                                           // id -> the node's own friendly name (live, from info/[status])
+// id -> the node's own friendly name (learned from info/[status]). Persisted so names
+// reappear instantly after a disconnect instead of waiting for the slow status re-poll.
+const names = JSON.parse(localStorage.getItem('agn-node-names') || '{}');
+function saveNames() { localStorage.setItem('agn-node-names', JSON.stringify(names)); }
 const shortId = id => id.slice(-4);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const given = id => aliases[id] || names[id] || null;       // a GIVEN name: manual override, else the node's own name
@@ -232,7 +235,7 @@ function onLine(line) {
   if ((m = t.match(/^node ([0-9A-F]{8,64})\s+neighbors=\d+ routes=\d+/i))) {
     gatewayId = m[1].toUpperCase();
     const n = node(gatewayId); n.isGateway = true; n.lastSeen = now; n.routes = [];
-    const nm = t.match(/\bname=(.+)$/); if (nm && nm[1].trim()) names[gatewayId] = nm[1].trim();
+    const nm = t.match(/\bname=(.+)$/); if (nm && nm[1].trim() && names[gatewayId] !== nm[1].trim()) { names[gatewayId] = nm[1].trim(); saveNames(); }
     nbrsCtx = null; render(); return;
   }
   // Authoritative block list from the gateway (one line per info poll, may be empty).
@@ -297,7 +300,7 @@ function onLine(line) {
     const n = node(m[1].toUpperCase());
     n.lastSeen = now; n.fw = m[2]; n.sf = +m[4]; n.power = +m[5];
     if (m[6] !== undefined) n.batt = { mv:+m[6], pct:+m[7], at: now };
-    const nm = t.match(/\bname=(.+)$/); if (nm && nm[1].trim()) names[m[1].toUpperCase()] = nm[1].trim();
+    const nm = t.match(/\bname=(.+)$/); if (nm && nm[1].trim()) { const id = m[1].toUpperCase(); if (names[id] !== nm[1].trim()) { names[id] = nm[1].trim(); saveNames(); } }
     nbrsCtx = m[1].toUpperCase();      // following 'nbr ID q_rx=N q_tx=N' lines belong to it
     statusCtx = true;
     render(); return;
@@ -696,6 +699,7 @@ $('btnExport').onclick = () => {
     exported: new Date().toISOString(),
     positions,
     aliases,
+    names,
     controllerKey: JSON.parse(localStorage.getItem('agn-ctrl-key') || 'null'),
     controllerCounter: localStorage.getItem('agn-ctrl-counter') || '0',
   };
@@ -711,6 +715,7 @@ $('impFile').onchange = async e => {
   const pos = data.positions || data;
   Object.assign(positions, pos); savePos();
   if (data.aliases) { Object.assign(aliases, data.aliases); saveAlias(); }
+  if (data.names) { Object.assign(names, data.names); saveNames(); }
   if (data.controllerKey) {
     if (localStorage.getItem('agn-ctrl-key') &&
         !confirm('Replace this browser’s controller key with the imported one? '
