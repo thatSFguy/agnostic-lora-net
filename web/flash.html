@@ -36,7 +36,7 @@
   button.act:hover { background:#2a3d5e; } button.act:disabled { opacity:.4; cursor:default; }
   button.primary { background:var(--acc); color:#06121f; border-color:var(--acc); font-weight:600; }
   button.primary:hover { background:#7cb8ff; }
-  select, input[type=text], input[type=number], input[type=password] {
+  select, input:not([type]), input[type=text], input[type=number], input[type=password] {
     background:#0e1722; color:var(--fg); border:1px solid var(--line); border-radius:8px;
     padding:8px 10px; font-size:14px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:8px 0; }
@@ -207,7 +207,7 @@
         <label>Coding rate<select id="rf_cr">
           <option value="5">4/5</option><option value="6">4/6</option>
           <option value="7">4/7</option><option value="8">4/8</option></select></label>
-        <label>Sync word (hex)<input id="rf_sync" maxlength="2" placeholder="4D"></label>
+        <label>Sync word (hex)<input id="rf_sync" type="text" maxlength="2" placeholder="4D"></label>
         <label>Preamble (symbols)<input id="rf_pre" type="number" min="6" max="255"></label>
       </div>
       <div class="row">
