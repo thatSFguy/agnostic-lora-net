@@ -188,8 +188,8 @@ go run ./cmd/agnctl -file testdata/session.log -optimize -http :8080  # replay a
   target and ACKed back through the mesh. ROUTE override and remote PHY retune are still TODO.
 - **Resilient + self-contained.** The serial link auto-reconnects across node reboots/USB
   re-enumeration (the dashboard stays up through gateway blips). The controller also **serves the
-  firmware** it flashes (`/fw/`, default `-fwdir ../web/fw`) — no public release needed (the GitHub
-  releases are private).
+  firmware** it flashes (`/fw/`, default `-fwdir ../web/fw`) — so it works fully offline, no
+  external release fetch needed.
 
 **The dashboard** (`-http :8080`, one consolidated single-page app — `localhost` is a secure
 context, so Web Serial / Web Bluetooth work):
@@ -250,8 +250,8 @@ python3 -m http.server 8000        # then open http://localhost:8000/web/
 
 - **`web/index.html`** — commissioning hub: in-browser nRF52 serial DFU (`web/nrf-dfu.js`, a
   byte-faithful port of adafruit-nrfutil) with UF2 fallback, plus BLE-PIN + controller-key
-  provisioning. Set the firmware source to `./fw/` — **GitHub releases are private**, so the
-  release URL is only a fallback.
+  provisioning. The firmware source defaults to the local `./fw/`; the GitHub release URL is
+  an optional fallback.
 - **`web/manage.html`** — node manager: radio PHY (with retune warning), battery calibration,
   BLE pairing/PIN, the mobile flag, raw console.
 - **`web/map.html`** — gateway-centric mesh map (Leaflet, real geography): per-direction link
