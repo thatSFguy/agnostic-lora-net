@@ -190,19 +190,22 @@ function gwUp(label) {
   $('cmd').disabled = $('cmdSend').disabled = false;
   setTimeout(() => gw && gw.sendLine('trace off').catch(()=>{}), 400);
   let tick = 0, rrIdx = 0;
+  const statusTries = {};                // id -> status-query attempts (so unreachable nodes aren't polled forever)
   const poll = () => { if (!gw) return;
-    gw.sendLine('info').catch(()=>{});
-    if (tick % 3 === 0) setTimeout(() => gw && gw.sendLine('nbrdump').catch(()=>{}), 1200);
-    if (tick % 12 === 0) setTimeout(() => gw && gw.sendLine('rf show').catch(()=>{}), 2400);
-    if (tick % 12 === 6) setTimeout(() => gw && gw.sendLine('battdump').catch(()=>{}), 2400);
-    if (tick % 4 === 2) {               // STATUS round-robin: ~one remote node every 20 s
-      // Poll every discovered remote (not just placed ones) so names / fw / battery populate
-      // for the whole node list — placement is for the map, not for knowing a node's name.
+    gw.sendLine('info').catch(()=>{});   // local query (no airtime): gateway tables + neighbour link quality
+    if (tick % 3 === 0) setTimeout(() => gw && gw.sendLine('nbrdump').catch(()=>{}), 1200);   // local
+    if (tick % 12 === 0) setTimeout(() => gw && gw.sendLine('rf show').catch(()=>{}), 2400);  // local
+    if (tick % 12 === 6) setTimeout(() => gw && gw.sendLine('battdump').catch(()=>{}), 2400); // local
+    // STATUS floods the mesh (TTL-bounded query + reply), so poll hard ONLY to fill gaps
+    // (name / fw / battery), then back off to a quiet refresh once everything's populated.
+    if (tick % 4 === 2) {
       const remotes = [...nodes.keys()].filter(id => id !== gatewayId);
-      if (remotes.length) {
-        const t = remotes[rrIdx++ % remotes.length];
-        setTimeout(() => gw && gw.sendLine('status ' + t).catch(()=>{}), 2400);
-      }
+      const gaps = remotes.filter(id => !node(id).fw && (statusTries[id] || 0) < 3);  // never replied — a few tries
+      let t = null;
+      if (gaps.length) t = gaps[0];                                                // fill fast (~20 s) until populated
+      else if (tick % 36 === 2 && remotes.length) t = remotes[rrIdx++ % remotes.length];  // quiet refresh ~every 3 min
+      if (t) { statusTries[t] = (statusTries[t] || 0) + 1;
+        setTimeout(() => gw && gw.sendLine('status ' + t).catch(()=>{}), 2400); }
     }
     tick++;
   };
