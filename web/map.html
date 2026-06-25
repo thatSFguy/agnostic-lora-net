@@ -118,10 +118,13 @@ const nodes = new Map();
 let blocked = new Set();
 let gatewayId = null, selected = null, placing = null;
 const positions = JSON.parse(localStorage.getItem('agn-node-pos') || '{}');
-const aliases = JSON.parse(localStorage.getItem('agn-node-alias') || '{}');   // id -> friendly name
+const aliases = JSON.parse(localStorage.getItem('agn-node-alias') || '{}');   // id -> manual override
 function saveAlias() { localStorage.setItem('agn-node-alias', JSON.stringify(aliases)); }
+const names = {};                                           // id -> the node's own friendly name (live, from info/[status])
 const shortId = id => id.slice(-4);
-const nodeName = id => aliases[id] || shortId(id);          // alias if set, else last-4
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const given = id => aliases[id] || names[id] || null;       // a GIVEN name: manual override, else the node's own name
+const nodeName = id => given(id) || shortId(id);            // given name if any, else the hash (last-4) as fallback
 
 const $ = id => document.getElementById(id);
 function node(id) {
@@ -224,6 +227,7 @@ function onLine(line) {
   if ((m = t.match(/^node ([0-9A-F]{8,64})\s+neighbors=\d+ routes=\d+/i))) {
     gatewayId = m[1].toUpperCase();
     const n = node(gatewayId); n.isGateway = true; n.lastSeen = now; n.routes = [];
+    const nm = t.match(/\bname=(.+)$/); if (nm && nm[1].trim()) names[gatewayId] = nm[1].trim();
     nbrsCtx = null; render(); return;
   }
   // Authoritative block list from the gateway (one line per info poll, may be empty).
@@ -288,6 +292,7 @@ function onLine(line) {
     const n = node(m[1].toUpperCase());
     n.lastSeen = now; n.fw = m[2]; n.sf = +m[4]; n.power = +m[5];
     if (m[6] !== undefined) n.batt = { mv:+m[6], pct:+m[7], at: now };
+    const nm = t.match(/\bname=(.+)$/); if (nm && nm[1].trim()) names[m[1].toUpperCase()] = nm[1].trim();
     nbrsCtx = m[1].toUpperCase();      // following 'nbr ID q_rx=N q_tx=N' lines belong to it
     statusCtx = true;
     render(); return;
@@ -338,7 +343,7 @@ function nodeIcon(n) {
   const border = blk ? 'var(--bad, #c0392b)' : n.isGateway ? 'var(--acc)' : freshColor(n);
   const sel = (selected === n.id) ? ';outline:2px solid var(--acc);outline-offset:2px' : '';
   return L.divIcon({ className: '',
-    html: `<div class="nodelabel" style="border-color:${border}${sel}">${nodeName(n.id)}${gwTxt}${blkTxt}${battTxt}</div>`,
+    html: `<div class="nodelabel" style="border-color:${border}${sel}">${esc(nodeName(n.id))}${gwTxt}${blkTxt}${battTxt}</div>`,
     iconAnchor: [30, 13] });
 }
 function savePos() { localStorage.setItem('agn-node-pos', JSON.stringify(positions)); }
@@ -440,7 +445,7 @@ function render() {
     const row = document.createElement('div');
     row.className = 'node-row' + (selected === id ? ' sel' : '');
     row.innerHTML = `<span class="dot" style="background:${freshColor(n)}"></span>
-      <span>${aliases[id] ? `<b>${aliases[id]}</b> <span class="mono" style="color:var(--dim);font-size:11px">${shortId(id)}</span>` : `<span class="mono">${id}</span>`}</span>
+      <span>${given(id) ? `<b>${esc(given(id))}</b> <span class="mono" style="color:var(--dim);font-size:11px">${shortId(id)}</span>` : `<span class="mono">${id}</span>`}</span>
       ${n.isGateway ? '<span class="pill ok">GW</span>' : ''}
       ${positions[id] ? '' : '<span class="pill">place ▸</span>'}`;
     row.onclick = () => {
@@ -477,7 +482,7 @@ function renderHealth() {
   $('healthList').innerHTML = rows.map(r => {
     const rf = r.rf ? ` <span style="color:var(--dim)">${r.rf.rssi}dBm/${r.rf.snr}dB ${marginShort(r.rf.snr)}</span>` : '';
     return `<div class="linkrow" style="color:${qColor(r.worst > 1 ? 1 : r.worst)}">
-       ${nodeName(r.aid)} ⇄ ${nodeName(r.bid)} q=${r.worst > 1 ? '?' : r.worst.toFixed(2)}${rf}
+       ${esc(nodeName(r.aid))} ⇄ ${esc(nodeName(r.bid))} q=${r.worst > 1 ? '?' : r.worst.toFixed(2)}${rf}
        ${r.asym ? ' ⚠asym' : ''}${r.oneway ? ' ⇢one-way' : ''}</div>`;
   }).join('') || '<span class="hint">no links yet</span>';
 }
@@ -504,7 +509,7 @@ function renderDetail() {
     : n.batt.mv !== undefined ? `${n.batt.mv} mV — ${n.batt.pct}%`
     : `${n.batt.pct}% (via beacon — mV arrives with battdump/status)`;
   el.innerHTML = `
-    <div style="font-size:16px;font-weight:600">${aliases[n.id] || shortId(n.id)} ${isGw ? '<span class="pill ok">gateway</span>' : '<span class="pill">remote</span>'}</div>
+    <div style="font-size:16px;font-weight:600">${esc(given(n.id) || shortId(n.id))} ${isGw ? '<span class="pill ok">gateway</span>' : '<span class="pill">remote</span>'}</div>
     <div class="mono" style="font-size:11.5px;color:var(--dim)">${n.id}</div>
     <div class="row" style="display:flex;gap:6px;margin:8px 0">
       <input type="text" id="aliasIn" placeholder="alias (friendly name)" value="${(aliases[n.id]||'').replace(/"/g,'&quot;')}" style="flex:1">
@@ -520,14 +525,14 @@ function renderDetail() {
     <h2>Hears (inbound) — RSSI / SNR</h2>
     <div id="hearsList">${Object.entries(n.hears).map(([fid, d]) =>
       `<div class="linkrow" data-nid="${fid}" style="color:${qColor(d.q || 0)}">
-         ${nodeName(fid)} &nbsp;q=${(d.q ?? 0).toFixed(2)}${d.rssi != null ? ` &nbsp;<span style="color:var(--dim)">${d.rssi} dBm / ${d.snr} dB SNR ${marginShort(d.snr)}</span>` : ''}
+         ${esc(nodeName(fid))} &nbsp;q=${(d.q ?? 0).toFixed(2)}${d.rssi != null ? ` &nbsp;<span style="color:var(--dim)">${d.rssi} dBm / ${d.snr} dB SNR ${marginShort(d.snr)}</span>` : ''}
          <i style="color:var(--dim)">(${d.src})</i></div>`).join('')
       || '<span class="hint">nothing heard yet</span>'}</div>
     <h2>Heard by (outbound)</h2>
     <div id="heardByList">${[...nodes.entries()]
       .filter(([oid, o]) => oid !== n.id && o.hears[n.id])
       .map(([oid, o]) => `<div class="linkrow" data-nid="${oid}" style="color:${qColor(o.hears[n.id].q || 0)}">
-         ${nodeName(oid)} &nbsp;q=${(o.hears[n.id].q ?? 0).toFixed(2)}</div>`).join('')
+         ${esc(nodeName(oid))} &nbsp;q=${(o.hears[n.id].q ?? 0).toFixed(2)}</div>`).join('')
       || '<span class="hint">no node reports hearing it yet</span>'}</div>
     ${isGw ? `
     <h2>Battery calibration</h2>
