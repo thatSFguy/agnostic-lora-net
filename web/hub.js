@@ -142,7 +142,7 @@ function makeConn() {
 }
 
 // ---------- provision & configure (one connection) ----------
-let prov = makeConn(), provNodeId = null, provConnected = false, loadedRf = null;
+let prov = makeConn(), provNodeId = null, provConnected = false, loadedRf = null, bleEnableTried = false;
 function plog(m){ const el=$('provLog'); el.textContent=(el.textContent+m+'\n').split('\n').slice(-200).join('\n'); el.scrollTop=el.scrollHeight; }
 function mark(id, state, text){ const e=$(id); e.textContent=text; e.className='pill'+(state?' '+state:''); }
 
@@ -186,8 +186,11 @@ prov.onLine = t => {
   if ((m=t.match(/batt=(\d+)mV\/(\d+)%/))) $('batt_val').textContent=m[1]+' mV — '+m[2]+'%';
   // BLE advertising state
   if ((m=t.match(/adv(?:ertising)?=([01])/))){ const on=m[1]==='1';
-    $('advstate').textContent='BLE: '+(on?'ON — advertising as ALN-…':'off'); if(on) mark('ck-pin','ok','✓ BLE on'); }
-  if (/BLE PIN=\d{6}/.test(t)) mark('ck-pin','ok','✓ PIN set, BLE on');
+    $('advstate').textContent='BLE: '+(on?'ON — advertising as ALN-…':'off');
+    if(on){ mark('ck-pin','ok','✓ BLE on'); bleEnableTried=false; }
+    else if(bleEnableTried){ mark('ck-pin','warn','saved — RESET the node to advertise');
+      plog('runtime BLE-enable didn’t take (known on these boards). The setting is SAVED —'
+         +' press the node’s RESET button / power-cycle it, and it boots advertising as ALN-…'); } }
   // radio config:  [rf] freq_hz=… bw_hz=… sf=… cr=… power_dbm=… sync=0x4D preamble=… (active)
   if (t.startsWith('[rf]') && t.includes('(active)')) {
     const g=k=>{ const mm=t.match(new RegExp(k+'=(-?(?:0x)?[0-9A-Fa-f]+)')); return mm?mm[1]:null; };
@@ -260,7 +263,10 @@ $('provKey').onclick=async()=>{ if(!needConn())return; if(!ctrlKeys){plog('no co
 $('name_set').onclick=()=>{ if(!needConn())return; const v=$('name_in').value.trim(); if(v) prov.send('name '+v); };
 $('name_clear').onclick=()=>{ if(!needConn())return; prov.send('name clear'); $('name_in').value=''; };
 // BLE pairing
-$('enable').onclick=()=>{ if(needConn()) prov.send('ble on'); };
+$('enable').onclick=()=>{ if(!needConn())return; bleEnableTried=true; mark('ck-pin','warn','enabling…');
+  plog('→ ble on (the setting is saved either way). If BLE stays off below, the runtime enable'
+     +' didn’t take on this board — RESET / power-cycle the node and it boots advertising.');
+  prov.send('ble on'); };
 $('disable').onclick=()=>{ if(needConn()) prov.send('ble off'); };
 $('newpin').onclick=()=>{ if(needConn()) prov.send('blepin random'); };
 $('setbtn').onclick=()=>{ if(!needConn())return; const p=$('setpin').value; if(/^\d{6}$/.test(p)) prov.send('blepin '+p); else plog('PIN must be 6 digits'); };
