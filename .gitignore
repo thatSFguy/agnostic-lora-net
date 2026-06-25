@@ -25,7 +25,6 @@ docs/phase4-controller-plan.md
 docs/controller-verify-acl-impl.md
 docs/node-id-widening-impl.md
 docs/node-keygen-signed-announce-impl.md
-docs/meshcore-integration.md
 
 # Controller key backup (SECRET — the network WRITE credential; never commit)
 agnlora*.json

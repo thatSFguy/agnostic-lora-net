@@ -341,5 +341,9 @@ or just send the PR. Be kind; assume good faith.
   plus a deep-sleep role for leaf/tracker nodes. Not yet implemented.
 - **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
   an RNode-compatible BLE front-end backed by the mesh).
-- Polish: FCC dwell-time handling for the 906.625 MHz fixed channel, and further
-  flash-write minimization for solar nodes.
+- Polish: FCC dwell-time handling for the 906.625 MHz fixed channel. (Flash wear is
+  already a non-issue: writes are config-only — save-if-dirty — plus the signed-control
+  replay counter on each accepted command, so ~0 writes/day with no controller and ~12 on
+  a node the optimiser actively holds down, comfortably inside the nRF52840's endurance with
+  LittleFS wear-levelling. A held node could drop near zero by skipping the no-op heartbeat
+  re-assert persists, but it isn't worth the complexity yet.)
