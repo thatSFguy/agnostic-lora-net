@@ -27,16 +27,16 @@ Same radios, same physics — different class of network. All numbers below are
 
 | | Meshtastic / MeshCore | **agnostic-LoRa-Net** |
 |---|---|---|
-| Encryption | channel PSK (shared key) | **end-to-end Reticulum crypto** — nodes never see plaintext, no shared network key to leak |
-| Delivery confirmation | optional hop-level ACK | **cryptographic delivery proof** from the recipient's key |
-| Large payloads | short texts only | **images / files**: 14 KB delivered loss-free (SAR + 4-deep queue + transfer-complete ACK; ~210 B/s at SF7) |
-| Asymmetric links | discarded / break routing | **routed per-direction** (independent q_rx/q_tx paths) |
-| Channel access | random / fixed slots | **CSMA via hardware CAD** (listen-before-talk) + jittered recovery timers — zero fragment loss across a 53-chunk transfer under load |
-| Reliability stack | single-shot packets | per-hop ARQ **+** end-to-end NACK repair **+** dedup |
-| Addressing | fixed node ids | **identity directory**: register/resolve opaque ≤16 B ids (RNS hashes), push-on-change, mobility-ready |
-| PHY management | reflash / app setting | **runtime-retunable** (freq/BW/SF/CR/power, staged+persisted) with a documented network retune safety protocol |
-| Overhead | fixed beacon cadence | **beacon period auto-scales with SF** (~constant 0.3 % duty; configurable `net beacon`) |
-| Telemetry | app-dependent | battery %, **per-neighbour RSSI/SNR + SNR margin**, neighbour tables — free in beacons + on-demand status; mapped live |
+| Encryption | AES channel keys; public-key DMs | **end-to-end Reticulum crypto** — opaque to the transport; the backbone never sees plaintext |
+| Delivery confirmation | optional, non-cryptographic ACK | **cryptographic delivery proof** from the recipient's key |
+| Large payloads | short messages; no file transfer | **images / files**: 14 KB delivered loss-free (SAR + 4-deep queue + transfer-complete ACK; ~210 B/s at SF7) |
+| Routing | managed flooding — every node rebroadcasts (tolerates asymmetric links, but no link-quality routing) | **link-quality distance-vector**, independent per-direction paths (q_rx / q_tx) |
+| Channel access | carrier-sense + randomized backoff | **CSMA via hardware CAD** (listen-before-talk) + jittered recovery timers — zero fragment loss across a 53-chunk transfer under load |
+| Reliability stack | flood + optional ACK/retry | per-hop ARQ **+** end-to-end NACK repair **+** dedup |
+| Addressing | device-derived node ids (+ public keys) | **self-certifying identity**: 16 B node id = `blake2b(node's Ed25519 pubkey)`, signed announces prove the id↔key binding; register/resolve directory, mobility-ready |
+| PHY management | app/config setting | **runtime-retunable** (freq/BW/SF/CR/power, staged+persisted) with a documented network retune safety protocol |
+| Overhead | configurable broadcast intervals | **beacon period auto-scales with SF** (~constant 0.3 % duty; configurable `net beacon`) |
+| Telemetry | built-in device telemetry; no per-neighbour link metrics | battery %, **per-neighbour RSSI/SNR + SNR margin**, neighbour tables — free in beacons + on-demand status; mapped live |
 | RF power | fixed / manual | **autonomous closed-loop optimiser** (Tier-1 controller): signed, mesh-wide, tunes each node against its weakest link; mobility-aware (raise fast / trim slow); self-heals via on-device auto-revert |
 | Management UI | phone app | **one zero-install control plane** (`agnctl` dashboard): live map + decision feed + node config + in-browser firmware flashing, all over Web Serial / Web Bluetooth |
 
@@ -327,13 +327,12 @@ or just send the PR. Be kind; assume good faith.
   mesh-wide autonomous power optimiser, mobility-aware control, the consolidated dashboard,
   and resilient serial are all **live** (see the control-plane section above). Still TODO:
   signed **ROUTE override** and **remote PHY retune** over the same path; auto-block of
-  pathological links; transfer boost; controller-key **rotation / re-key** (§4e). The
+  pathological links; transfer boost; controller-key **rotation / re-key**. The
   network-wide retune safety protocol is in [`docs/remote-config.md`](docs/remote-config.md).
 - **Energy** — nodes currently run continuous RX with the MCU spinning; the highest-value
   power win is to **light-sleep the nRF52 between radio interrupts** (DIO1 already wakes it),
   plus a deep-sleep role for leaf/tracker nodes. Not yet implemented.
 - **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
   an RNode-compatible BLE front-end backed by the mesh).
-- Polish: pub-key-derived node IDs (§3/§5, so node identity is authenticated — today's
-  32-bit IDs are opaque + spoofable), FCC dwell-time handling for the 906.625 MHz fixed
-  channel (§8), flash-write minimization for solar nodes (§4 Req 4).
+- Polish: FCC dwell-time handling for the 906.625 MHz fixed channel, and further
+  flash-write minimization for solar nodes.

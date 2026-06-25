@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Project status & design
+    url: https://github.com/thatSFguy/agnostic-lora-net#project-status--alpha
+    about: Alpha status, what's built, and what's left — please skim before filing.
+  - name: Security vulnerability
+    url: https://github.com/thatSFguy/agnostic-lora-net/security/policy
+    about: Do NOT open a public issue for security bugs — see the security policy.
