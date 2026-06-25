@@ -117,7 +117,8 @@ pio run  -e wiscore_rak4631      # RAK4631 mesh firmware (BLE compiled in, off b
 pio run  -e xiao_nrf52           # Seeed XIAO nRF52840 + Wio-SX1262 (SoftDevice s140 v7)
 pio run  -e promicro             # Pro Micro nRF52840 + SX1262
 pio run  -e tracker_t1000_e      # Seeed SenseCAP T1000-E (nRF52840 + Semtech LR1110)
-pio run  -e heltec_v4 -t upload  # Heltec WiFi LoRa 32 V4 (ESP32-S3 + SX1262, flash over USB serial)
+pio run  -e xiao_esp32s3         # Seeed XIAO ESP32-S3 + Wio-SX1262
+pio run  -e heltec_v4            # Heltec WiFi LoRa 32 V4 (ESP32-S3 + SX1262)
 pio run  -e compile_check        # host compile-verify on a stock Feather nRF52840
 ```
 
@@ -129,13 +130,14 @@ from MeshCore / Meshtastic). The radio sits on the default `SPI` remapped to the
 pins (`SPI.setPins` on nRF52, `SPI.begin(sck,miso,mosi,ss)` on ESP32) with a
 crystal-mode fallback — matching MeshCore's working RAK4631 init.
 
-The **Heltec V4** is the first ESP32 target: no SoftDevice (BLE is left out for now —
-its console is over USB serial), persistence on the ESP32 LittleFS
-(`include/fs_compat.h`), and the node ID folded from the eFuse MAC. Its SX1262 sits
-behind a GC1109/KCT8103L front-end module driven in lockstep with TX/RX; **that FEM/VEXT
-control is board-revision-specific — verify on first flash** (see the note in
-`include/board_config.h`). It flashes over USB serial (esptool), not the nRF52 UF2/DFU
-path used by the hub.
+The **ESP32-S3 targets** (Heltec V4, XIAO ESP32-S3) have no SoftDevice (BLE is left out
+for now — console over USB serial), persistence on the ESP32 LittleFS
+(`include/fs_compat.h`), and the node ID folded from the eFuse MAC. The Heltec's SX1262
+sits behind a GC1109/KCT8103L front-end module driven in lockstep with TX/RX; **that
+FEM/VEXT control is board-revision-specific — verify on first flash** (see the note in
+`include/board_config.h`). ESP32-S3 boards flash over USB serial — **in-browser from the
+web hub via ESP Web Tools**, or with `esptool` / `pio run -e <env> -t upload` — not the
+nRF52 UF2/DFU path.
 
 **Flashing + bring-up: [`docs/hardware-bringup.md`](docs/hardware-bringup.md).** Node
 IDs auto-derive from each chip's FICR (nRF52) or eFuse MAC (ESP32), so boards differ
