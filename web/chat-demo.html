@@ -135,9 +135,11 @@
     </div>
   </div>
 
-  <div class="warn">⚠️ <b>Clear text.</b> Messages are sent <b>unencrypted</b> over the air —
-  anyone in radio range can read them. This is a tool for testing the mesh, not private
-  messaging. For end-to-end encryption, run a Reticulum app over the node
+  <div class="warn">⚠️ <b>Clear text — think telnet, not SSH.</b> Messages go out <b>unencrypted</b>
+  over the air, so anyone in radio range can sniff them, just like telnet on a shared wire.
+  That's fine here: this demo exists to exercise the mesh, not to carry private traffic.
+  When you need secured comms, run a Reticulum app over the node — it gives you the
+  end-to-end encryption layer this demo deliberately leaves off
   (see <code>docs/tcp-bridge.md</code>).</div>
 
   <details class="log">
