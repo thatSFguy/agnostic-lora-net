@@ -167,7 +167,7 @@ async function connectSerial() {
 }
 
 async function connectBle() {
-  const dev = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:'AgnLoRa'}], optionalServices:[NUS] });
+  const dev = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:'ALN'}], optionalServices:[NUS] });
   dev.addEventListener('gattserverdisconnected', gwDown);
   const srv = await (await dev.gatt.connect()).getPrimaryService(NUS);
   const rx = await srv.getCharacteristic(NUS_RX), tx = await srv.getCharacteristic(NUS_TX);
@@ -221,14 +221,14 @@ function onLine(line) {
   const now = Date.now();
   let m;
 
-  if ((m = t.match(/^node ([0-9A-F]{8})\s+neighbors=\d+ routes=\d+/i))) {
+  if ((m = t.match(/^node ([0-9A-F]{8,64})\s+neighbors=\d+ routes=\d+/i))) {
     gatewayId = m[1].toUpperCase();
     const n = node(gatewayId); n.isGateway = true; n.lastSeen = now; n.routes = [];
     nbrsCtx = null; render(); return;
   }
   // Authoritative block list from the gateway (one line per info poll, may be empty).
-  if ((m = t.match(/^\[blocked\]((?:\s+[0-9A-F]{8})*)\s*$/i))) {
-    blocked = new Set((m[1].match(/[0-9A-F]{8}/gi) || []).map(s => s.toUpperCase()));
+  if ((m = t.match(/^\[blocked\]((?:\s+[0-9A-F]{8,64})*)\s*$/i))) {
+    blocked = new Set((m[1].match(/[0-9A-F]{8,64}/gi) || []).map(s => s.toUpperCase()));
     render(); return;
   }
   if ((m = t.match(/^fw (\S+)/)) && gatewayId) { node(gatewayId).fw = m[1]; return; }
@@ -247,7 +247,7 @@ function onLine(line) {
   }
   if ((m = t.match(/^net beacon=(\d+)s/))) { beaconSec = +m[1]; return; }
   // gateway's own nbr lines (info):  nbr ID q_rx=NN q_tx=NN (x100) ... [rssi=R snr=S]
-  if ((m = t.match(/^nbr ([0-9A-F]{8})\s+q_rx=(-?\d+) q_tx=(-?\d+).*?(?:rssi=(-?\d+) snr=(-?\d+))?$/i))) {
+  if ((m = t.match(/^nbr ([0-9A-F]{8,64})\s+q_rx=(-?\d+) q_tx=(-?\d+).*?(?:rssi=(-?\d+) snr=(-?\d+))?$/i))) {
     if (nbrsCtx) {        // inside an [nbrs]/[status] block: SRC hears ID at q_rx
       const src = statusCtx ? 'status' : 'announce';
       node(nbrsCtx).hears[m[1].toUpperCase()] = { q:+m[2]/100, age:0, src, at:now };
@@ -264,11 +264,11 @@ function onLine(line) {
     }
     render(); return;
   }
-  if ((m = t.match(/^route dst=([0-9A-F]{8}) via=([0-9A-F]{8}) cost=(-?\d+) hops=(\d+)/i)) && gatewayId) {
+  if ((m = t.match(/^route dst=([0-9A-F]{8,64}) via=([0-9A-F]{8,64}) cost=(-?\d+) hops=(\d+)/i)) && gatewayId) {
     node(gatewayId).routes.push({ dst:m[1].toUpperCase(), via:m[2].toUpperCase(), cost:+m[3]/16, hops:+m[4] });
     return;
   }
-  if ((m = t.match(/^\[ctrl\] ack ([0-9A-F]{8}) cmd=(\d+) applied=(-?\d+) provisional=(\d)/i))) {
+  if ((m = t.match(/^\[ctrl\] ack ([0-9A-F]{8,64}) cmd=(\d+) applied=(-?\d+) provisional=(\d)/i))) {
     const origin = m[1].toUpperCase(), applied = +m[3], prov = m[4] === '1';
     const n = node(origin); n.power = applied; n.lastSeen = now;
     ctrlPending.delete(origin+'@');          // ack arrived — cancel the no-ack warning
@@ -278,13 +278,13 @@ function onLine(line) {
     if (!prov) ctrlPending.delete(origin);
     renderDetail(); return;
   }
-  if ((m = t.match(/^\[batt\] ([0-9A-F]{8}) mv=(\d+) pct=(\d+) age=(\d+)s/i))) {
+  if ((m = t.match(/^\[batt\] ([0-9A-F]{8,64}) mv=(\d+) pct=(\d+) age=(\d+)s/i))) {
     const n = node(m[1].toUpperCase());
     const at = now - (+m[4]) * 1000;
     if (!n.batt || (n.batt.at || 0) <= at) n.batt = { mv:+m[2], pct:+m[3], at };
     return;
   }
-  if ((m = t.match(/^\[status\] ([0-9A-F]{8}) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV\/(\d+)%|\?)/i))) {
+  if ((m = t.match(/^\[status\] ([0-9A-F]{8,64}) fw=(\S+) up=(\d+)min sf=(\d+) pwr=(-?\d+) batt=(?:(\d+)mV\/(\d+)%|\?)/i))) {
     const n = node(m[1].toUpperCase());
     n.lastSeen = now; n.fw = m[2]; n.sf = +m[4]; n.power = +m[5];
     if (m[6] !== undefined) n.batt = { mv:+m[6], pct:+m[7], at: now };
@@ -292,7 +292,7 @@ function onLine(line) {
     statusCtx = true;
     render(); return;
   }
-  if ((m = t.match(/^\[nbrs\] ([0-9A-F]{8}) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?/i))) {
+  if ((m = t.match(/^\[nbrs\] ([0-9A-F]{8,64}) age=(\d+)s rssi=(-?\d+) snr=(-?\d+)(?: batt=(\d+)%)?/i))) {
     nbrsCtx = m[1].toUpperCase();
     const n = node(nbrsCtx);
     n.lastSeen = Math.max(n.lastSeen, now - (+m[2]) * 1000);

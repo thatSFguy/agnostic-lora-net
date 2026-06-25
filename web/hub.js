@@ -127,7 +127,7 @@ function makeConn() {
       return 'USB';
     },
     async ble() {
-      dev = await navigator.bluetooth.requestDevice({filters:[{namePrefix:'AgnLoRa'}], optionalServices:[NUS]});
+      dev = await navigator.bluetooth.requestDevice({filters:[{namePrefix:'ALN'}], optionalServices:[NUS]});
       const srv = await (await dev.gatt.connect()).getPrimaryService(NUS);
       const rx = await srv.getCharacteristic(NUS_RX), tx = await srv.getCharacteristic(NUS_TX);
       await tx.startNotifications();
@@ -149,7 +149,7 @@ function mark(id, state, text){ const e=$(id); e.textContent=text; e.className='
 prov.onLine = t => {
   plog(t);
   let m;
-  if ((m=t.match(/node[= ]([0-9A-F]{8})/i)) || (m=t.match(/AgnLoRa-([0-9A-F]{8})/i))) {
+  if ((m=t.match(/node[= ]([0-9A-F]{8,64})/i)) || (m=t.match(/ALN-([0-9A-F]{8,64})/i))) {
     provNodeId = m[1].toUpperCase(); $('provNode').textContent = provNodeId; $('provNode').className='pill ok';
   }
   // pre-fill the radio fields from the node's actual settings (was always 22)
