@@ -598,7 +598,7 @@ static void ble_setup() {
 // Service the BLE NUS. The same characteristic carries two channels, told apart with
 // zero ambiguity because HDLC frames are 0x7E-delimited and ASCII console text never
 // contains 0x7E:
-//   * HDLC frames ([u32 dst][payload])  -> the mesh tunnel (web/ble.html, Reticulum).
+//   * HDLC frames ([type][len][id][payload])  -> the mesh tunnel (web/chat-demo.html, Reticulum).
 //   * plain text lines ending in '\n'   -> the management console (config-over-BLE),
 //     with responses sent back over BLE. This is the field-config / retune-rescue path.
 static void ble_poll() {

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agnostic-LoRa-Net · clear-text chat demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0e1726; --panel:#16213a; --panel2:#1d2a48; --line:#2b3a5c; --fg:#e8eef7;
+    --dim:#94a3bd; --accent:#3b82f6; --accent2:#2563eb; --ok:#22c55e; --bad:#ef4444;
+    --mine:#2563eb; --theirs:#243352; --warn-bg:#3a2c12; --warn-line:#a16207;
+  }
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);
+       color:var(--fg);margin:0;line-height:1.5;}
+  .wrap{max-width:680px;margin:0 auto;padding:18px 16px 40px;}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem;}
+  .sub{color:var(--dim);margin:.1rem 0 1rem;font-size:.95rem;}
+  .path{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;font-size:.8rem;color:var(--dim);
+        background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.5rem .7rem;margin-bottom:1rem;}
+  .path b{color:var(--fg);font-weight:600;} .path .arrow{opacity:.5;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1rem;margin:.8rem 0;}
+  details.help{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:.4rem 1rem;margin:.8rem 0;}
+  details.help summary{cursor:pointer;font-weight:600;padding:.5rem 0;list-style:none;}
+  details.help summary::-webkit-details-marker{display:none;}
+  details.help summary::before{content:"▸ ";color:var(--accent);}
+  details.help[open] summary::before{content:"▾ ";}
+  ol.steps{margin:.3rem 0 .8rem;padding-left:1.2rem;} ol.steps li{margin:.35rem 0;}
+  code{background:#0b1322;border:1px solid var(--line);padding:.05rem .35rem;border-radius:5px;font-size:.85em;}
+  button{font-size:1rem;font-weight:600;padding:.55rem 1.1rem;border-radius:10px;border:1px solid var(--line);
+         background:var(--panel2);color:var(--fg);cursor:pointer;transition:filter .12s;}
+  button:hover:not(:disabled){filter:brightness(1.15);}
+  button:disabled{opacity:.45;cursor:not-allowed;}
+  button.primary{background:var(--accent2);border-color:var(--accent);}
+  .barrow{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;}
+  .pill{font-size:.8rem;font-weight:600;padding:.2rem .6rem;border-radius:999px;border:1px solid var(--line);}
+  .pill.off{color:var(--bad);} .pill.on{color:var(--ok);} .pill.wait{color:#eab308;}
+  .pill::before{content:"●  ";}
+  .me-row{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-top:.7rem;
+          padding-top:.7rem;border-top:1px solid var(--line);}
+  .me-row .lbl{color:var(--dim);font-size:.85rem;}
+  .idbox{font-family:ui-monospace,monospace;background:#0b1322;border:1px solid var(--line);
+         border-radius:8px;padding:.3rem .55rem;font-size:.82rem;word-break:break-all;}
+  .copy{font-size:.78rem;padding:.25rem .55rem;}
+  .chips{display:flex;gap:.4rem;flex-wrap:wrap;margin-left:auto;}
+  .chip{font-size:.75rem;color:var(--dim);background:#0b1322;border:1px solid var(--line);
+        border-radius:7px;padding:.15rem .5rem;}
+  #chat{display:flex;flex-direction:column;gap:.5rem;min-height:9rem;max-height:46vh;overflow:auto;padding:.2rem;}
+  .empty{color:var(--dim);text-align:center;margin:auto;font-size:.9rem;padding:1.5rem 1rem;}
+  .msg{max-width:78%;padding:.5rem .7rem;border-radius:14px;font-size:.95rem;word-wrap:break-word;}
+  .msg .meta{display:block;font-size:.68rem;opacity:.7;margin-top:.2rem;font-family:ui-monospace,monospace;}
+  .msg.me{align-self:flex-end;background:var(--mine);border-bottom-right-radius:4px;}
+  .msg.them{align-self:flex-start;background:var(--theirs);border-bottom-left-radius:4px;}
+  .composer{margin-top:.7rem;}
+  .field{margin:.45rem 0;}
+  .field label{display:block;font-size:.8rem;color:var(--dim);margin-bottom:.2rem;}
+  input{font-size:1rem;padding:.6rem .7rem;width:100%;border-radius:10px;border:1px solid var(--line);
+        background:#0b1322;color:var(--fg);font-family:inherit;}
+  input#dst{font-family:ui-monospace,monospace;letter-spacing:.5px;}
+  input#dst.good{border-color:var(--ok);} input#dst.bad{border-color:var(--bad);}
+  .dsthint{font-size:.76rem;margin-top:.2rem;min-height:1rem;}
+  .dsthint.good{color:var(--ok);} .dsthint.bad{color:var(--bad);} .dsthint.dim{color:var(--dim);}
+  .sendrow{display:flex;gap:.5rem;} .sendrow input{flex:1;}
+  .warn{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:10px;
+        padding:.6rem .8rem;font-size:.85rem;margin:.9rem 0;}
+  details.log summary{cursor:pointer;color:var(--dim);font-size:.85rem;}
+  #log{background:#070d18;color:#5fd35f;font-family:ui-monospace,monospace;font-size:.78rem;
+       height:9rem;overflow:auto;padding:.5rem;white-space:pre-wrap;border-radius:8px;margin-top:.4rem;}
+  a{color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>LoRa mesh — clear-text chat demo</h1>
+  <p class="sub">Send a message from your browser, across the LoRa radio mesh, to another browser.
+  No internet, no cell network — just the radios.</p>
+
+  <div class="path">
+    <b>💻 your browser</b><span class="arrow">→</span> BLE <span class="arrow">→</span>
+    <b>📟 node</b><span class="arrow">→</span> 📡 LoRa <span class="arrow">→</span>
+    <b>📟 node</b><span class="arrow">→</span> BLE <span class="arrow">→</span><b>💻 their browser</b>
+  </div>
+
+  <details class="help" open>
+    <summary>First time? Setup in 3 steps</summary>
+    <ol class="steps">
+      <li><b>Flash two (or more) nodes</b> with the <a href="index.html">commissioning hub</a>.
+          On each, enable Bluetooth: connect over USB and run <code>ble on</code>, then note its
+          6-digit PIN (<code>blepin</code>).</li>
+      <li><b>Open this page in two browser tabs</b> (Chrome or Edge). In each tab press
+          <b>Connect</b>, pick a different node (they show up as <code>ALN-…</code>), and enter the PIN.</li>
+      <li>Each tab shows <b>its own node id</b> once connected. <b>Copy one node's id into the
+          other tab's “To” box</b>, type a message, and hit Send. It should pop up in the other tab.</li>
+    </ol>
+  </details>
+
+  <!-- connection -->
+  <div class="card">
+    <div class="barrow">
+      <button id="connect" class="primary">Connect a node</button>
+      <button id="disconnect" disabled>Disconnect</button>
+      <span id="status" class="pill off">disconnected</span>
+    </div>
+    <div class="me-row" id="meRow" style="display:none">
+      <span class="lbl">Your node id:</span>
+      <span class="idbox" id="me">—</span>
+      <button class="copy" id="copyId" title="Copy this id to share with the other tab">Copy</button>
+      <span class="chips">
+        <span class="chip">⬆ sent <b id="sent">0</b></span>
+        <span class="chip">⬇ recv <b id="recv">0</b></span>
+        <span class="chip">⏱ <b id="uptime">0s</b></span>
+      </span>
+    </div>
+  </div>
+
+  <!-- chat -->
+  <div class="card">
+    <div id="chat"><div class="empty" id="empty">Connect a node to start. Messages you send and
+      receive will appear here.</div></div>
+
+    <div class="composer">
+      <div class="field">
+        <label for="dst">To — the <i>other</i> node's id (32 hex characters)</label>
+        <input id="dst" placeholder="paste the other tab's node id" autocomplete="off" spellcheck="false">
+        <div class="dsthint dim" id="dsthint">Tip: copy it from the other tab's “Your node id”.</div>
+      </div>
+      <div class="field">
+        <label for="msg">Message</label>
+        <div class="sendrow">
+          <input id="msg" placeholder="type a message…" value="hello across the LoRa mesh" autocomplete="off">
+          <button id="send" class="primary" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="warn">⚠️ <b>Clear text.</b> Messages are sent <b>unencrypted</b> over the air —
+  anyone in radio range can read them. This is a tool for testing the mesh, not private
+  messaging. For end-to-end encryption, run a Reticulum app over the node
+  (see <code>docs/tcp-bridge.md</code>).</div>
+
+  <details class="log">
+    <summary>Connection log (for troubleshooting)</summary>
+    <div id="log"></div>
+  </details>
+</div>
+
+<script>
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RX ='6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const TX ='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const $=id=>document.getElementById(id);
+const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight;};
+const enc=new TextEncoder(), dec=new TextDecoder();
+let dev,rxc,txc,connAt=0,sent=0,recv=0,upTimer,myid='',connected=false;
+
+// Node ids are 16-byte (32-hex) self-certifying locators. Bytes are b[0]..b[15],
+// i.e. the hex string read left-to-right — no reversal (matches firmware nid_hex).
+const hexToBytes=h=>{h=(h||'').replace(/[^0-9a-fA-F]/g,'');const a=[];for(let i=0;i+1<h.length;i+=2)a.push(parseInt(h.substr(i,2),16));return a;};
+const bytesToHex=b=>Array.from(b,x=>('0'+(x&0xff).toString(16)).slice(-2)).join('').toUpperCase();
+const shortId=h=>h.length>=12?h.slice(0,6)+'…'+h.slice(-4):h;
+const nowHM=()=>{const d=new Date();return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);};
+
+// ---- chat bubbles ----
+function addBubble(mine,idHex,text){
+  if($('empty')) $('empty').remove();
+  const el=document.createElement('div');
+  el.className='msg '+(mine?'me':'them');
+  el.textContent=text;
+  const meta=document.createElement('span');
+  meta.className='meta';
+  meta.textContent=(mine?'to '+shortId(idHex):'from '+shortId(idHex))+' · '+nowHM();
+  meta.title=idHex;
+  el.appendChild(meta);
+  $('chat').appendChild(el);
+  $('chat').scrollTop=$('chat').scrollHeight;
+}
+
+// HDLC (FLAG 0x7E, ESC 0x7D)
+function hdlcEncode(data){
+  const o=[0x7E];
+  for(const b of data){ if(b===0x7E||b===0x7D){o.push(0x7D,b^0x20);} else o.push(b); }
+  o.push(0x7E); return new Uint8Array(o);
+}
+
+// Typed, length-prefixed tunnel envelope (matches the node firmware):
+//   [u8 addr_type][u8 addr_len][addr bytes…][payload…]
+const ADDR_LOCATOR=0x01;     // addr = node-id locator
+const ADDR_LEN=16;           // 16-byte node ids (v2 widening)
+
+// The node's BLE TX stream mixes binary HDLC tunnel frames (chat) with newline-terminated
+// console text (heartbeat, beacons, …). Demux exactly like the firmware's RX does.
+let inf=false,esc=false,buf=[],textline='';
+function feed(bytes){
+  for(const c of bytes){
+    if(c===0x7E){ if(inf){ inf=false; if(buf.length>=2) onFrame(buf); } else { inf=true; esc=false; buf=[]; } textline=''; continue; }
+    if(inf){ if(c===0x7D) esc=true; else { buf.push(esc?(c^0x20):c); esc=false; } continue; }
+    if(c===0x0D) continue;
+    if(c===0x0A){ if(textline) onTextLine(textline); textline=''; }
+    else if(textline.length<200) textline+=String.fromCharCode(c);
+  }
+}
+function onFrame(b){
+  const addrType=b[0], addrLen=b[1];
+  if(addrType!==ADDR_LOCATOR || b.length<2+addrLen) return;     // unknown/truncated envelope
+  const srcHex=bytesToHex(b.slice(2,2+addrLen));
+  const msg=dec.decode(new Uint8Array(b.slice(2+addrLen)));
+  recv++; $('recv').textContent=recv;
+  addBubble(false,srcHex,msg);
+  log('← from '+srcHex+': '+msg);
+}
+// Learn this node's full 32-hex id from any console line that carries it
+// ("[hb] … node=<32hex>" heartbeat, or the "info" reply).
+function onTextLine(s){
+  const m=s.match(/node[ =]([0-9a-fA-F]{32})/);
+  if(m && !myid){
+    myid=m[1].toUpperCase();
+    $('me').textContent=myid;
+    $('status').textContent='connected';$('status').className='pill on';
+    log('node id: '+myid);
+  }
+}
+
+function setConn(on){
+  connected=on;
+  if(on){ $('status').textContent='connected (reading id…)'; $('status').className='pill wait'; }
+  else  { $('status').textContent='disconnected'; $('status').className='pill off'; }
+  $('connect').disabled=on; $('disconnect').disabled=!on;
+  $('meRow').style.display=on?'flex':'none';
+  if(!on){ clearInterval(upTimer); $('me').textContent='—'; myid=''; }
+  refreshSend();
+}
+
+async function connect(){
+  try{
+    $('connect').textContent='Connecting…'; $('connect').disabled=true;
+    dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'ALN'}],optionalServices:[NUS]});
+    dev.addEventListener('gattserverdisconnected',()=>{setConn(false);log('DISCONNECTED');$('connect').textContent='Connect a node';});
+    log('connecting to '+dev.name+'…');
+    const srv=await dev.gatt.connect();
+    const s=await srv.getPrimaryService(NUS);
+    rxc=await s.getCharacteristic(RX); txc=await s.getCharacteristic(TX);
+    await txc.startNotifications();
+    txc.addEventListener('characteristicvaluechanged',ev=>feed(new Uint8Array(ev.target.value.buffer)));
+    connAt=Date.now(); sent=recv=0; $('sent').textContent=0; $('recv').textContent=0;
+    setConn(true); log('CONNECTED to '+dev.name+' — waiting for node id…');
+    try{ await writeLine('info'); }catch(e){}    // ask for the id now (read-only)
+    upTimer=setInterval(()=>$('uptime').textContent=((Date.now()-connAt)/1000|0)+'s',500);
+  }catch(e){ log('error: '+e); setConn(false); $('connect').textContent='Connect a node'; $('connect').disabled=false; }
+}
+
+async function writeChunks(bytes){
+  for(let i=0;i<bytes.length;i+=20){ await rxc.writeValueWithoutResponse(bytes.slice(i,i+20)); }
+}
+async function writeLine(t){ await writeChunks(enc.encode(t+'\n')); }
+
+function cleanDst(){ return ($('dst').value||'').replace(/[^0-9a-fA-F]/g,'').toUpperCase(); }
+function refreshSend(){
+  const d=cleanDst();
+  const ready=connected && d.length===ADDR_LEN*2;
+  $('send').disabled=!ready;
+  const h=$('dsthint'), inp=$('dst');
+  if(!d){ h.className='dsthint dim'; h.textContent='Tip: copy it from the other tab’s “Your node id”.'; inp.className=''; }
+  else if(d.length===ADDR_LEN*2){ h.className='dsthint good'; h.textContent='✓ valid node id'; inp.className='good'; }
+  else { h.className='dsthint bad'; h.textContent=d.length+' / 32 hex characters'; inp.className='bad'; }
+}
+
+async function send(){
+  const dstHex=cleanDst();
+  if(dstHex.length!==ADDR_LEN*2){ refreshSend(); return; }
+  if(dstHex===myid){ log('that is your own id — send to the OTHER node'); return; }
+  const text=$('msg').value;
+  const m=enc.encode(text);
+  const p=new Uint8Array(2+ADDR_LEN+m.length);
+  p[0]=ADDR_LOCATOR; p[1]=ADDR_LEN; p.set(hexToBytes(dstHex),2); p.set(m,2+ADDR_LEN);
+  try{
+    await writeChunks(hdlcEncode(p));
+    sent++; $('sent').textContent=sent;
+    addBubble(true,dstHex,text);
+    log('→ to '+dstHex+': '+text);
+    $('msg').value=''; $('msg').focus();
+  }catch(e){ log('send error: '+e); }
+}
+
+async function copyId(){
+  if(!myid) return;
+  try{ await navigator.clipboard.writeText(myid); $('copyId').textContent='Copied!';
+       setTimeout(()=>$('copyId').textContent='Copy',1200); }catch(e){ log('copy failed: '+e); }
+}
+
+$('connect').onclick=connect;
+$('disconnect').onclick=()=>{ if(dev&&dev.gatt.connected) dev.gatt.disconnect(); };
+$('send').onclick=send;
+$('copyId').onclick=copyId;
+$('dst').addEventListener('input',refreshSend);
+$('msg').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!$('send').disabled) send(); });
+if(!navigator.bluetooth) log('Web Bluetooth unavailable — use Chrome/Edge on http://localhost or https.');
+refreshSend();
+</script>
+</body>
+</html>

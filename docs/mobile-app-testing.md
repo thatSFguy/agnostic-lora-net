@@ -86,7 +86,7 @@ node heartbeat: `[ble] … connected=1` stays up *through* `[TX]` lines.
 **Pass:** BLE stays connected during sustained LoRa TX/RX. (Acceptance: A42 *and* Pixel 9XL.)
 
 ### Test 2 — Tunnel framing round-trip
-Use `web/ble.html` (the reference Web-Bluetooth chat) from a laptop as a known-good peer,
+Use `web/chat-demo.html` (the reference Web-Bluetooth chat) from a laptop as a known-good peer,
 or the app's own loopback: send a typed-envelope frame addressed to a reachable node; the
 mesh delivers it and a frame comes back out over BLE.
 **Pass:** bytes round-trip byte-for-byte; the `← from <node>` line shows the right source.

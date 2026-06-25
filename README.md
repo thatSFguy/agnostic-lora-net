@@ -59,7 +59,7 @@ Validated end-to-end on 2× RAK4631 + a Seeed XIAO nRF52840 (Wio-SX1262), all SX
 | **Reliable file transfer** (SAR fragment/reassembly + CRC + NACK) | `sar.*` |
 | Runtime **link blocking** (the Tier-1 "block a bad link" control hook) | `router.block()` |
 | **Reticulum** running over the mesh (announce + proven echo) | `reticulum/`, `scripts/rns_*` |
-| **BLE + LoRa coexistence (Req 1)** + phone-app ⇄ BLE ⇄ mesh ⇄ BLE ⇄ phone-app | `-DAGN_BLE`, `web/ble.html` |
+| **BLE + LoRa coexistence (Req 1)** + phone-app ⇄ BLE ⇄ mesh ⇄ BLE ⇄ phone-app | `-DAGN_BLE`, `web/chat-demo.html` |
 | **Signed control plane** — Ed25519 POWER/CONFIRM/BLOCK/UNBLOCK, replay-countered, auto-revert rails | `lib/mesh/control.*`, `controller/internal/sign` |
 | **Autonomous RF optimiser** — mesh-wide, weakest-link, mobility-aware (Tier-1 controller) | `controller/internal/policy` |
 | **Consolidated web control plane** — live map · decision feed · node Configure · in-browser Flash | `controller/` (`agnctl`, served at `:8080`) |
@@ -97,7 +97,7 @@ docs/tcp-bridge.md        app-integration guide: TCP bridge + tunnel protocol (d
 controller/README.md      Tier-1 controller: flags, margins, step, cadence, key custody
 reticulum/interfaces/AgnosticLoraInterface.py   Reticulum custom interface (tunnels RNS over the mesh)
 scripts/                  host harnesses: sar_test · sar_multihop · tunnel_test · rns_echo · rns_demo
-web/ble.html              Web Bluetooth client: phone-app ⇄ BLE ⇄ mesh chat
+web/chat-demo.html        Web Bluetooth clear-text chat demo: phone/laptop ⇄ BLE ⇄ mesh
 web/manage.html           Web Serial/BT node manager: BLE PIN · radio config · battery calibration
 web/map.html              live mesh map (Leaflet): nodes on real geography, per-direction link
                           quality/asymmetry/SNR margin, battery badges, gateway console
@@ -226,7 +226,7 @@ Every board build includes a SoftDevice BLE Nordic UART Service alongside the me
 *lazily* on the first `ble on`, so a node that never uses BLE pays no runtime/power cost.
 BLE frames are tunnelled into the mesh and deliveries come back out over BLE, so the full
 path is **app → BLE → node → LoRa → node → BLE → app** — proven on hardware with two RAKs
-(`web/ble.html`, a Web Bluetooth chat). The BLE links stay up through LoRa traffic; that's
+(`web/chat-demo.html`, a Web Bluetooth chat). The BLE links stay up through LoRa traffic; that's
 Req 1.
 
 **Pairing is PIN-secured.** The UART requires `SECMODE_ENC_WITH_MITM`, BLE is off by
@@ -261,7 +261,9 @@ python3 -m http.server 8000        # then open http://localhost:8000/web/
   BLE pairing/PIN, the mobile flag, raw console.
 - **`web/map.html`** — gateway-centric mesh map (Leaflet, real geography): per-direction link
   quality/asymmetry/SNR-margin, battery badges, gateway console.
-- **`web/ble.html`** — Web Bluetooth chat demo (app ⇄ BLE ⇄ mesh).
+- **`web/chat-demo.html`** — Web Bluetooth **clear-text chat demo**: flash a couple of nodes,
+  connect a browser tab to each over BLE, and message across the mesh to confirm it works
+  (unencrypted — a bring-up/test tool, not a secure messenger).
 
 (`nrf-dfu.js` is vendored into `controller/internal/httpd/` so the dashboard's Flash tab serves
 it too — keep the two copies in sync.)
