@@ -1,8 +1,11 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
+  - name: Feature requests are closed
+    url: https://github.com/thatSFguy/agnostic-lora-net/blob/main/CONTRIBUTING.md
+    about: This project is feature-frozen by intent — feature requests/PRs aren't accepted. You're welcome to fork. See CONTRIBUTING.
   - name: Project status & design
     url: https://github.com/thatSFguy/agnostic-lora-net#project-status--alpha
-    about: Alpha status, what's built, and what's left — please skim before filing.
+    about: Alpha status, what's built, and the closed-scope posture — please skim before filing.
   - name: Security vulnerability
     url: https://github.com/thatSFguy/agnostic-lora-net/security/policy
     about: Do NOT open a public issue for security bugs — see the security policy.

@@ -2799,6 +2799,14 @@ void setup() {
     snprintf(banner, sizeof(banner), "fw=%s  built=%s  node=%s",
              AGN_FW_VERSION, FW_BUILD, myidhx);
     Serial.println(banner);
+    // Security: a node with no keypair (built with -DAGN_NODE_ID=…) cannot sign its
+    // announces, so peers can't verify its id↔key binding. That's bench/debug-only — make
+    // it impossible to ship one by accident: warn loudly, every boot.
+    if (!node_have_key) {
+        Serial.println("*** WARNING: UNSIGNED NODE — no keypair (AGN_NODE_ID override).");
+        Serial.println("*** Announces are NOT signed and the node id is unverifiable.");
+        Serial.println("*** Bench/debug only — DO NOT deploy this build. See SECURITY.md.");
+    }
     snprintf(banner, sizeof(banner), "PHY: %d.%03d MHz BW250 SF%d CR4/%d sync=0x%02X",
              (int)PHY_FREQ_MHZ, (int)((PHY_FREQ_MHZ - (int)PHY_FREQ_MHZ) * 1000 + 0.5f),
              (int)PHY_SF, (int)PHY_CODING_RATE, (unsigned)PHY_SYNC_WORD);

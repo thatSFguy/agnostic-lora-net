@@ -5,12 +5,16 @@
 [![status: alpha](https://img.shields.io/badge/status-alpha-orange)](#project-status--alpha)
 MIT licensed.
 
-> ⚠️ **Alpha.** This is an early, single-maintainer project under active development.
-> It works — everything below is measured on real hardware — but APIs, the wire
-> format, and the console/controller interfaces can change without notice, and there
-> is **no stability or support guarantee**. Treat it as a research/hacking platform,
-> not a product. New features and new-board requests are **not guaranteed** to be
-> picked up. **PRs are very welcome** — see [Contributing](#contributing).
+> ⚠️ **Alpha, and feature-frozen by intent.** This is a single-maintainer project
+> built for **my own use**, developed in the open under the MIT license. Everything
+> below is measured on real hardware, but APIs and the wire format can still change,
+> and there is **no stability or support guarantee**.
+>
+> **Scope is intentionally closed.** The feature set covers what I need, and the design
+> goal from here is **security and the smallest possible attack surface**, not new
+> functionality. **I am not taking feature requests.** You are very welcome to **use it,
+> fork it, and build on it** — and **new-board PRs are welcome _after you've tested them
+> on the hardware yourself_** (see [Contributing](#contributing)).
 
 An **app-agnostic LoRa mesh backbone** — a dumb, efficient transport that moves
 addressed packets between nodes the way the internet moves IP. Applications ride on
@@ -301,55 +305,70 @@ integration surface for everything:
 
 ## Project status — Alpha
 
-This is **alpha software**, built and maintained by one person in the open. What that
-means in practice:
+This is **alpha software**, built and maintained by one person in the open, **for that
+person's own use**. What that means in practice:
 
 - **It runs, and the numbers are real** — the capabilities and measurements above are
   validated on actual hardware, not aspirational. But coverage is bench-scale (a handful
   of nodes), not field-hardened at fleet scale.
-- **Nothing is frozen.** The on-air frame format, console grammar, controller protocol,
-  and web/controller APIs can all change between commits. There are no compatibility
+- **The wire format isn't frozen.** The on-air frame format, console grammar, controller
+  protocol, and web/controller APIs can change between commits. There are no compatibility
   promises across versions yet — expect to reflash the whole mesh together.
-- **No roadmap commitments.** Feature requests and new-board requests are appreciated as
-  signal, but may not be implemented — see [What's left](#whats-left) for where effort is
-  actually going. If you need a board or feature now, the fastest path is a PR.
-- **No support guarantee.** Best-effort only. File issues for bugs by all means, but
-  there's no SLA.
+- **The feature set _is_ closed.** This is feature-complete for what I need, and **I am not
+  taking feature requests** — feature issues will be closed. From here the work is
+  **hardening and attack-surface reduction**, not new functionality. See
+  [What's left](#whats-left) for the few security/robustness items still in flight.
+- **Board support is the one open lane.** New-board PRs are welcome — but only ones the
+  **submitter has tested on the real board** (see [Contributing](#contributing)).
+- **Free to use, no support guarantee.** Use it, fork it, run your own mesh. Bug reports
+  are welcome; there's no SLA, and best-effort is the promise.
 
 ## Contributing
 
-**PRs are very welcome** — this is exactly the kind of project that gets better with more
-hands and more radios.
+This project is **closed to feature requests and feature PRs** — it's feature-complete for
+my use, and the design priority now is security and a minimal attack surface. The one place
+contributions are genuinely welcome is **new board support**, plus bug fixes, security
+reports, and docs/test improvements that don't grow the feature set.
 
-- **Good first contributions:** new board support (add a variant under `variants/` + a
-  `board_config.h` block + a `platformio.ini` env — the radio HAL is the only chip-specific
-  seam), docs fixes, and host-test coverage in `test/`.
-- **Keep the core portable.** The mesh logic in `lib/mesh/` builds for both the host and
-  the MCU with **no Arduino dependencies** — please keep it that way so the unit tests stay
-  meaningful.
+**New-board PRs — the rule is: you must have tested it on the real board.**
+
+- **What a board PR adds:** a variant under `variants/` + a `board_config.h` block + a
+  `platformio.ini` env. The radio HAL is the only chip-specific seam — keep the change
+  confined to that seam and the board glue.
+- **You must have flashed and run it.** Because boards can't be validated blind (FEM/RF-switch,
+  TCXO, and TX-path details bite), a board PR has to come from someone who has the board in
+  hand and has exercised it. State explicitly in the PR **what you tested and what you
+  didn't** — at minimum: it boots, joins the mesh, and sends/receives over LoRa. The PR
+  template walks through this checklist. **Untested board PRs will not be merged.**
+- **Keep the core portable and unchanged.** The mesh logic in `lib/mesh/` builds for both the
+  host and the MCU with **no Arduino dependencies**. A board PR should not need to touch it;
+  if you think it does, open a bug first.
 - **Run the tests before you push:** `pio test -e native` (firmware core) and
   `go test ./...` in `controller/` (Go control plane). CI runs the build matrix in
   [`.github/workflows/build.yml`](.github/workflows/build.yml).
-- **New boards you can't fully bench-test:** that's fine — say so in the PR. Several
-  in-tree targets are compile-clean but flagged as not-yet-bench-validated (FEM/RF-switch
-  details in particular); call out what you did and didn't verify.
 
-No formal CLA or contribution process yet — open an issue to discuss anything substantial,
-or just send the PR. Be kind; assume good faith.
+Bug reports and **security reports** ([SECURITY.md](SECURITY.md)) are always welcome. No
+formal CLA. Be kind; assume good faith.
 
 ## What's left
 
-- **Tier-1 controller — shipped & ongoing.** Signed POWER/CONFIRM/**BLOCK/UNBLOCK**, the
-  mesh-wide autonomous power optimiser, mobility-aware control, the consolidated dashboard,
-  and resilient serial are all **live** (see the control-plane section above). Still TODO:
-  signed **ROUTE override** and **remote PHY retune** over the same path; auto-block of
-  pathological links; transfer boost; controller-key **rotation / re-key**. The
-  network-wide retune safety protocol is in [`docs/remote-config.md`](docs/remote-config.md).
+The scope is closed, so this is **my own hardening/robustness backlog**, not a roadmap and
+not a request queue. Security and attack-surface items come first; the feature-shaped
+entries below are explicitly **not planned** — they're noted for honesty and as fork
+territory.
+
+- **Security / hardening (the actual priority):**
+  - **Controller-key rotation / re-key.** The controller key is the network's write
+    credential and currently can't be rotated — the highest-value hardening item.
+  - **Verify-rate limiting on the announce + control RX paths**, so a flood of bogus
+    signatures can't burn CPU/airtime (see [SECURITY.md](SECURITY.md) for the known surface).
+  - **Keep the attack surface from growing** — this is why the feature set is frozen.
 - **Energy** — nodes currently run continuous RX with the MCU spinning; the highest-value
   power win is to **light-sleep the nRF52 between radio interrupts** (DIO1 already wakes it),
-  plus a deep-sleep role for leaf/tracker nodes. Not yet implemented.
-- **Reticulum reliability/UX** — LXMF messaging through Sideband (via a TCP bridge, or
-  an RNode-compatible BLE front-end backed by the mesh).
+  plus a deep-sleep role for leaf/tracker nodes. Robustness, not a feature — may happen.
+- **Not planned (fork territory):** signed ROUTE override, remote PHY retune over the signed
+  path, transfer boost, Reticulum/LXMF UX work (Sideband, an RNode-compatible BLE front-end).
+  These are real and interesting — they're just out of scope for what I maintain.
 - Polish: FCC dwell-time handling for the 906.625 MHz fixed channel. (Flash wear is
   already a non-issue: writes are config-only — save-if-dirty — plus the signed-control
   replay counter on each accepted command, so ~0 writes/day with no controller and ~12 on
