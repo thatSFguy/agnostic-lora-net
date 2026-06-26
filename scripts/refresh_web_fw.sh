@@ -19,5 +19,10 @@ done
 # Same packaging the CI uses (parts at the standard offsets + manifest).
 bash scripts/pkg_esp32_webtools.sh web/fw
 
+# Stamp the version the flasher badge reads (same source as AGN_FW_VERSION / the CI deploy).
+V=$(git describe --tags --always --dirty 2>/dev/null || echo dev); V=${V#v}
+printf '%s' "$V" > web/fw/version.txt
+echo "web/fw/version.txt = $V"
+
 echo "web/fw/ refreshed — open http://localhost:8000/web/ and set firmware source to ./fw/"
 echo "note: ESP32-S3 boards now flash in-browser via ESP Web Tools; T1000-E flashes via 'pio run -e tracker_t1000_e -t upload'."

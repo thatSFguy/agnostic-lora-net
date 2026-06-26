@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # full history + tags so `git describe` yields a real version
+                              # on main pushes too (shallow checkout degraded it to a bare SHA)
 
       - uses: actions/setup-python@v5
         with:
@@ -61,10 +64,17 @@ jobs:
       - name: Package ESP32 (parts + ESP Web Tools manifest)
         run: bash scripts/pkg_esp32_webtools.sh
 
+      - name: Stamp version.txt (drives the flasher version badge)
+        run: |
+          V=$(git describe --tags --always --dirty); V=${V#v}
+          printf '%s' "$V" > version.txt
+          echo "staged firmware version: $V"
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-uf2
           path: |
+            version.txt
             agn-rak.uf2
             agn-xiao.uf2
             agn-promicro.uf2
@@ -87,6 +97,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            version.txt
             agn-rak.uf2
             agn-xiao.uf2
             agn-promicro.uf2

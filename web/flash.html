@@ -74,11 +74,35 @@
 <body>
 <header>
   <h1>AgnLoRa</h1><span class="sub">node commissioning hub</span>
+  <span id="fwver" class="pill" title="firmware version served from ./fw/">fw …</span>
   <nav>
     <button onclick="location.href='index.html'">↩ All tools</button>
     <button onclick="location.href='map.html'">Map ↗</button>
   </nav>
 </header>
+<script>
+  // Version badge: show which firmware release this flasher is actually serving. The string
+  // comes from ./fw/version.txt (same-origin), written by the CI Pages deploy and by
+  // scripts/refresh_web_fw.sh — so it tracks the staged binaries, not a hardcoded value.
+  // Best-effort: if it's missing (e.g. a bare local checkout), say so rather than lie.
+  (function () {
+    var el = document.getElementById('fwver');
+    fetch('fw/version.txt', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw 0; return r.text(); })
+      .then(function (v) {
+        v = (v || '').trim();
+        if (!v) throw 0;
+        el.textContent = 'fw ' + v;
+        el.classList.add(/-(dirty|g[0-9a-f]+)/.test(v) ? 'warn' : 'ok');
+        el.title = 'firmware version served from ./fw/' +
+                   (el.classList.contains('warn') ? ' (untagged/dirty build)' : '');
+      })
+      .catch(function () {
+        el.textContent = 'fw —';
+        el.title = 'no ./fw/version.txt — local checkout? run scripts/refresh_web_fw.sh to stage firmware';
+      });
+  })();
+</script>
 <main>
 
 <section id="tab-flash">
