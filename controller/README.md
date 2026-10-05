@@ -135,8 +135,10 @@ chattiness read (airframes/sec, broken down by class).
   byte-identical to the firmware (gold-standard gate in `test/test_ctrl_interop`);
   `keystore`+`commander` push them via the node's `ctrlsend` bridge. Every connectivity-
   reducing command has an auto-revert rail (power 60 s; block TTL), so killing the
-  controller returns the mesh to a safe state. **ROUTE override and remote PHY retune are
-  deferred** (optional; ROUTE needs a Router override API).
+  controller returns the mesh to a safe state. **Remote PHY retune** (signed `CTRL_RETUNE`)
+  is driven from the dashboard's **Retune** tab (farthest-first, per-node ACK tracking, gateway
+  last) or the `retune` console command — it has **no** auto-revert. **ROUTE override is
+  deferred** (optional; needs a Router override API).
 - **The `state/` dir holds the secret controller key — gitignored, never commit it.** It
   is the network's write credential; back it up like one.
 - **Serial source is Linux/WSL/RPi** (raw tty via best-effort `stty`, USB-CDC ignores

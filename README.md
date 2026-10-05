@@ -248,8 +248,9 @@ go run ./cmd/agnctl -file testdata/session.log -optimize -http :8080  # replay a
   slowly and only after the margin stays strong — a slow analogue of cellular closed-loop power
   control suited to the mesh's ~15 s feedback. (🚗 = mobile, 📍 = fixed in the UI.)
 - **Signed control** (`lib/mesh/control` ↔ `controller/internal/sign`, byte-identical, gold-tested):
-  POWER / CONFIRM / BLOCK / UNBLOCK, Ed25519-signed with a monotonic replay counter; flooded to the
-  target and ACKed back through the mesh. ROUTE override and remote PHY retune are still TODO.
+  POWER / CONFIRM / BLOCK / UNBLOCK / BLE / RETUNE, Ed25519-signed with a monotonic replay counter;
+  flooded to the target and ACKed back through the mesh. Remote PHY retune is driven from the
+  controller dashboard's Retune tab. ROUTE override is still TODO.
 - **Resilient + self-contained.** The serial link auto-reconnects across node reboots/USB
   re-enumeration (the dashboard stays up through gateway blips). The controller also **serves the
   firmware** it flashes (`/fw/`, default `-fwdir ../web/fw`) — so it works fully offline, no
@@ -423,8 +424,7 @@ territory.
 - **Energy** — nodes currently run continuous RX with the MCU spinning; the highest-value
   power win is to **light-sleep the nRF52 between radio interrupts** (DIO1 already wakes it),
   plus a deep-sleep role for leaf/tracker nodes. Robustness, not a feature — may happen.
-- **Not planned (fork territory):** signed ROUTE override, remote PHY retune over the signed
-  path, transfer boost, Reticulum/LXMF UX work (Sideband, an RNode-compatible BLE front-end).
+- **Not planned (fork territory):** signed ROUTE override, transfer boost, Reticulum/LXMF UX work (Sideband, an RNode-compatible BLE front-end).
   These are real and interesting — they're just out of scope for what I maintain.
 - Polish: FCC dwell-time handling for the 906.625 MHz fixed channel. (Flash wear is
   already a non-issue: writes are config-only — save-if-dirty — plus the signed-control

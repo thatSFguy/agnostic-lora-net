@@ -9,9 +9,11 @@ retune, because a careless PHY change can strand nodes.
 > Status (2026-06): the **local** path (USB / BLE console, plus the `agnctl` dashboard's
 > Configure tab) is implemented and persisted. The **signed remote** path now ships for
 > POWER / CONFIRM / BLOCK / UNBLOCK (Ed25519, replay-countered, byte-identical Go signer
-> in `controller/internal/sign` ↔ firmware `lib/mesh/control`; auto-revert rails). Signed
-> **ROUTE override and remote PHY retune** are still TODO. The network-wide retune safety
-> protocol below still applies to whoever drives the change (today: local/Configure tab).
+> in `controller/internal/sign` ↔ firmware `lib/mesh/control`; auto-revert rails), plus
+> **RETUNE** (remote PHY change — `agnctl` dashboard **Retune** tab or the `retune` console
+> command; the node stages the PHY, turns BLE on, ACKs, reboots; **no** auto-revert). Signed
+> **ROUTE override** is still TODO. The network-wide retune safety protocol below applies to
+> every retune, local or remote.
 
 ---
 
