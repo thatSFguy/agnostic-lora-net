@@ -2638,9 +2638,9 @@ static void handle_command(char* line) {
         char* a = strtok(nullptr, " ");
         static uint8_t blob[mesh::CTRL_MAX_BYTES];
         uint16_t n = a ? hex_decode(a, blob, sizeof(blob)) : 0;
-        // POWER/CONFIRM are 75 B; BLOCK/UNBLOCK 79 B. Accept either valid length.
-        if (n != mesh::CTRL_MSG_BYTES && n != mesh::CTRL_BLK_BYTES) {
-            Serial.println("usage: ctrlsend <150 or 158 hex chars>"); return;
+        // POWER/CONFIRM/BLE are 87 B; RETUNE 99 B; BLOCK/UNBLOCK 103 B. Accept any valid length.
+        if (n != mesh::CTRL_MSG_BYTES && n != mesh::CTRL_RTN_BYTES && n != mesh::CTRL_BLK_BYTES) {
+            Serial.println("usage: ctrlsend <174, 198 or 206 hex chars>"); return;
         }
         node_id_t tgt; memcpy(&tgt, blob + 2, sizeof(tgt));
         if (tgt == my_id) {
