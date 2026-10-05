@@ -25,7 +25,7 @@
   .row { display:flex; gap:5px; align-items:center; margin-top:6px; flex-wrap:wrap; }
   input,button { background:#0d1117; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:3px 7px; font:inherit; }
   input.alias{flex:1} input.pw{width:3.6rem}
-  button { cursor:pointer; } button:hover{border-color:var(--acc);} #rt_nodes button:disabled{ opacity:.4; cursor:not-allowed; } button.danger:hover{border-color:var(--revert);color:var(--revert);}
+  button { cursor:pointer; } button:hover{border-color:var(--acc);} #rt_nodes button:disabled,#rt_gw:disabled{ opacity:.4; cursor:not-allowed; } button.danger:hover{border-color:var(--revert);color:var(--revert);}
   .pill { font-size:10px; padding:1px 6px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
   .blocked { border-color:var(--revert)!important; } .blk{color:var(--revert)}
   .ev,.cl { white-space:pre-wrap; word-break:break-word; padding:1px 0; } .ev .t,.cl .t{color:var(--dim)}
@@ -260,6 +260,8 @@
   </div>
   <div class="cfgcard"><h3>② Gateway — last</h3>
     <div class="kv">Retunes the tethered gateway directly over its serial console (<code>rf …</code> + <code>rf apply</code>, live, no reboot).</div>
+    <div class="kv" id="rt_gw_gate" style="margin:.4rem 0"></div>
+    <label class="chk" id="rt_force_row" style="display:none"><input type="checkbox" id="rt_force"> Override — retune the gateway anyway (strands the nodes listed above)</label>
     <div class="row"><button id="rt_gw" class="primary">Retune gateway</button></div>
   </div>
 </div></div>
@@ -362,9 +364,10 @@ function renderNodes(state){
 // ---------- Retune tab: network-wide PHY change via signed CTRL_RETUNE (docs/remote-config.md §4) ----------
 // The gateway's PHY is the mesh's current PHY: read it from the latest "[rf] … (active)" console
 // line. Remote nodes get a signed retune each (farthest-first); the gateway is retuned last over
-// its own console. ACKs are matched on "[ctrl] ack <id> cmd=6 … counter=<ctr>".
-const CMD_RETUNE=6;
-let rtGwRf=null, rtFilled=false, rtSent={};   // rtSent: id -> {ctr, phy}
+// its own console. Sends + ACKs are tracked server-side (st.retunes, retune.go), so they survive
+// reloads and console scroll; the server also refuses the gateway step until every node has ACKed.
+const RT_ACK_WAIT_MS=60000;   // past this with no ACK, the node most likely isn't holding our key
+let rtGwRf=null, rtFilled=false, rtAsked=0;
 function rtParseRf(line){
   const g=k=>{ const m=line.match(new RegExp(k+'=((?:0x)?[0-9A-Fa-f]+)')); return m?m[1]:null; };
   const r={ freq_hz:+g('freq_hz'), bw_hz:+g('bw_hz'), sf:+g('sf'), cr:+g('cr'), sync:parseInt(g('sync'),16), preamble:+g('preamble') };
@@ -383,59 +386,66 @@ function rtHops(snap){   // BFS hop count from the gateway over the (undirected)
   const hops={}; if(!snap.gateway) return hops; hops[snap.gateway]=0; const q=[snap.gateway];
   while(q.length){ const u=q.shift(); for(const v of adj[u]||[]) if(!(v in hops)){ hops[v]=hops[u]+1; q.push(v); } }
   return hops; }
-function rtAck(console_, id, ctr){   // → applied (1/0) of the matching ACK, or null if none yet
-  const re=new RegExp(`\\[ctrl\\] ack ${id} cmd=${CMD_RETUNE} applied=(-?\\d+) provisional=\\d+ counter=${ctr}\\b`,'i');
-  for(const l of console_||[]){ const m=l.match(re); if(m) return +m[1]; }
-  return null; }
+const rtRec=id=>(state?.retunes||{})[id.toUpperCase()];
+const rtSamePhy=(a,b)=>a&&b&&['freq_hz','bw_hz','sf','cr','sync','preamble'].every(k=>a[k]===b[k]);
+const rtDone=(id,phy)=>{ const r=rtRec(id); return !!(r&&rtSamePhy(r.phy,phy)&&r.ack>0); };   // ACKed THIS PHY
+function rtStatus(id,phy){
+  const r=rtRec(id); if(!r) return '';
+  if(!rtSamePhy(r.phy,phy)) return `<span class="pill">last sent: ${rtPhyStr(r.phy)}</span>`;
+  if(r.err) return `<span class="pill" style="color:var(--revert);border-color:var(--revert)" title="${r.err.replace(/"/g,'&quot;')}">NOT SENT — gateway refused it</span>`;
+  if(r.ack>0) return '<span class="pill" style="color:var(--confirm);border-color:var(--confirm)">ACK ✓ — rebooting onto new PHY</span>';
+  if(r.ack===0) return '<span class="pill" style="color:var(--revert);border-color:var(--revert)">REJECTED by node (bad PHY)</span>';
+  const age=Date.now()-r.sent_ms;
+  return age<RT_ACK_WAIT_MS ? `<span class="pill warn">sent ctr=${r.ctr} — awaiting ACK ${Math.round(age/1000)}s</span>`
+    : `<span class="pill" style="color:var(--revert);border-color:var(--revert)" title="A node silently drops commands it can't verify. Check (over USB/BLE) that it holds this controller key: ctrlkey">NO ACK after ${Math.round(age/1000)}s — node may not hold this controller key</span>`; }
 function renderRetune(st){
   const con=st.console||[];
   for(let i=con.length-1;i>=0;i--) if(/\[rf\].*\(active\)/.test(con[i])){ const r=rtParseRf(con[i]); if(r){ rtGwRf=r; break; } }
+  // No PHY seen yet (fresh controller / scrolled console): ask the gateway, at most every 10 s.
+  if(!rtGwRf&&Date.now()-rtAsked>10000){ rtAsked=Date.now();
+    fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'raw',line:'rf show'})}).catch(()=>{}); }
   $('#rt_cur').textContent=rtGwRf?rtPhyStr(rtGwRf):'— not read yet (click Read from gateway)';
   if(rtGwRf&&!rtFilled){ rtFill(rtGwRf); rtFilled=true; }
-  const f=rtForm();
-  $('#rt_diff').innerHTML=!rtValid(f)?'<span class="bad">form incomplete / out of range</span>'
-    :(rtGwRf?(rtPhyStr(f)===rtPhyStr(rtGwRf)?'new PHY = current PHY (nothing to change)':'→ <b>'+rtPhyStr(f)+'</b>'):'');
+  const f=rtForm(), valid=rtValid(f);
+  $('#rt_diff').innerHTML=!valid?'<span class="bad">form incomplete / out of range</span>'
+    :(rtGwRf?(rtSamePhy(f,rtGwRf)?'new PHY = current PHY (nothing to change)':'→ <b>'+rtPhyStr(f)+'</b>'):'');
   const snap=st.snapshot||{}, hops=rtHops(snap);
   const nodes=(snap.nodes||[]).filter(n=>!n.is_gateway).sort((a,b)=>(hops[b.id]??99)-(hops[a.id]??99));
   $('#rt_nodes').innerHTML=nodes.map(n=>{
-    const s=rtSent[n.id], a=s?rtAck(con,n.id,s.ctr):null;
-    const status=!s?'':(a===null?`<span class="pill warn">sent ctr=${s.ctr} — awaiting ACK</span>`
-      :(a>0?'<span class="pill" style="color:var(--confirm);border-color:var(--confirm)">ACK ✓ — rebooting onto new PHY</span>'
-           :'<span class="pill blk">REJECTED by node (bad PHY)</span>'));
     const ok=hasKey&&(!n.acl||n.acl==='allowed');
     const why=!hasKey?'controller has no key':(ok?'':'not an approved member (Security tab)');
     return `<div class="row" style="justify-content:space-between;border-top:1px solid var(--line);padding-top:6px">
       <div><b>${nm(n.id)}</b> <span class="kv">${hops[n.id]!=null?hops[n.id]+' hop'+(hops[n.id]===1?'':'s'):'hops ?'} · SF${n.sf||'?'}</span>
-        ${n.acl&&n.acl!=='allowed'?`<span class="pill acl-${n.acl}">${n.acl}</span>`:''} ${status}</div>
-      <button data-rt="${n.id}" ${ok?'':'disabled title="'+why+'"'}>${s?'Re-send':'Retune'}</button></div>`;
+        ${n.acl&&n.acl!=='allowed'?`<span class="pill acl-${n.acl}">${n.acl}</span>`:''} ${rtStatus(n.id,valid?f:rtRec(n.id)?.phy)}</div>
+      <button data-rt="${n.id}" ${ok?'':'disabled title="'+why+'"'}>${valid&&rtRec(n.id)&&rtSamePhy(rtRec(n.id).phy,f)?'Re-send':'Retune'}</button></div>`;
   }).join('')||'<div class="kv">no remote nodes seen yet</div>';
   $('#rt_nodes').querySelectorAll('[data-rt]').forEach(b=>b.onclick=()=>rtSend(b.dataset.rt));
+  // Gateway gate: every remote node must have ACKed THIS PHY, or the gateway strands it.
+  const pending=valid?nodes.filter(n=>!rtDone(n.id,f)):nodes;
+  $('#rt_gw_gate').innerHTML=!valid?'':(pending.length
+    ? `<span class="bad">⛔ ${pending.length} node(s) haven't ACKed this PHY: ${pending.map(n=>nm(n.id)).join(', ')}. Retuning the gateway now cuts them off.</span>`
+    : '<span class="ok">✓ every remote node has ACKed this PHY — safe to retune the gateway.</span>');
+  $('#rt_force_row').style.display=pending.length&&valid?'':'none';
+  if(!pending.length) $('#rt_force').checked=false;
+  $('#rt_gw').disabled=!valid||(pending.length>0&&!$('#rt_force').checked);
 }
 async function rtSend(id){
   const r=rtForm(); if(!rtValid(r)){ toast('✗ new PHY form incomplete / out of range'); return; }
-  if(rtGwRf&&rtPhyStr(r)===rtPhyStr(rtGwRf)&&!confirm('New PHY equals the current PHY — send anyway?')) return;
+  if(rtGwRf&&rtSamePhy(r,rtGwRf)&&!confirm('New PHY equals the current PHY — send anyway?')) return;
   const snap=state?.snapshot||{}, hops=rtHops(snap), h=hops[id];
-  const behind=(snap.nodes||[]).filter(n=>!n.is_gateway&&n.id!==id&&!rtSent[n.id]&&(hops[n.id]??-1)>(h??99)).map(n=>nm(n.id));
+  const behind=(snap.nodes||[]).filter(n=>!n.is_gateway&&n.id!==id&&!rtDone(n.id,r)&&(hops[n.id]??-1)>(h??99)).map(n=>nm(n.id));
   if(!confirm(`Retune ${nm(id)} over the air to:\n\n  ${rtPhyStr(r)}\n\n`+
       'It ACKs on the current PHY, then reboots onto the new one and goes silent until the gateway is retuned too. No auto-revert.'+
       (behind.length?`\n\n⚠ Not yet retuned and FARTHER out: ${behind.join(', ')}.\nIf they reach the mesh through this node, they will be stranded.`:'')+
       '\n\nSend?')) return;
-  try{
-    const res=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'retune',node:id,...r})});
-    const j=await res.json(); toast((j.ok?'✓ ':'✗ ')+j.msg);
-    const m=j.ok&&(j.msg||'').match(/ctr=(\d+)/); if(m){ rtSent[id]={ctr:+m[1], phy:r}; if(state) renderRetune(state); }
-  }catch(e){ toast('✗ '+e); } }
+  await api('retune',{node:id,...r}); tick(); }
 $('#rt_read').onclick=()=>{ rtFilled=false; api('raw',{line:'rf show'}); };
-['#rt_freq','#rt_bw','#rt_sf','#rt_cr','#rt_sync','#rt_pre'].forEach(s=>$(s).addEventListener('input',()=>{ rtFilled=true; if(state) renderRetune(state); }));
+['#rt_freq','#rt_bw','#rt_sf','#rt_cr','#rt_sync','#rt_pre','#rt_force'].forEach(s=>$(s).addEventListener('input',()=>{ if(s!=='#rt_force') rtFilled=true; if(state) renderRetune(state); }));
 $('#rt_gw').onclick=async()=>{
   const r=rtForm(); if(!rtValid(r)){ toast('✗ new PHY form incomplete / out of range'); return; }
-  const pending=(state?.snapshot?.nodes||[]).filter(n=>!n.is_gateway&&!rtSent[n.id]).map(n=>nm(n.id));
-  if(!confirm(`Retune the GATEWAY to:\n\n  ${rtPhyStr(r)}\n\n`+
-      (pending.length?`⚠ Not retuned from this page: ${pending.join(', ')}.\nThe gateway will stop hearing them.\n\n`:'')+'Apply?')) return;
-  for(const l of ['rf freq '+r.freq_hz,'rf bw '+$('#rt_bw').value,'rf sf '+r.sf,'rf cr '+r.cr,
-                  'rf sync 0x'+r.sync.toString(16).toUpperCase().padStart(2,'0'),'rf preamble '+r.preamble,'rf apply','rf show'])
-    await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'raw',line:l})});
-  toast('✓ gateway retune sent — check "Current mesh PHY"'); };
+  const force=$('#rt_force').checked;
+  if(!confirm(`Retune the GATEWAY to:\n\n  ${rtPhyStr(r)}\n\n`+(force?'⚠ FORCED: nodes that have not ACKed this PHY will be cut off.\n\n':'')+'Apply?')) return;
+  await api('gwretune',{...r,force}); $('#rt_force').checked=false; tick(); };
 
 const W=1000,H=620;
 function mapXY(n,i,N){ const p=positions[n.id]; if(p)return[p[0]*W,p[1]*H];

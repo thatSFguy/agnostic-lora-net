@@ -37,6 +37,7 @@ controller/*.csv
 controller/topo.json
 controller/policy.jsonl
 controller/*.jsonl
+controller/*.log
 controller/state/
 controller/cmd/agnctl/state/
 controller/agnctl

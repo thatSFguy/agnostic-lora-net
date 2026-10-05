@@ -52,6 +52,7 @@ type Server struct {
 	mu      sync.Mutex
 	events  []policy.Record
 	console []string
+	retunes map[string]*retuneRec // node id -> latest remote retune sent (see retune.go)
 	eng     *policy.Engine // optimiser, for runtime governor switching ("" if -optimize off)
 }
 
@@ -68,11 +69,12 @@ func New(graph *topo.Graph, ks *keystore.Store, send func(string) error, uiPath,
 // Console records a raw node console line for the dashboard's console pane.
 func (s *Server) Console(line string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.console = append(s.console, line)
 	if len(s.console) > maxConsole {
 		s.console = s.console[len(s.console)-maxConsole:]
 	}
+	s.mu.Unlock()
+	s.retuneAck(line)
 }
 
 // Sink is the policy.Logger subscriber: it appends each record to the ring buffer.
@@ -188,6 +190,11 @@ func (s *Server) issue(c cmdReq) (string, error) {
 		}
 		return "BLE " + verb + " → gateway (direct console)", s.send("ble " + verb)
 	}
+	// Gateway PHY retune — the LAST step of a network retune, over the gateway's own console.
+	// Gated on every remote node having ACKed the same PHY (retune.go) unless forced.
+	if c.Action == "gwretune" {
+		return s.retuneGateway(c.phy(), c.Force)
+	}
 	if s.ks == nil {
 		return "", errNoKey
 	}
@@ -225,18 +232,25 @@ func (s *Server) issue(c cmdReq) (string, error) {
 		line, err = commander.Ble(hexID(c.Node), c.On, ctr, s.ks.Priv())
 	case "retune":
 		// Signed CTRL_RETUNE: change the node's PHY over the air (PHY only — power stays under
-		// CTRL_POWER). The node validates + acks on the new PHY; recovery is the BLE-rescue flow.
-		line, err = commander.Retune(hexID(c.Node), sign.RetuneCfg{
-			FreqHz: uint32(c.FreqHz), BwHz: uint32(c.BwHz),
-			SF: uint8(c.SF), CR: uint8(c.CR), Sync: uint8(c.Sync), Preamble: uint16(c.Preamble),
-		}, ctr, s.ks.Priv())
+		// CTRL_POWER). The node validates, persists, ACKs on the CURRENT PHY, then reboots onto
+		// the new one — no auto-revert; recovery is the BLE-rescue flow. Tracked in retune.go.
+		line, err = commander.Retune(hexID(c.Node), c.phy().cfg(), ctr, s.ks.Priv())
 	default:
 		return "", errors.New("unknown action " + c.Action)
 	}
 	if err != nil {
 		return "", err
 	}
-	return c.Action + " " + c.Node + " queued (ctr=" + strconv.FormatUint(uint64(ctr), 10) + ")", s.send(line)
+	if err := s.send(line); err != nil {
+		if c.Action == "retune" {
+			s.note("retune", strings.ToUpper(c.Node), "send FAILED: "+err.Error())
+		}
+		return "", err
+	}
+	if c.Action == "retune" {
+		s.retuneSent(c.Node, c.phy(), ctr)
+	}
+	return c.Action + " " + c.Node + " queued (ctr=" + strconv.FormatUint(uint64(ctr), 10) + ")", nil
 }
 
 type cmdReq struct {
@@ -254,6 +268,11 @@ type cmdReq struct {
 	Sync     int    `json:"sync"`
 	Preamble int    `json:"preamble"`
 	Line     string `json:"line"` // raw console line
+	Force    bool   `json:"force"` // gwretune: proceed even though some nodes haven't ACKed
+}
+
+func (c cmdReq) phy() phyJSON {
+	return phyJSON{FreqHz: c.FreqHz, BwHz: c.BwHz, SF: c.SF, CR: c.CR, Sync: c.Sync, Preamble: c.Preamble}
 }
 
 type stateJSON struct {
@@ -266,6 +285,7 @@ type stateJSON struct {
 	Pub       string               `json:"pub,omitempty"`
 	Allowlist map[string]int64     `json:"allowlist,omitempty"` // approved pubkeyHex → approval unix-secs
 	Policy    *policyJSON          `json:"policy,omitempty"`    // optimiser mode (nil if -optimize off)
+	Retunes   map[string]retuneRec `json:"retunes"`             // remote retunes sent + their ACKs
 }
 
 type policyJSON struct {
@@ -349,7 +369,7 @@ func (s *Server) Handler() http.Handler {
 		s.mu.Unlock()
 		al, pos := s.ui.snapshot()
 		st := stateJSON{Snapshot: s.graph.Snapshot(), Events: ev, Console: con,
-			Aliases: al, Positions: pos, HasKey: s.ks != nil}
+			Aliases: al, Positions: pos, HasKey: s.ks != nil, Retunes: s.retuneSnapshot()}
 		if s.ks != nil {
 			st.Pub = s.ks.PubHex()
 			st.Allowlist = s.ks.Allowlist()

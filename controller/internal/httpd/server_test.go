@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -125,5 +126,120 @@ func TestCmdACLGate(t *testing.T) {
 	}
 	if len(sent) != 1 || !strings.HasPrefix(sent[0], "ctrlsend ") {
 		t.Fatalf("approved command should send one ctrlsend, sent %v", sent)
+	}
+}
+
+// A network retune is tracked server-side: the send is recorded, the node's ACK (matched on
+// cmd=6 + counter) is latched, and the gateway step is refused until every remote node has
+// ACKed the same PHY — unless explicitly forced.
+func TestRetuneTrackingAndGatewayGate(t *testing.T) {
+	ks, err := keystore.Mint(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := topo.New()
+	g.Apply(ingest.Event{Kind: ingest.KindInfoHeader, ID: "36C67CE5F7240229FD414B8115A0247E"}, time.Now())
+	const id = "FE94E184243CE79DC2C2C622EECFBECB"
+	g.Apply(ingest.Event{Kind: ingest.KindIdentity, ID: id, Pub: strings.Repeat("AB", 32), SigOK: true}, time.Now())
+
+	var sent []string
+	s := New(g, ks, func(l string) error { sent = append(sent, l); return nil }, "", "")
+	h := s.Handler()
+	post := func(body string) map[string]any {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest("POST", "/api/cmd", strings.NewReader(body)))
+		var resp map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		return resp
+	}
+	const phy = `"freq_hz":906625000,"bw_hz":62500,"sf":7,"cr":5,"sync":77,"preamble":16`
+
+	// Gateway first, nothing ACKed -> refused, nothing sent.
+	if r := post(`{"action":"gwretune",` + phy + `}`); r["ok"] != false {
+		t.Fatalf("gateway retune before any ACK: expected refusal, got %v", r)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("refused gateway retune sent %v", sent)
+	}
+
+	// Remote retune -> recorded with its counter, no ACK yet.
+	if r := post(`{"action":"retune","node":"` + id + `",` + phy + `}`); r["ok"] != true {
+		t.Fatalf("remote retune: %v", r)
+	}
+	rec, ok := s.retuneSnapshot()[id]
+	if !ok || rec.Ack != nil || rec.Phy.SF != 7 || rec.Phy.BwHz != 62500 {
+		t.Fatalf("retune not recorded as pending: %+v ok=%v", rec, ok)
+	}
+
+	// An ACK for another command or a stale counter must not count.
+	s.Console(fmt.Sprintf("[ctrl] ack %s cmd=1 applied=11 provisional=0 counter=%d", id, rec.Ctr))
+	s.Console(fmt.Sprintf("[ctrl] ack %s cmd=6 applied=1 provisional=0 counter=%d", id, rec.Ctr-1))
+	if s.retuneSnapshot()[id].Ack != nil {
+		t.Fatal("unrelated ACK was latched as the retune ACK")
+	}
+	if r := post(`{"action":"gwretune",` + phy + `}`); r["ok"] != false {
+		t.Fatalf("gateway retune with node un-ACKed: expected refusal, got %v", r)
+	}
+
+	// The real ACK is latched (and survives the console ring scrolling past it).
+	s.Console(fmt.Sprintf("[ctrl] ack %s cmd=6 applied=1 provisional=0 counter=%d", id, rec.Ctr))
+	for i := 0; i < maxConsole+5; i++ {
+		s.Console("[hb] filler")
+	}
+	if a := s.retuneSnapshot()[id].Ack; a == nil || *a != 1 {
+		t.Fatalf("retune ACK not latched: %v", a)
+	}
+
+	// A different PHY than the one ACKed is still refused...
+	if r := post(`{"action":"gwretune","freq_hz":906625000,"bw_hz":125000,"sf":7,"cr":5,"sync":77,"preamble":16}`); r["ok"] != false {
+		t.Fatalf("gateway retune to an un-ACKed PHY: expected refusal, got %v", r)
+	}
+	// ...the ACKed one goes through, as console rf commands ending in apply.
+	sent = nil
+	if r := post(`{"action":"gwretune",` + phy + `}`); r["ok"] != true {
+		t.Fatalf("gateway retune after ACK: %v", r)
+	}
+	want := []string{"rf freq 906625000", "rf bw 62.5", "rf sf 7", "rf cr 5", "rf sync 0x4D", "rf preamble 16", "rf apply", "rf show"}
+	if strings.Join(sent, "|") != strings.Join(want, "|") {
+		t.Fatalf("gateway retune lines:\n got %v\nwant %v", sent, want)
+	}
+
+	// Steps are in the feed.
+	var n int
+	for _, e := range s.events {
+		if e.Kind == "retune" {
+			n++
+		}
+	}
+	if n != 3 { // SENT, ACK, GATEWAY retuned
+		t.Fatalf("expected 3 retune feed events, got %d: %+v", n, s.events)
+	}
+}
+
+// A gateway that refuses the ctrlsend (old firmware) marks the retune failed, not "awaiting ACK".
+func TestRetuneRefusedByGateway(t *testing.T) {
+	g := topo.New()
+	g.Apply(ingest.Event{Kind: ingest.KindInfoHeader, ID: "36C67CE5F7240229FD414B8115A0247E"}, time.Now())
+	s := New(g, nil, func(string) error { return nil }, "", "")
+	const id = "A4473FC3984914F27C0E10D43CD7A6A1"
+	s.retuneSent(id, phyJSON{FreqHz: 906625000, BwHz: 62500, SF: 7, CR: 5, Sync: 0x4D, Preamble: 16}, 42)
+	s.Console("usage: ctrlsend <150 or 158 hex chars>")
+	r := s.retuneSnapshot()[id]
+	if r.Err == "" || r.Ack != nil {
+		t.Fatalf("refused retune not marked failed: %+v", r)
+	}
+}
+
+func TestGatewayRetuneForce(t *testing.T) {
+	g := topo.New()
+	g.Apply(ingest.Event{Kind: ingest.KindInfoHeader, ID: "36C67CE5F7240229FD414B8115A0247E"}, time.Now())
+	g.Apply(ingest.Event{Kind: ingest.KindIdentity, ID: "A4473FC3984914F27C0E10D43CD7A6A1", Pub: strings.Repeat("CD", 32), SigOK: true}, time.Now())
+	var sent []string
+	s := New(g, nil, func(l string) error { sent = append(sent, l); return nil }, "", "")
+	if _, err := s.issue(cmdReq{Action: "gwretune", FreqHz: 906625000, BwHz: 250000, SF: 9, CR: 5, Sync: 0x4D, Preamble: 16, Force: true}); err != nil {
+		t.Fatalf("forced gateway retune: %v", err)
+	}
+	if len(sent) != 8 || sent[1] != "rf bw 250" {
+		t.Fatalf("forced gateway retune sent %v", sent)
 	}
 }
