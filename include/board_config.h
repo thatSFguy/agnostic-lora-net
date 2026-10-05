@@ -138,9 +138,10 @@
                                     // Meshtastic US LongFast (906.875) on the US915 raster:
                                     // close, non-overlapping, and clear of the busier lower
                                     // LoRaWAN-uplink area. Network-wide — all nodes must match.
-#define PHY_BW_KHZ        250.0f    // bandwidth
-#define PHY_SF            9         // spreading factor: 5 dB more budget than SF7,
-                                    // texts still ~2 s — the deployment sweet spot
+#define PHY_BW_KHZ        62.5f     // bandwidth. 62.5 kHz + SF7 has the SAME symbol time
+#define PHY_SF            7         // (2.048 ms) as the original 250 kHz + SF9, so airtime and
+                                    // ARQ timing are unchanged; the narrower channel admits less
+                                    // noise. Mesh moved here 2026-10-05 (was BW250/SF9).
 #define PHY_CODING_RATE   5         // 4/5  (RadioLib takes the denominator: 5..8)
 #define PHY_SYNC_WORD     0x4D      // clear of MeshCore 0x12 / Meshtastic 0x2B / LoRaWAN 0x34
 #define PHY_PREAMBLE_SYMS 16        // preamble length in symbols

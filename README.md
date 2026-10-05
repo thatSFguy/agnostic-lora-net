@@ -48,7 +48,7 @@ this node — e.g. to run the **[Reticulum web
 client](https://thatsfguy.github.io/reticulum-webclient/)** for messaging (step
 5) — enable BLE and set its pairing PIN. Node identity is automatic — each
 node generates its own keypair on first boot; there is nothing to pre-share.
-The radio defaults are baked in (**906.625 MHz / BW250 / SF9** — US 915 band), so
+The radio defaults are baked in (**906.625 MHz / BW62.5 / SF7** — US 915 band), so
 freshly flashed boards land on the same channel; retune here if your region needs it.
 
 **4. Power up — that's the mesh.** Nodes discover each other by beacon, measure
@@ -140,7 +140,7 @@ tests (`go test ./...`). Current firmware: **v0.18.0**.
 ```
 platformio.ini            envs: wiscore_rak4631 · xiao_nrf52 · promicro · tracker_t1000_e · heltec_v4 · compile_check · native
 boards/ · variants/       project-local board defs + vendored pin-map variants (RAK / XIAO / Pro Micro / T1000-E / Heltec V4)
-include/board_config.h    per-board SX1262/LR1110 wiring + network-wide PHY (906.625 MHz, BW250, SF9, 22 dBm, sync 0x4D)
+include/board_config.h    per-board SX1262/LR1110 wiring + network-wide PHY (906.625 MHz, BW62.5, SF7, 22 dBm, sync 0x4D)
 include/fs_compat.h       persistence shim: Adafruit LittleFS (nRF52) / core LittleFS (ESP32)
 include/packet.h          on-air frame format (link + network headers)
 radio_hal.*               non-blocking SX1262/LR1110 transport (default SPI, per-board TCXO/RXEN/FEM)
